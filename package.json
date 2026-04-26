@@ -1,0 +1,35 @@
+{
+  "name": "neatlogs-typescript-examples",
+  "version": "1.0.0",
+  "description": "NeatLogs TypeScript SDK examples",
+  "scripts": {
+    "build": "tsc",
+    "example:openai": "npx tsx --env-file=.env examples/openai_multiagent/main.ts",
+    "example:anthropic": "npx tsx --env-file=.env examples/anthropic_multiagent/main.ts",
+    "example:all-span-kinds": "npx tsx --env-file=.env examples/all_span_kinds/main.ts",
+    "example:gobblecube": "npx tsx --env-file=.env examples/gobblecube/main.ts"
+  },
+  "keywords": [],
+  "author": "NeatLogs",
+  "license": "MIT",
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.215.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.215.0",
+    "@opentelemetry/instrumentation": "^0.215.0",
+    "@opentelemetry/instrumentation-openai": "^0.13.0",
+    "@opentelemetry/resources": "^2.7.0",
+    "@opentelemetry/sdk-node": "^0.215.0",
+    "@opentelemetry/sdk-trace-base": "^2.7.0",
+    "@opentelemetry/sdk-trace-node": "^2.7.0",
+    "@opentelemetry/semantic-conventions": "^1.40.0",
+    "dotenv": "^17.4.2",
+    "openai": "^6.34.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.20.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
