@@ -1,91 +1,72 @@
 /**
  * Entry point for the OpenAI investment research workflow.
- * TypeScript port of: examples/sdk_examples/openai_multiagent/main.py
  *
  * Custom TypeScript orchestration — no framework.
- * spanWrap() calls create the WORKFLOW + AGENT span hierarchy.
+ * span() wrappers create the WORKFLOW + AGENT span hierarchy.
  *
  * Usage:
- *   npx ts-node src/main.ts
- *   npx ts-node src/main.ts "Tesla"
+ *     npx tsx examples/openai_multiagent/main.ts
+ *     npx tsx examples/openai_multiagent/main.ts "Tesla"
  *
  * Required env vars:
- *   NEATLOGS_API_KEY
- *   NEATLOGS_ENDPOINT
- *   AZURE_OPENAI_API_KEY
- *   AZURE_OPENAI_ENDPOINT
- *   AZURE_OPENAI_DEPLOYMENT_NAME
- *   AZURE_OPENAI_API_VERSION
+ *     NEATLOGS_API_KEY
+ *     AZURE_OPENAI_ENDPOINT
+ *     AZURE_OPENAI_API_KEY
+ *     AZURE_LLM_DEPLOYMENT (or AZURE_OPENAI_DEPLOYMENT_NAME as fallback)
  */
 
-import * as dotenv from "dotenv";
-dotenv.config();
+import 'dotenv/config';
 
-import * as neatlogs from "../../src/neatlogs";
-import { plannerAgent, researcherAgent, analystAgent, reporterAgent } from "./agents";
+// Deterministic log env vars — set before init
+process.env.NEATLOGS_LOG_RAW_SPANS = 'true';
+process.env.NEATLOGS_LOG_SPANS = 'true';
+process.env.NEATLOGS_LOG_RAW_SPANS_FILE = 'logs/openai_multiagent_raw_spans.jsonl';
+process.env.NEATLOGS_LOG_SPANS_FILE = 'logs/openai_multiagent_processed_spans.jsonl';
 
-// ---------------------------------------------------------------------------
-// Initialize NeatLogs SDK
-// ---------------------------------------------------------------------------
-
-neatlogs.init({
-  apiKey: process.env.NEATLOGS_API_KEY,
-  endpoint: process.env.NEATLOGS_ENDPOINT || "https://staging-cloud.neatlogs.com",
-  workflowName: "openai-investment-research",
-  tags: ["openai", "investment", "research", "typescript"],
-  debug: true,
-});
-
-// ---------------------------------------------------------------------------
-// Workflow — wraps the full multi-agent pipeline
-// ---------------------------------------------------------------------------
-
-const runInvestmentResearch = neatlogs.spanWrap(
-  { kind: "WORKFLOW", name: "investment_research_workflow" },
-  async (company: string): Promise<string> => {
-    console.log(`\n=== Investment Research: ${company} ===\n`);
-
-    console.log("--- Planner: generating research questions ---");
-    const questions = await plannerAgent(company);
-    questions.forEach((q, i) => console.log(`  ${i + 1}. ${q}`));
-
-    console.log("\n--- Researcher: gathering findings ---");
-    const findings = await researcherAgent(questions);
-
-    console.log("\n--- Analyst: analyzing findings ---");
-    const analysis = await analystAgent(company, findings);
-
-    console.log("\n--- Reporter: writing investment brief ---");
-    const report = await reporterAgent(company, analysis);
-
-    return report;
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+import { init, span, flush, shutdown } from 'neatlogs';
 
 async function main() {
-  const company = process.argv[2] ?? "NVIDIA";
+  await init({
+    apiKey: process.env.NEATLOGS_API_KEY ?? '',
+    endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
+    workflowName: 'openai-investment-research',
+    tags: ['openai', 'investment', 'research'],
+    instrumentations: ['openai'],
+    debug: true,
+  });
 
-  try {
-    const report = await runInvestmentResearch(company);
-    console.log("\n=== Final Report ===");
-    console.log(report);
-  } catch (err) {
-    console.error("Workflow failed:", err);
-    process.exitCode = 1;
-  } finally {
-    console.log("\n[neatlogs] Flushing spans...");
-    await neatlogs.flush();
-    // Second flush ensures the completion marker (emitted during root span onEnd)
-    // is exported — it queues into BatchSpanProcessor after the first flush starts.
-    await new Promise((r) => setTimeout(r, 500));
-    await neatlogs.flush();
-    await neatlogs.shutdown();
-    console.log("[neatlogs] Done.");
-  }
+  // Import agents after init so provider instrumentation is active
+  const { plannerAgent, researcherAgent, analystAgent, reporterAgent } = await import('./agents.js');
+
+  const investmentResearchWorkflow = span(
+    { kind: 'WORKFLOW', name: 'investment_research_workflow' },
+    async (company: string): Promise<string> => {
+      console.log(`\n=== Investment Research: ${company} ===\n`);
+
+      console.log('--- Planner: generating research questions ---');
+      const questions = await plannerAgent(company);
+      questions.forEach((q: string, i: number) => console.log(`  ${i + 1}. ${q}`));
+
+      console.log('\n--- Researcher: gathering findings ---');
+      const findings = await researcherAgent(questions);
+
+      console.log('\n--- Analyst: analyzing findings ---');
+      const analysis = await analystAgent(company, findings);
+
+      console.log('\n--- Reporter: writing investment brief ---');
+      const report = await reporterAgent(company, analysis);
+
+      return report;
+    },
+  );
+
+  const company = process.argv[2] ?? 'NVIDIA';
+  await investmentResearchWorkflow(company);
+  await flush();
+  await shutdown();
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

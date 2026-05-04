@@ -1,363 +1,259 @@
 /**
  * Agent functions for the OpenAI investment research workflow.
- * TypeScript port of: examples/sdk_examples/openai_multiagent/agents.py
  *
  * Agents:
- *   - plannerAgent    (Azure OpenAI, non-streaming) — generates 3 research questions
- *   - researcherAgent (Azure OpenAI, tool-calling)  — LLM calls web_search tool
- *   - analystAgent    (Azure OpenAI, streaming)     — identifies investment themes
- *   - reporterAgent   (Azure OpenAI, streaming)     — writes final investment brief
+ *   - Planner       (Azure OpenAI AZURE_LLM_DEPLOYMENT, non-streaming) — generates 3 research questions
+ *   - Researcher    (Azure OpenAI AZURE_LLM_DEPLOYMENT, tool-calling)  — LLM calls web_search tool
+ *   - Analyst       (Azure OpenAI AZURE_LLM_DEPLOYMENT, streaming)     — identifies investment themes
+ *   - Reporter      (Azure OpenAI AZURE_LLM_DEPLOYMENT, streaming)     — writes final investment brief
  */
 
-import OpenAI, { AzureOpenAI } from "openai";
-import {
-  spanWrap,
-  withTrace,
-  log,
-  PromptTemplate,
-  UserPromptTemplate,
-} from "../../src/neatlogs";
+import { AzureOpenAI } from 'openai';
+import { span, trace, log, SystemPromptTemplate, UserPromptTemplate } from 'neatlogs';
 
 // ---------------------------------------------------------------------------
-// Azure OpenAI client
-// Using AzureOpenAI class specifically so the OpenAI instrumentation
-// correctly identifies this as an Azure endpoint.
+// Lazy client factory — client is created after init() has been called
 // ---------------------------------------------------------------------------
 
-const client = new AzureOpenAI({
-  apiKey: process.env.AZURE_OPENAI_API_KEY,
-  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
-  deployment: process.env.AZURE_OPENAI_DEPLOYMENT_NAME,
-  apiVersion: process.env.AZURE_OPENAI_API_VERSION || "2025-01-01-preview",
-});
+let _client: AzureOpenAI | null = null;
 
-const DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT_NAME!;
+function getClient(): AzureOpenAI {
+  if (!_client) {
+    _client = new AzureOpenAI({
+      endpoint: process.env.AZURE_OPENAI_ENDPOINT!,
+      apiKey: process.env.AZURE_OPENAI_API_KEY!,
+      apiVersion: process.env.AZURE_OPENAI_API_VERSION ?? '2024-08-01-preview',
+    });
+  }
+  return _client;
+}
+
+function getDeployment(): string {
+  return (
+    process.env.AZURE_LLM_DEPLOYMENT ??
+    process.env.AZURE_OPENAI_DEPLOYMENT_NAME ??
+    'gpt-4o'
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Prompt templates
 // ---------------------------------------------------------------------------
 
-const _plannerSys = new PromptTemplate([
-  {
-    role: "system",
-    content:
-      "You are a financial research planner. Given a company or stock, return exactly 3 research questions as a JSON array of strings. No other text.",
-  },
-]);
+const plannerSys = new SystemPromptTemplate([{
+  role: 'system',
+  content: 'You are a financial research planner. Given a company or stock, return exactly 3 research questions as a JSON array of strings. No other text.',
+}]);
+const plannerUser = new UserPromptTemplate([{ role: 'user', content: 'Company: {{company}}' }]);
 
-const _plannerUser = new UserPromptTemplate([
-  { role: "user", content: "Company: {{company}}" },
-]);
+const researcherSys = new SystemPromptTemplate([{
+  role: 'system',
+  content: 'You are a web research assistant. Use the web_search tool to find information for the given question, then summarize the findings as concise bullet points relevant to investment analysis.',
+}]);
+const researcherUser = new UserPromptTemplate([{
+  role: 'user',
+  content: 'Research question: {{question}}',
+}]);
 
-const _researcherSys = new PromptTemplate([
-  {
-    role: "system",
-    content:
-      "You are a web research assistant. Use the web_search tool to find information for the given question, then summarize the findings as concise bullet points relevant to investment analysis.",
-  },
-]);
+const analystSys = new SystemPromptTemplate([{
+  role: 'system',
+  content: 'You are a senior investment analyst. Identify key investment themes, risks, and opportunities from the research findings.',
+}]);
+const analystUser = new UserPromptTemplate([{
+  role: 'user',
+  content: 'Company: {{company}}\n\nResearch findings:\n{{findings}}\n\nProvide a structured analysis.',
+}]);
 
-const _researcherUser = new UserPromptTemplate([
-  { role: "user", content: "Research question: {{question}}" },
-]);
-
-const _analystSys = new PromptTemplate([
-  {
-    role: "system",
-    content:
-      "You are a senior investment analyst. Identify key investment themes, risks, and opportunities from the research findings.",
-  },
-]);
-
-const _analystUser = new UserPromptTemplate([
-  {
-    role: "user",
-    content:
-      "Company: {{company}}\n\nResearch findings:\n{{findings}}\n\nProvide a structured analysis.",
-  },
-]);
-
-const _reporterSys = new PromptTemplate([
-  {
-    role: "system",
-    content:
-      "You are an investment report writer. Write a clear, professional investment brief with an executive summary, key findings, risks, and recommendation. Use markdown.",
-  },
-]);
-
-const _reporterUser = new UserPromptTemplate([
-  {
-    role: "user",
-    content:
-      "Company: {{company}}\n\nAnalysis:\n{{analysis}}\n\nWrite a complete investment brief.",
-  },
-]);
+const reporterSys = new SystemPromptTemplate([{
+  role: 'system',
+  content: 'You are an investment report writer. Write a clear, professional investment brief with an executive summary, key findings, risks, and recommendation. Use markdown.',
+}]);
+const reporterUser = new UserPromptTemplate([{
+  role: 'user',
+  content: 'Company: {{company}}\n\nAnalysis:\n{{analysis}}\n\nWrite a complete investment brief.',
+}]);
 
 // ---------------------------------------------------------------------------
 // Tool definition (passed to the LLM)
 // ---------------------------------------------------------------------------
 
-const WEB_SEARCH_TOOL: OpenAI.ChatCompletionTool = {
-  type: "function",
+const WEB_SEARCH_TOOL = {
+  type: 'function' as const,
   function: {
-    name: "web_search",
-    description: "Search the web for current information on a topic.",
+    name: 'web_search',
+    description: 'Search the web for current information on a topic.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        query: { type: "string", description: "The search query." },
+        query: { type: 'string', description: 'The search query.' },
       },
-      required: ["query"],
+      required: ['query'],
     },
   },
 };
 
 // ---------------------------------------------------------------------------
-// Tool implementation (mocked) — wrapped with a TOOL span
+// Tool implementation — called only when the LLM requests it
 // ---------------------------------------------------------------------------
 
-const webSearch = spanWrap(
-  { kind: "TOOL", name: "web_search", toolName: "web_search" },
+const webSearch = span(
+  { kind: 'TOOL', name: 'web_search' },
   async (query: string): Promise<string> => {
-    // Mocked search results — mirrors the Python example
     return (
       `- Mock result 1 for '${query}': Strong revenue growth and expanding market share.\n` +
       `- Mock result 2 for '${query}': Recent product launches receiving positive analyst coverage.\n` +
       `- Mock result 3 for '${query}': Management reaffirmed full-year guidance above consensus.`
     );
-  }
+  },
 );
 
 // ---------------------------------------------------------------------------
-// Planner agent — non-streaming, returns JSON array of 3 questions
+// Agents
 // ---------------------------------------------------------------------------
 
-export const plannerAgent = spanWrap(
-  {
-    kind: "AGENT",
-    name: "planner",
-    role: "Research Planner",
-    goal: "Generate targeted research questions",
-  },
+export const plannerAgent = span(
+  { kind: 'AGENT', name: 'planner', role: 'Research Planner', goal: 'Generate targeted research questions' },
   async (company: string): Promise<string[]> => {
-    const msgs = [
-      ..._plannerSys.compile({}),
-      ..._plannerUser.compile({ company }),
-    ];
-
-    const response = await withTrace(
-      {
-        name: "plan_questions",
-        kind: "LLM",
-        promptTemplate: _plannerSys,
-        userPromptTemplate: _plannerUser,
+    return trace(
+      { name: 'plan_questions', kind: 'CHAIN', promptTemplate: plannerSys, userPromptTemplate: plannerUser },
+      async () => {
+        const client = getClient();
+        const deployment = getDeployment();
+        const sysMsgs = plannerSys.compile() as Array<{ role: string; content: string }>;
+        const userMsgs = plannerUser.compile({ company }) as Array<{ role: string; content: string }>;
+        const response = await client.chat.completions.create({
+          model: deployment,
+          messages: [...sysMsgs, ...userMsgs] as any,
+        });
+        const raw = response.choices[0].message.content?.trim() ?? '[]';
+        let questions: string[];
+        try {
+          questions = JSON.parse(raw);
+        } catch {
+          questions = raw.split('\n').filter(Boolean).map((q: string) => q.replace(/^[-\d. ]+/, '').trim());
+        }
+        questions = questions.slice(0, 3);
+        log('planner generated {count} questions for {company}', { count: questions.length, company });
+        return questions;
       },
-      async () =>
-        client.chat.completions.create({
-          model: DEPLOYMENT,
-          messages: msgs as OpenAI.ChatCompletionMessageParam[],
-        })
     );
-
-    const raw = response.choices[0].message.content?.trim() ?? "";
-
-    let questions: string[];
-    try {
-      questions = JSON.parse(raw) as string[];
-    } catch {
-      questions = raw
-        .split("\n")
-        .map((q) => q.replace(/^[-\d.)\s]+/, "").trim())
-        .filter((q) => q.length > 0);
-    }
-
-    questions = questions.slice(0, 3);
-    log("planner generated {count} questions for {company}", {
-      count: questions.length,
-      company,
-    });
-
-    return questions;
-  }
+  },
 );
 
-// ---------------------------------------------------------------------------
-// Researcher agent — tool-calling
-// ---------------------------------------------------------------------------
-
-export const researcherAgent = spanWrap(
-  {
-    kind: "AGENT",
-    name: "researcher",
-    role: "Web Researcher",
-    goal: "Find current information on each question",
-  },
+export const researcherAgent = span(
+  { kind: 'AGENT', name: 'researcher', role: 'Web Researcher', goal: 'Find current information on each question' },
   async (questions: string[]): Promise<string> => {
     const allSummaries: string[] = [];
-
     for (const question of questions) {
-      log("researching question: {question}", { question });
-
-      const summary = await withTrace(
-        {
-          name: "research_question",
-          kind: "LLM",
-          promptTemplate: _researcherSys,
-          userPromptTemplate: _researcherUser,
-        },
+      log('researching question: {question}', { question });
+      const summary = await trace(
+        { name: 'research_question', kind: 'CHAIN', promptTemplate: researcherSys, userPromptTemplate: researcherUser },
         async () => {
-          const msgs: OpenAI.ChatCompletionMessageParam[] = [
-            ..._researcherSys.compile({}),
-            ..._researcherUser.compile({ question }),
-          ] as OpenAI.ChatCompletionMessageParam[];
+          const client = getClient();
+          const deployment = getDeployment();
+          const sysMsgs = researcherSys.compile() as Array<{ role: string; content: string }>;
+          const userMsgs = researcherUser.compile({ question }) as Array<{ role: string; content: string }>;
+          const msgs: any[] = [...sysMsgs, ...userMsgs];
 
           // First LLM call — model may request the web_search tool
           const response = await client.chat.completions.create({
-            model: DEPLOYMENT,
+            model: deployment,
             messages: msgs,
             tools: [WEB_SEARCH_TOOL],
-            tool_choice: "auto",
+            tool_choice: 'auto',
           });
-
           const aiMsg = response.choices[0].message;
-          msgs.push(aiMsg as OpenAI.ChatCompletionMessageParam);
+          msgs.push(aiMsg);
 
           // Execute any tool calls the model requested
           if (aiMsg.tool_calls && aiMsg.tool_calls.length > 0) {
             for (const tc of aiMsg.tool_calls) {
-              if (tc.type !== "function") continue;
-              const args = JSON.parse(tc.function.arguments) as {
-                query: string;
-              };
-              log("tool call: web_search query={query}", {
-                query: args.query,
-              });
+              if (!('function' in tc)) continue;
+              const args = JSON.parse(tc.function.arguments);
+              log('tool call: web_search query={query}', { query: args.query });
               const result = await webSearch(args.query);
-              log("web_search returned {chars} chars", {
-                chars: result.length,
-              });
+              log('web_search returned {chars} chars', { chars: result.length });
               msgs.push({
-                role: "tool",
+                role: 'tool',
                 tool_call_id: tc.id,
                 content: result,
               });
             }
 
             // Second LLM call — model summarizes the tool results
-            const final = await client.chat.completions.create({
-              model: DEPLOYMENT,
+            const finalResp = await client.chat.completions.create({
+              model: deployment,
               messages: msgs,
             });
-            return final.choices[0].message.content ?? "";
-          } else {
-            return aiMsg.content ?? "";
+            return finalResp.choices[0].message.content ?? '';
           }
-        }
+          return aiMsg.content ?? '';
+        },
       );
-
       allSummaries.push(`Q: ${question}\n${summary}`);
     }
-
-    return allSummaries.join("\n\n");
-  }
+    return allSummaries.join('\n\n');
+  },
 );
 
-// ---------------------------------------------------------------------------
-// Analyst agent — streaming
-// ---------------------------------------------------------------------------
-
-export const analystAgent = spanWrap(
-  {
-    kind: "AGENT",
-    name: "analyst",
-    role: "Investment Analyst",
-    goal: "Identify investment themes and risks",
-  },
+export const analystAgent = span(
+  { kind: 'AGENT', name: 'analyst', role: 'Investment Analyst', goal: 'Identify investment themes and risks' },
   async (company: string, findings: string): Promise<string> => {
-    const msgs = [
-      ..._analystSys.compile({}),
-      ..._analystUser.compile({ company, findings }),
-    ];
-
-    const full = await withTrace(
-      {
-        name: "analyze_findings",
-        kind: "LLM",
-        promptTemplate: _analystSys,
-        userPromptTemplate: _analystUser,
-      },
+    return trace(
+      { name: 'analyze_findings', kind: 'CHAIN', promptTemplate: analystSys, userPromptTemplate: analystUser },
       async () => {
+        const client = getClient();
+        const deployment = getDeployment();
+        const sysMsgs = analystSys.compile() as Array<{ role: string; content: string }>;
+        const userMsgs = analystUser.compile({ company, findings }) as Array<{ role: string; content: string }>;
         const stream = await client.chat.completions.create({
-          model: DEPLOYMENT,
-          messages: msgs as OpenAI.ChatCompletionMessageParam[],
+          model: deployment,
+          messages: [...sysMsgs, ...userMsgs] as any,
           stream: true,
-          stream_options: { include_usage: true },
         });
-
-        console.log("\n--- Analyst (streaming) ---");
-        let accumulated = "";
+        process.stdout.write('\n--- Analyst (streaming) ---\n');
+        let full = '';
         for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta?.content;
-          if (delta) {
-            process.stdout.write(delta);
-            accumulated += delta;
+          if (chunk.choices?.[0]?.delta?.content) {
+            const text = chunk.choices[0].delta.content;
+            process.stdout.write(text);
+            full += text;
           }
         }
-        console.log("\n---------------------------\n");
-        return accumulated;
-      }
+        process.stdout.write('\n---------------------------\n\n');
+        return full;
+      },
     );
-
-    return full;
-  }
+  },
 );
 
-// ---------------------------------------------------------------------------
-// Reporter agent — streaming
-// ---------------------------------------------------------------------------
-
-export const reporterAgent = spanWrap(
-  {
-    kind: "AGENT",
-    name: "reporter",
-    role: "Report Writer",
-    goal: "Write the final investment brief",
-  },
+export const reporterAgent = span(
+  { kind: 'AGENT', name: 'reporter', role: 'Report Writer', goal: 'Write the final investment brief' },
   async (company: string, analysis: string): Promise<string> => {
-    const msgs = [
-      ..._reporterSys.compile({}),
-      ..._reporterUser.compile({ company, analysis }),
-    ];
-
-    const full = await withTrace(
-      {
-        name: "write_report",
-        kind: "LLM",
-        promptTemplate: _reporterSys,
-        userPromptTemplate: _reporterUser,
-      },
+    return trace(
+      { name: 'write_report', kind: 'CHAIN', promptTemplate: reporterSys, userPromptTemplate: reporterUser },
       async () => {
+        const client = getClient();
+        const deployment = getDeployment();
+        const sysMsgs = reporterSys.compile() as Array<{ role: string; content: string }>;
+        const userMsgs = reporterUser.compile({ company, analysis }) as Array<{ role: string; content: string }>;
         const stream = await client.chat.completions.create({
-          model: DEPLOYMENT,
-          messages: msgs as OpenAI.ChatCompletionMessageParam[],
+          model: deployment,
+          messages: [...sysMsgs, ...userMsgs] as any,
           stream: true,
-          stream_options: { include_usage: true },
         });
-
-        console.log("\n--- Investment Brief (streaming) ---");
-        let accumulated = "";
+        process.stdout.write('\n--- Investment Brief (streaming) ---\n');
+        let full = '';
         for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta?.content;
-          if (delta) {
-            process.stdout.write(delta);
-            accumulated += delta;
+          if (chunk.choices?.[0]?.delta?.content) {
+            const text = chunk.choices[0].delta.content;
+            process.stdout.write(text);
+            full += text;
           }
         }
-        console.log("\n------------------------------------\n");
-        return accumulated;
-      }
+        process.stdout.write('\n------------------------------------\n\n');
+        return full;
+      },
     );
-
-    return full;
-  }
+  },
 );
