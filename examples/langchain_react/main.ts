@@ -43,6 +43,8 @@ import {
   UserPromptTemplate,
 } from 'neatlogs';
 
+const workflowPrefix = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
+
 // ---------------------------------------------------------------------------
 // Mocked knowledge-base data
 // ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ async function main(): Promise<void> {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
-    workflowName: 'langchain-react-agent',
+    workflowName: `${workflowPrefix}langchain-react-agent`,
     tags: ['langchain', 'react', 'research', 'retriever'],
     instrumentations: ['langchain'],
     debug: true,
@@ -248,7 +250,7 @@ async function main(): Promise<void> {
   // Workflow
   // ---------------------------------------------------------------------------
   const runWorkflow = span(
-    { kind: 'WORKFLOW', name: 'react_research_workflow' },
+    { kind: 'WORKFLOW', name: `${workflowPrefix}react_research_workflow` },
     async (topic: string): Promise<string> => {
       // Step 1: ReAct agent gathers information using tools
       const findings = await trace(

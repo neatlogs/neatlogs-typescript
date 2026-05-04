@@ -25,11 +25,13 @@ process.env.NEATLOGS_LOG_SPANS_FILE = 'logs/openai_multiagent_processed_spans.js
 
 import { init, span, flush, shutdown } from 'neatlogs';
 
+const workflowPrefix = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
+
 async function main() {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
-    workflowName: 'openai-investment-research',
+    workflowName: `${workflowPrefix}openai-investment-research`,
     tags: ['openai', 'investment', 'research'],
     instrumentations: ['openai'],
     debug: true,
@@ -39,7 +41,7 @@ async function main() {
   const { plannerAgent, researcherAgent, analystAgent, reporterAgent } = await import('./agents.js');
 
   const investmentResearchWorkflow = span(
-    { kind: 'WORKFLOW', name: 'investment_research_workflow' },
+    { kind: 'WORKFLOW', name: `${workflowPrefix}investment_research_workflow` },
     async (company: string): Promise<string> => {
       console.log(`\n=== Investment Research: ${company} ===\n`);
 

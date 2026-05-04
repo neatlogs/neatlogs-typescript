@@ -40,11 +40,13 @@ import {
   shutdown,
 } from 'neatlogs';
 
+const workflowPrefix = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
+
 async function main(): Promise<void> {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
-    workflowName: 'langgraph-multiagent',
+    workflowName: `${workflowPrefix}langgraph-multiagent`,
     tags: ['langgraph', 'multi-provider', 'research'],
     instrumentations: ['langchain'],
     debug: true,
@@ -58,7 +60,7 @@ async function main(): Promise<void> {
   // Workflow
   // ---------------------------------------------------------------------------
   const runWorkflow = span(
-    { kind: 'WORKFLOW', name: 'research_workflow' },
+    { kind: 'WORKFLOW', name: `${workflowPrefix}research_workflow` },
     async (query: string, stream: boolean = false): Promise<string> => {
       const initialState = {
         query,

@@ -22,9 +22,15 @@
 import { readFile, access } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { config as loadEnv } from 'dotenv';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
+
+loadEnv({ path: resolve(ROOT, '.env'), quiet: true });
+
+const WORKFLOW_PREFIX = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
+const withWorkflowPrefix = (name) => `${WORKFLOW_PREFIX}${name}`;
 
 // ── CLI parsing ─────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -75,28 +81,28 @@ for (let i = 0; i < argv.length; i++) {
 const SPECS = [
   {
     name: 'openai_multiagent',
-    workflowSpan: 'investment_research_workflow',
+    workflowSpan: withWorkflowPrefix('investment_research_workflow'),
     agents: ['planner', 'researcher', 'analyst', 'reporter'],
     tools: ['web_search'],
     minSpans: 5,
   },
   {
     name: 'anthropic_multiagent',
-    workflowSpan: 'code_review_workflow',
+    workflowSpan: withWorkflowPrefix('code_review_workflow'),
     agents: ['reviewer', 'fixer', 'tester', 'documenter'],
     tools: ['check_syntax'],
     minSpans: 5,
   },
   {
     name: 'google_genai_multiagent',
-    workflowSpan: 'blog_creation_workflow',
+    workflowSpan: withWorkflowPrefix('blog_creation_workflow'),
     agents: ['ideation', 'writer', 'editor', 'finalizer'],
     tools: ['web_search'],
     minSpans: 5,
   },
   {
     name: 'langchain_react',
-    workflowSpan: 'react_research_workflow',
+    workflowSpan: withWorkflowPrefix('react_research_workflow'),
     agents: [],
     tools: [],
     chains: ['react_agent', 'report_writer'],
@@ -104,7 +110,7 @@ const SPECS = [
   },
   {
     name: 'langgraph_multiagent',
-    workflowSpan: 'research_workflow',
+    workflowSpan: withWorkflowPrefix('research_workflow'),
     agents: [],
     tools: [],
     chains: ['supervisor', 'web_researcher', 'wiki_researcher', 'arxiv_researcher', 'synthesizer', 'report_writer'],
@@ -112,7 +118,7 @@ const SPECS = [
   },
   {
     name: 'marketing_strategy_demo',
-    workflowSpan: 'Marketing Strategy Workflow',
+    workflowSpan: withWorkflowPrefix('Marketing Strategy Workflow'),
     agents: ['Lead Market Analyst', 'Chief Marketing Strategist', 'Creative Content Creator'],
     tools: ['Web Search Google', 'Analyze Website Content'],
     chains: ['research_task', 'project_understanding_task', 'marketing_strategy_task', 'campaign_idea_task', 'copy_creation_task'],
@@ -120,7 +126,7 @@ const SPECS = [
   },
   {
     name: 'reasoning_model_workflow',
-    workflowSpan: 'reasoning_verification_workflow',
+    workflowSpan: withWorkflowPrefix('reasoning_verification_workflow'),
     agents: ['openai_reasoning_agent', 'openai_full_params_agent', 'anthropic_thinking_agent', 'langchain_openai_agent', 'gemini_async_agent'],
     tools: [],
     chains: ['o4_mini_reasoning', 'gpt4o_full_params', 'claude_extended_thinking', 'langchain_azure_openai', 'gemini_flash_streaming'],

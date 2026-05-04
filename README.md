@@ -653,6 +653,18 @@ node scripts/run-original7-examples.mjs --only openai_multiagent --only anthropi
 node scripts/run-original7-examples.mjs --timeout 180000
 ```
 
+To make a run easy to identify in the NeatLogs UI, set `NEATLOGS_WORKFLOW_PREFIX`. The original-seven examples prepend this value to both the SDK `workflowName` and the root WORKFLOW span name:
+
+```bash
+NEATLOGS_WORKFLOW_PREFIX="typescript-original7-$(date +%Y%m%d)-" node scripts/run-original7-examples.mjs --timeout 300000
+```
+
+Use the same prefix when verifying that run's logs:
+
+```bash
+NEATLOGS_WORKFLOW_PREFIX="typescript-original7-$(date +%Y%m%d)-" node scripts/verify-original7-logs.mjs
+```
+
 Terminal logs are saved to `logs/<example>_terminal.log`. Raw and processed JSONL span logs are saved by each example to:
 
 ```

@@ -22,6 +22,8 @@ process.env.NEATLOGS_LOG_RAW_SPANS_FILE = 'logs/google_genai_multiagent_raw_span
 process.env.NEATLOGS_LOG_SPANS_FILE = 'logs/google_genai_multiagent_processed_spans.jsonl';
 
 import { init, span, trace, log, flush, shutdown, SystemPromptTemplate, UserPromptTemplate } from 'neatlogs';
+
+const workflowPrefix = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
 import { GoogleGenAI, Type } from '@google/genai';
 import type { Content, FunctionDeclaration, GenerateContentConfig } from '@google/genai';
 
@@ -352,14 +354,14 @@ async function main() {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
-    workflowName: 'google-genai-content-creation',
+    workflowName: `${workflowPrefix}google-genai-content-creation`,
     tags: ['google-genai', 'content', 'blog'],
     instrumentations: ['google_genai'],
     debug: true,
   });
 
   const blogCreationWorkflow = span(
-    { kind: 'WORKFLOW', name: 'blog_creation_workflow' },
+    { kind: 'WORKFLOW', name: `${workflowPrefix}blog_creation_workflow` },
     async (topic: string): Promise<string> => {
       console.log(`\n=== Blog Creation: ${topic} ===\n`);
 

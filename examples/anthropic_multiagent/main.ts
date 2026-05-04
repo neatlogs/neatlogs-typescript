@@ -25,6 +25,8 @@ process.env.NEATLOGS_LOG_SPANS_FILE = 'logs/anthropic_multiagent_processed_spans
 
 import { init, span, trace, log, flush, shutdown, SystemPromptTemplate, UserPromptTemplate } from 'neatlogs';
 
+const workflowPrefix = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
+
 // ---------------------------------------------------------------------------
 // Lazy Bedrock client factory — created after init() so instrumentation is active
 // ---------------------------------------------------------------------------
@@ -416,14 +418,14 @@ async function main() {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
-    workflowName: 'anthropic-code-review',
+    workflowName: `${workflowPrefix}anthropic-code-review`,
     tags: ['anthropic', 'code-review', 'python'],
     instrumentations: ['anthropic'],
     debug: true,
   });
 
   const codeReviewWorkflow = span(
-    { kind: 'WORKFLOW', name: 'code_review_workflow' },
+    { kind: 'WORKFLOW', name: `${workflowPrefix}code_review_workflow` },
     async (code: string): Promise<Record<string, any>> => {
       console.log('\n=== Code Review Pipeline ===\n');
 

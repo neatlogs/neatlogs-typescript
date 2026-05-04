@@ -51,6 +51,8 @@ import {
   UserPromptTemplate,
 } from 'neatlogs';
 
+const workflowPrefix = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
+
 // ---------------------------------------------------------------------------
 // Mock mode toggle
 // ---------------------------------------------------------------------------
@@ -223,7 +225,7 @@ async function main(): Promise<void> {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
-    workflowName: 'Marketing Strategy Demo',
+    workflowName: `${workflowPrefix}Marketing Strategy Demo`,
     tags: ['demo', 'marketing-strategy'],
     instrumentations: ['openai'],
     debug: true,
@@ -355,7 +357,7 @@ async function main(): Promise<void> {
   // Pipeline: Marketing Strategy Workflow
   // ---------------------------------------------------------------------------
   const runMarketingPipeline = span(
-    { kind: 'WORKFLOW', name: 'Marketing Strategy Workflow' },
+    { kind: 'WORKFLOW', name: `${workflowPrefix}Marketing Strategy Workflow` },
     async (inputs: typeof DEMO_INPUTS): Promise<AdCopy> => {
       const { customer_domain, project_description } = inputs;
 

@@ -35,6 +35,8 @@ process.env.NEATLOGS_LOG_SPANS_FILE = 'logs/reasoning_model_workflow_processed_s
 
 import { init, span, trace, flush, shutdown, SystemPromptTemplate, UserPromptTemplate } from 'neatlogs';
 
+const workflowPrefix = process.env.NEATLOGS_WORKFLOW_PREFIX ?? '';
+
 const PROBLEM =
   'A bat and a ball cost $1.10 in total. ' +
   'The bat costs $1.00 more than the ball. ' +
@@ -340,14 +342,14 @@ async function main() {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
-    workflowName: 'reasoning-model-verification',
+    workflowName: `${workflowPrefix}reasoning-model-verification`,
     tags: ['reasoning', 'openai', 'anthropic', 'params-verification'],
     instrumentations: ['openai', 'anthropic', 'langchain', 'google_genai'],
     debug: true,
   });
 
   const verificationWorkflow = span(
-    { kind: 'WORKFLOW', name: 'reasoning_verification_workflow' },
+    { kind: 'WORKFLOW', name: `${workflowPrefix}reasoning_verification_workflow` },
     async (): Promise<void> => {
       console.log(`\nProblem: ${PROBLEM}\n`);
 

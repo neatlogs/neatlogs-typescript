@@ -7,13 +7,16 @@ const ROOT = resolve(__dirname, '../..');
 const SCRIPT = resolve(ROOT, 'scripts/verify-original7-logs.mjs');
 const TEST_LOGS_DIR = resolve(ROOT, 'tests/.tmp-verify-logs');
 
-function run(args: string): { stdout: string; stderr: string; exitCode: number } {
+function run(
+  args: string,
+  env: NodeJS.ProcessEnv = {},
+): { stdout: string; stderr: string; exitCode: number } {
   try {
     const stdout = execSync(`node ${SCRIPT} ${args}`, {
       cwd: ROOT,
       encoding: 'utf8',
       timeout: 10_000,
-      env: { ...process.env },
+      env: { ...process.env, NEATLOGS_WORKFLOW_PREFIX: '', ...env },
     });
     return { stdout, stderr: '', exitCode: 0 };
   } catch (err: any) {
@@ -189,6 +192,43 @@ describe('verify-original7-logs.mjs', () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain('Using raw spans');
     expect(stdout).toContain('PASS');
+  });
+
+  it('honors NEATLOGS_WORKFLOW_PREFIX for identifiable runs', () => {
+    const dir = resolve(TEST_LOGS_DIR, 'prefixed-workflow');
+    mkdirSync(dir, { recursive: true });
+
+    const spans = [
+      {
+        name: 'ts-visible-investment_research_workflow',
+        traceId: 'prefixed123',
+        attributes: { 'neatlogs.span.kind': 'WORKFLOW' },
+      },
+      { name: 'planner', traceId: 'prefixed123', attributes: { 'neatlogs.span.kind': 'AGENT' } },
+      { name: 'researcher', traceId: 'prefixed123', attributes: { 'neatlogs.span.kind': 'AGENT' } },
+      { name: 'analyst', traceId: 'prefixed123', attributes: { 'neatlogs.span.kind': 'AGENT' } },
+      { name: 'reporter', traceId: 'prefixed123', attributes: { 'neatlogs.span.kind': 'AGENT' } },
+      { name: 'web_search', traceId: 'prefixed123', attributes: { 'neatlogs.span.kind': 'TOOL' } },
+    ];
+
+    writeFileSync(
+      resolve(dir, 'openai_multiagent_processed_spans.jsonl'),
+      spans.map((s) => JSON.stringify(s)).join('\n') + '\n',
+    );
+    writeFileSync(resolve(dir, 'openai_multiagent_raw_spans.jsonl'), '');
+
+    const { stdout, exitCode } = run(
+      `--logs-dir ${dir} --only openai_multiagent`,
+      { NEATLOGS_WORKFLOW_PREFIX: 'ts-visible-' },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('ts-visible-investment_research_workflow');
+    expect(stdout).toContain('openai_multiagent: ✅ PASS');
+
+    const mismatch = run(`--logs-dir ${dir} --only openai_multiagent`);
+    expect(mismatch.exitCode).toBe(1);
+    expect(mismatch.stdout).toContain("Root WORKFLOW span 'investment_research_workflow' not found");
   });
 
   it('requires full LangGraph downstream chain spans', () => {
