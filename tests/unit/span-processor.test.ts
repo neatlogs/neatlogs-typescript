@@ -1,4 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { NeatlogsSpanProcessor, spanToDict } from '../../src/core/span-processor.js';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import {
@@ -122,7 +126,37 @@ describe('NeatlogsSpanProcessor', () => {
 
   afterEach(async () => {
     await processor.shutdown();
+    delete process.env.NEATLOGS_LOG_RAW_SPANS;
+    delete process.env.NEATLOGS_LOG_SPANS;
+    delete process.env.NEATLOGS_LOG_RAW_SPANS_FILE;
+    delete process.env.NEATLOGS_LOG_SPANS_FILE;
   });
+
+  /** Create a minimal mock object conforming to the WriteStream interface used by closeLogStream. */
+  function makeMockLogStream(opts: {
+    destroyed?: boolean;
+    write?: (data: string) => void;
+  } = {}) {
+    const listeners = new Map<string, Set<(...args: any[]) => void>>();
+    return {
+      destroyed: opts.destroyed ?? false,
+      writableEnded: false,
+      write: opts.write ?? (() => {}),
+      end: vi.fn(() => {
+        listeners.get('close')?.forEach((fn) => fn());
+      }),
+      once(event: string, fn: (...args: any[]) => void) {
+        if (!listeners.has(event)) listeners.set(event, new Set());
+        listeners.get(event)!.add(fn);
+        return this;
+      },
+      off(event: string, fn: (...args: any[]) => void) {
+        listeners.get(event)?.delete(fn);
+        return this;
+      },
+      destroy: vi.fn(),
+    };
+  }
 
   // ── onEnd normalizes attributes ───────────────────────
 
@@ -426,10 +460,9 @@ describe('NeatlogsSpanProcessor', () => {
 
       // Enable processed log writing by simulating the stream
       const writeData: string[] = [];
-      (maskedProcessor as any)._processedLogStream = {
-        destroyed: false,
+      (maskedProcessor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
-      };
+      });
       (maskedProcessor as any)._logProcessedSpansEnabled = true;
 
       const span = makeMockSpan();
@@ -447,10 +480,9 @@ describe('NeatlogsSpanProcessor', () => {
   describe('file logging', () => {
     it('should write raw spans when raw log stream is open', () => {
       const writeData: string[] = [];
-      (processor as any)._rawLogStream = {
-        destroyed: false,
+      (processor as any)._rawLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
-      };
+      });
       (processor as any)._logRawSpansEnabled = true;
 
       const span = makeMockSpan({ name: 'test-raw-log' });
@@ -463,10 +495,9 @@ describe('NeatlogsSpanProcessor', () => {
 
     it('should write processed spans when processed log stream is open', () => {
       const writeData: string[] = [];
-      (processor as any)._processedLogStream = {
-        destroyed: false,
+      (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
-      };
+      });
       (processor as any)._logProcessedSpansEnabled = true;
 
       const span = makeMockSpan({ name: 'test-processed-log' });
@@ -480,15 +511,96 @@ describe('NeatlogsSpanProcessor', () => {
 
     it('should not write when streams are destroyed', () => {
       const writeData: string[] = [];
-      (processor as any)._rawLogStream = {
+      (processor as any)._rawLogStream = makeMockLogStream({
         destroyed: true,
         write: (data: string) => writeData.push(data),
-      };
+      });
 
       const span = makeMockSpan();
       processor.onEnd(span);
 
       expect(writeData.length).toBe(0);
+    });
+
+    /**
+     * Helper that shuts down the suite-level processor, creates a temp
+     * directory, enables raw+processed file logging, writes a span,
+     * shuts down the logging processor (flushing data), runs assertions,
+     * then cleans up regardless of outcome.
+     */
+    async function withLogDirTest(
+      opts: {
+        /** When true, use relative paths and chdir into the temp root. */
+        relative: boolean;
+        /** Span name written before shutdown so it appears in log files. */
+        spanName: string;
+      },
+      assertFn: (paths: {
+        rawLogPath: string;
+        processedLogPath: string;
+      }) => void,
+    ) {
+      await processor.shutdown();
+
+      // Use a path guaranteed not to exist — avoids create-then-delete dance.
+      const tempRoot = join(tmpdir(), `neatlogs-span-logs-${randomUUID()}`);
+      const previousCwd = process.cwd();
+
+      const rawLogPath = join(tempRoot, 'nested', 'raw', 'spans.jsonl');
+      const processedLogPath = join(tempRoot, 'nested', 'processed', 'spans.jsonl');
+
+      process.env.NEATLOGS_LOG_RAW_SPANS = 'true';
+      process.env.NEATLOGS_LOG_SPANS = 'true';
+
+      if (opts.relative) {
+        // For relative paths we need a real directory to chdir into.
+        const { mkdirSync } = await import('node:fs');
+        mkdirSync(tempRoot, { recursive: true });
+        process.chdir(tempRoot);
+        process.env.NEATLOGS_LOG_RAW_SPANS_FILE = 'nested/raw/spans.jsonl';
+        process.env.NEATLOGS_LOG_SPANS_FILE = 'nested/processed/spans.jsonl';
+      } else {
+        process.env.NEATLOGS_LOG_RAW_SPANS_FILE = rawLogPath;
+        process.env.NEATLOGS_LOG_SPANS_FILE = processedLogPath;
+      }
+
+      const loggingProcessor = new NeatlogsSpanProcessor({ sampleRate: 1.0 });
+      try {
+        loggingProcessor.onEnd(makeMockSpan({ name: opts.spanName }));
+        await loggingProcessor.shutdown();
+        assertFn({ rawLogPath, processedLogPath });
+      } finally {
+        if (opts.relative) process.chdir(previousCwd);
+        rmSync(tempRoot, { recursive: true, force: true });
+      }
+    }
+
+    it('should create parent directories for configured log files', async () => {
+      await withLogDirTest(
+        { relative: false, spanName: 'nested-log-dir-span' },
+        ({ rawLogPath, processedLogPath }) => {
+          expect(existsSync(rawLogPath)).toBe(true);
+          expect(existsSync(processedLogPath)).toBe(true);
+          expect(readFileSync(rawLogPath, 'utf8')).toContain('nested-log-dir-span');
+          expect(readFileSync(processedLogPath, 'utf8')).toContain(
+            'nested-log-dir-span',
+          );
+        },
+      );
+    });
+
+    it('should create parent directories for relative configured log files', async () => {
+      await withLogDirTest(
+        { relative: true, spanName: 'relative-log-dir-span' },
+        ({ rawLogPath, processedLogPath }) => {
+          expect(existsSync(rawLogPath)).toBe(true);
+          expect(existsSync(processedLogPath)).toBe(true);
+          expect(readFileSync(rawLogPath, 'utf8')).toContain('relative-log-dir-span');
+          expect(readFileSync(processedLogPath, 'utf8')).toContain(
+            'relative-log-dir-span',
+          );
+        },
+      );
     });
   });
 
@@ -498,10 +610,9 @@ describe('NeatlogsSpanProcessor', () => {
     it('should set parent_span_id to null when span is self-parented', () => {
       const spanId = 'abcdef0123456789';
       const writeData: string[] = [];
-      (processor as any)._processedLogStream = {
-        destroyed: false,
+      (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
-      };
+      });
       (processor as any)._logProcessedSpansEnabled = true;
 
       const span = makeMockSpan({
@@ -559,16 +670,16 @@ describe('NeatlogsSpanProcessor', () => {
 
   describe('shutdown', () => {
     it('should close file streams', async () => {
-      const rawEnd = vi.fn();
-      const processedEnd = vi.fn();
+      const rawMock = makeMockLogStream();
+      const processedMock = makeMockLogStream();
 
-      (processor as any)._rawLogStream = { end: rawEnd };
-      (processor as any)._processedLogStream = { end: processedEnd };
+      (processor as any)._rawLogStream = rawMock;
+      (processor as any)._processedLogStream = processedMock;
 
       await processor.shutdown();
 
-      expect(rawEnd).toHaveBeenCalled();
-      expect(processedEnd).toHaveBeenCalled();
+      expect(rawMock.end).toHaveBeenCalled();
+      expect(processedMock.end).toHaveBeenCalled();
     });
   });
 

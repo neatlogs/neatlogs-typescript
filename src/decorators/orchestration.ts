@@ -218,7 +218,23 @@ export function Span(options: SpanOptions) {
     target: T,
     context: ClassMethodDecoratorContext,
   ): T {
-    const wrapped = span(options, target as any);
-    return wrapped as unknown as T;
+    // Validate eagerly at decoration-time (same behaviour as before this fix)
+    // by building a temporary wrapper with a no-op target. span() will throw
+    // here for invalid kinds before the class is instantiated.
+    span(options, target);
+
+    // TC39 stage-3 decorators replace the method on the prototype, so `this`
+    // is the instance when the method is called normally (e.g. agent.run()).
+    // `decorateSpan`'s closure calls `fn(...args)` without a receiver, which
+    // loses `this` for instance methods that call other instance methods.
+    // Wrap at the call site: bind `target` to the live `this` on every call
+    // so that `fn(…args)` inside `decorateSpan` retains the correct receiver.
+    function decoratorWrapper(this: unknown, ...args: Parameters<T>): ReturnType<T> {
+      const boundTarget = target.bind(this) as T;
+      const wrapped = span(options, boundTarget);
+      return wrapped(...args) as ReturnType<T>;
+    }
+    Object.defineProperty(decoratorWrapper, 'name', { value: context.name, configurable: true });
+    return decoratorWrapper as unknown as T;
   };
 }

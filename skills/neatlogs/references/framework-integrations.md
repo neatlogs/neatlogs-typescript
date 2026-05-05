@@ -296,16 +296,15 @@ await shutdown();
 
 ```typescript
 import { Mastra } from '@mastra/core';
+import { trace } from '@opentelemetry/api';
 import { createNeatlogsMastraObservability } from '@neatlogs/instrumentation-mastra';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { init, flush, shutdown } from 'neatlogs';
 
 // 1. Initialize neatlogs telemetry first
 await init({ apiKey: '...', workflowName: 'mastra-app' });
 
-// 2. Create Mastra observability instance using the neatlogs exporter
-const provider = new NodeTracerProvider();
-provider.register();
+// 2. Reuse the active provider installed by neatlogs
+const provider = trace.getTracerProvider();
 const { observability } = createNeatlogsMastraObservability(provider);
 
 // 3. Pass observability directly to Mastra constructor

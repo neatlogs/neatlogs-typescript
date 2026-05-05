@@ -123,6 +123,32 @@ describe('NeatlogsSpanProcessor edge cases', () => {
     await processor.shutdown();
   });
 
+  /** Create a minimal mock object conforming to the WriteStream interface used by closeLogStream. */
+  function makeMockLogStream(opts: {
+    destroyed?: boolean;
+    write?: (data: string) => void;
+  } = {}) {
+    const listeners = new Map<string, Set<(...args: any[]) => void>>();
+    return {
+      destroyed: opts.destroyed ?? false,
+      writableEnded: false,
+      write: opts.write ?? (() => {}),
+      end: vi.fn(() => {
+        listeners.get('close')?.forEach((fn) => fn());
+      }),
+      once(event: string, fn: (...args: any[]) => void) {
+        if (!listeners.has(event)) listeners.set(event, new Set());
+        listeners.get(event)!.add(fn);
+        return this;
+      },
+      off(event: string, fn: (...args: any[]) => void) {
+        listeners.get(event)?.delete(fn);
+        return this;
+      },
+      destroy: vi.fn(),
+    };
+  }
+
   // ── normalize() throwing ────────────────────────────────
 
   describe('when normalize() throws', () => {
@@ -300,10 +326,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   describe('resource attribute handling', () => {
     it('should handle array values in resource attributes', () => {
       const writeData: string[] = [];
-      (processor as any)._processedLogStream = {
-        destroyed: false,
+      (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
-      };
+      });
       (processor as any)._logProcessedSpansEnabled = true;
 
       const span = makeMockSpan({
@@ -329,10 +354,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
     it('should stringify non-primitive, non-array resource values', () => {
       const writeData: string[] = [];
-      (processor as any)._processedLogStream = {
-        destroyed: false,
+      (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
-      };
+      });
       (processor as any)._logProcessedSpansEnabled = true;
 
       const span = makeMockSpan({
@@ -455,10 +479,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   describe('span events handling', () => {
     it('should include events in the processed span dict', () => {
       const writeData: string[] = [];
-      (processor as any)._processedLogStream = {
-        destroyed: false,
+      (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
-      };
+      });
       (processor as any)._logProcessedSpansEnabled = true;
 
       const span = makeMockSpan({
@@ -699,9 +722,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
   describe('shutdown stream error handling', () => {
     it('should handle errors when closing raw log stream', async () => {
-      (processor as any)._rawLogStream = {
-        end: () => { throw new Error('close error'); },
-      };
+      const mock = makeMockLogStream();
+      mock.end = vi.fn(() => { throw new Error('close error'); });
+      (processor as any)._rawLogStream = mock;
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       // Should not throw
@@ -710,9 +733,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
     });
 
     it('should handle errors when closing processed log stream', async () => {
-      (processor as any)._processedLogStream = {
-        end: () => { throw new Error('close error'); },
-      };
+      const mock = makeMockLogStream();
+      mock.end = vi.fn(() => { throw new Error('close error'); });
+      (processor as any)._processedLogStream = mock;
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       await expect(processor.shutdown()).resolves.toBeUndefined();

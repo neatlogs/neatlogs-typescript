@@ -76,6 +76,35 @@ describe('Span() class-method decorator', () => {
     expect(mockSpan.setAttribute).toHaveBeenCalledWith('neatlogs.agent.role', 'researcher');
   });
 
+  it('should preserve this binding for decorated class methods', () => {
+    const originalMethod = function(this: { prefix: string; format: (query: string) => string }, query: string) {
+      return this.format(query);
+    };
+    const context: ClassMethodDecoratorContext = {
+      kind: 'method',
+      name: 'run',
+      static: false,
+      private: false,
+      access: { has: () => true, get: () => originalMethod },
+      addInitializer: () => {},
+      metadata: {},
+    };
+
+    const decorator = Span({ kind: 'AGENT', role: 'researcher' });
+    const wrapped = decorator(originalMethod, context);
+    const instance = {
+      prefix: 'processed',
+      format(query: string) {
+        return `${this.prefix}: ${query}`;
+      },
+    };
+
+    const result = wrapped.call(instance, 'test query');
+
+    expect(result).toBe('processed: test query');
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('openinference.span.kind', 'AGENT');
+  });
+
   it('should throw for invalid span kind in Span() decorator', () => {
     // Span() calls span() internally, which validates the kind.
     // However, Span() returns a decorator function — it only throws

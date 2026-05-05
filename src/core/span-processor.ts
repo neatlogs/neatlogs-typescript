@@ -40,6 +40,85 @@ import { AttributeMapper } from '../config/attribute-mapper.js';
 
 const logger = getLogger();
 
+function resolveLogFilePath(configuredPath: string): string {
+  return path.isAbsolute(configuredPath)
+    ? configuredPath
+    : path.join(process.cwd(), configuredPath);
+}
+
+function createLogStream(configuredPath: string): fs.WriteStream | null {
+  const logPath = resolveLogFilePath(configuredPath);
+  let fd: number | null = null;
+
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fd = fs.openSync(logPath, 'a');
+    const stream = fs.createWriteStream(logPath, { fd, autoClose: true });
+    fd = null;
+    stream.on('error', (error) => {
+      logger.warn(`Failed to write span log file ${logPath}: ${error}`);
+      stream.destroy();
+    });
+    return stream;
+  } catch (error) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore cleanup failure; the open error below is the actionable one.
+      }
+    }
+    logger.warn(`Failed to open span log file ${logPath}: ${error}`);
+    return null;
+  }
+}
+
+const CLOSE_STREAM_TIMEOUT_MS = 5_000;
+
+async function closeLogStream(
+  stream: fs.WriteStream | null,
+  description: string,
+): Promise<void> {
+  if (!stream || stream.destroyed || stream.writableEnded) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stream.off('close', closeHandler);
+      stream.off('error', errorHandler);
+      resolve();
+    };
+
+    const closeHandler = settle;
+    const errorHandler = (error: Error) => {
+      logger.warn(`Failed to close ${description} log file handle: ${error}`);
+      settle();
+    };
+    const timer = setTimeout(() => {
+      logger.warn(
+        `Timed out waiting for ${description} log stream to close; destroying`,
+      );
+      stream.destroy();
+      settle();
+    }, CLOSE_STREAM_TIMEOUT_MS);
+
+    stream.once('close', closeHandler);
+    stream.once('error', errorHandler);
+
+    try {
+      stream.end();
+    } catch (error) {
+      logger.warn(`Failed to close ${description} log file handle: ${error}`);
+      settle();
+    }
+  });
+}
+
 // ────────────────────────────────────────────────────────
 // LLM span detection patterns
 // ────────────────────────────────────────────────────────
@@ -184,14 +263,13 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       );
 
     if (this._logRawSpansEnabled) {
-      const rawPath = path.join(
-        process.cwd(),
-        process.env.NEATLOGS_LOG_RAW_SPANS_FILE ?? 'spans_raw_optimized.log',
-      );
-      try {
-        this._rawLogStream = fs.createWriteStream(rawPath, { flags: 'a' });
-      } catch {
-        this._rawLogStream = null;
+      const rawPath =
+        process.env.NEATLOGS_LOG_RAW_SPANS_FILE ?? 'spans_raw_optimized.log';
+      this._rawLogStream = createLogStream(rawPath);
+      if (this._rawLogStream) {
+        logger.info(
+          `Raw span logging enabled: ${resolveLogFilePath(rawPath)}`,
+        );
       }
     }
 
@@ -201,17 +279,13 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     );
 
     if (this._logProcessedSpansEnabled) {
-      const processedPath = path.join(
-        process.cwd(),
-        process.env.NEATLOGS_LOG_SPANS_FILE ?? 'spans_optimized.log',
-      );
-      try {
-        this._processedLogStream = fs.createWriteStream(processedPath, {
-          flags: 'a',
-        });
-        logger.info(`Processed span logging enabled: ${processedPath}`);
-      } catch {
-        this._processedLogStream = null;
+      const processedPath =
+        process.env.NEATLOGS_LOG_SPANS_FILE ?? 'spans_optimized.log';
+      this._processedLogStream = createLogStream(processedPath);
+      if (this._processedLogStream) {
+        logger.info(
+          `Processed span logging enabled: ${resolveLogFilePath(processedPath)}`,
+        );
       }
     }
   }
@@ -685,21 +759,11 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   async shutdown(): Promise<void> {
     this._logPerformanceStats();
 
-    if (this._rawLogStream) {
-      try {
-        this._rawLogStream.end();
-      } catch (e) {
-        logger.warn(`Failed to close raw log file handle: ${e}`);
-      }
-    }
+    await closeLogStream(this._rawLogStream, 'raw');
+    this._rawLogStream = null;
 
-    if (this._processedLogStream) {
-      try {
-        this._processedLogStream.end();
-      } catch (e) {
-        logger.warn(`Failed to close processed log file handle: ${e}`);
-      }
-    }
+    await closeLogStream(this._processedLogStream, 'processed');
+    this._processedLogStream = null;
   }
 
   // ── Performance stats ─────────────────────────────────
