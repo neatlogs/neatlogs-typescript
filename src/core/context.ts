@@ -87,9 +87,6 @@ const KNOWN_OPTION_KEYS = new Set([
 export function _setSpanAttributes(
   span: Span,
   kind: string | undefined,
-  templateString: string | undefined,
-  promptVariables: Record<string, any> | undefined,
-  version: string | undefined,
   attributes: Record<string, any>,
 ): void {
   span.setAttribute('neatlogs.internal', true);
@@ -285,7 +282,7 @@ export async function trace<T>(
   const tracer = otelTrace.getTracer('neatlogs.trace');
 
   const spanCallback = async (span: Span): Promise<T> => {
-    _setSpanAttributes(span, kind, templateString, promptVariables, version, extraAttributes);
+    _setSpanAttributes(span, kind, extraAttributes);
 
     if (mask) {
       const maskId = registerMask(mask);

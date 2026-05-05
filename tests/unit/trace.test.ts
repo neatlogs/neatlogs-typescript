@@ -413,7 +413,7 @@ describe('_setSpanAttributes', () => {
   it('should set neatlogs.internal and openinference.span.kind', async () => {
     const tracer = otelTrace.getTracer('test');
     await tracer.startActiveSpan('helper-test', async (span) => {
-      _setSpanAttributes(span, 'AGENT', undefined, undefined, undefined, {});
+      _setSpanAttributes(span, 'AGENT', {});
       span.end();
     });
 
@@ -426,7 +426,7 @@ describe('_setSpanAttributes', () => {
   it('should default kind to CHAIN', async () => {
     const tracer = otelTrace.getTracer('test');
     await tracer.startActiveSpan('default-kind', async (span) => {
-      _setSpanAttributes(span, undefined, undefined, undefined, undefined, {});
+      _setSpanAttributes(span, undefined, {});
       span.end();
     });
 
@@ -438,7 +438,7 @@ describe('_setSpanAttributes', () => {
   it('should set extra attributes', async () => {
     const tracer = otelTrace.getTracer('test');
     await tracer.startActiveSpan('extra-test', async (span) => {
-      _setSpanAttributes(span, undefined, undefined, undefined, undefined, {
+      _setSpanAttributes(span, undefined, {
         'my.attr': 'hello',
         'my.number': 99,
       });

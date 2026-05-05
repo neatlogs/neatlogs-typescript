@@ -26,7 +26,7 @@ import { FilteringExporter } from './core/filtering-exporter.js';
 import { NeatlogsExporter } from './core/exporter.js';
 import { NeatlogsLogExporter } from './core/log-exporter.js';
 import { _setOtelLogger } from './core/log.js';
-import { _setSessionConfig, getSessionConfig } from './core/context.js';
+import { _setSessionConfig } from './core/context.js';
 import { getLogger, enableDebugLogging } from './core/logger.js';
 import { InstrumentationManager } from './instrumentation/manager.js';
 import { PromptClient, setSharedClient } from './prompt/client.js';

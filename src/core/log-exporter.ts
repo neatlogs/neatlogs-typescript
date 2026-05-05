@@ -46,14 +46,7 @@ export class NeatlogsLogExporter implements LogRecordExporter {
   }
 
   private _convertLogRecord(record: ReadableLogRecord): Record<string, any> {
-    const attributes: Record<string, any> = {};
-
-    // Copy log record attributes
-    if (record.attributes) {
-      for (const [key, value] of Object.entries(record.attributes)) {
-        attributes[key] = value;
-      }
-    }
+    const attributes: Record<string, any> = { ...(record.attributes ?? {}) };
 
     // Add body as log.message if present
     if (record.body !== undefined && record.body !== null) {

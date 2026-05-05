@@ -414,27 +414,9 @@ describe('getEffectiveProviderForDefaults alias (Simplify #15)', () => {
 // ---------------------------------------------------------------------------
 
 describe('init() sets shared PromptClient (Review #2)', () => {
-  it('init.ts should import setSharedClient and PromptClient', async () => {
-    // We can verify the import exists by checking the module loads without error
-    const initModule = await import('../../src/init.js');
-    expect(typeof initModule.init).toBe('function');
-  });
-
   it('setSharedClient should be exported from prompt/client', async () => {
     const clientModule = await import('../../src/prompt/client.js');
     expect(typeof clientModule.setSharedClient).toBe('function');
     expect(typeof clientModule.PromptClient).toBe('function');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Review #1: suppressTracing import fixed
-// ---------------------------------------------------------------------------
-
-describe('suppressTracing import fix (Review #1)', () => {
-  it('client.ts should import suppressTracing from @opentelemetry/core', async () => {
-    // This will fail if the import path is wrong
-    const clientModule = await import('../../src/prompt/client.js');
-    expect(clientModule.PromptClient).toBeDefined();
   });
 });

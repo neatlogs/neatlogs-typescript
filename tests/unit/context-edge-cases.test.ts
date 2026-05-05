@@ -352,7 +352,7 @@ describe('_setSpanAttributes edge cases', () => {
   it('should handle empty attributes object', async () => {
     const tracer = otelTrace.getTracer('test');
     await tracer.startActiveSpan('empty-attrs', async (span) => {
-      _setSpanAttributes(span, 'CHAIN', undefined, undefined, undefined, {});
+      _setSpanAttributes(span, 'CHAIN', {});
       span.end();
     });
 
@@ -371,7 +371,7 @@ describe('_setSpanAttributes edge cases', () => {
     }
 
     await tracer.startActiveSpan('many-attrs', async (span) => {
-      _setSpanAttributes(span, 'WORKFLOW', undefined, undefined, undefined, largeAttrs);
+      _setSpanAttributes(span, 'WORKFLOW', largeAttrs);
       span.end();
     });
 

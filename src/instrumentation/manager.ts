@@ -118,8 +118,18 @@ export class InstrumentationManager {
       if (info.neatlogs) {
         try {
           const mod = await import(info.neatlogs);
+          // When importing a CJS package from ESM, mod.default may be the
+          // CJS namespace object (an object, not a function). Prefer a
+          // function export explicitly to avoid picking the wrong value.
           const InstrumentorClass =
-            mod.default ?? mod[Object.keys(mod)[0]];
+            (typeof mod.default === 'function' ? mod.default : undefined) ??
+            Object.values(mod).find(
+              (v: unknown) =>
+                typeof v === 'function' &&
+                (v as { prototype?: { instrument?: unknown } }).prototype
+                  ?.instrument,
+            ) ??
+            (typeof mod[Object.keys(mod)[0]] === 'function' ? mod[Object.keys(mod)[0]] : undefined);
           if (InstrumentorClass && typeof InstrumentorClass === 'function') {
             const instrumentor = new (InstrumentorClass as new () => any)();
             if (typeof instrumentor.instrument === 'function') {

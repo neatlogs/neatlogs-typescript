@@ -57,8 +57,6 @@ const PROVIDER_TO_SYSTEM: Record<string, string> = {
   deepseek: 'deepseek',
 };
 
-
-
 // ────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────
@@ -469,16 +467,11 @@ export class UnifiedAttributeProcessor {
   }
 
   private processMcpSignals(attrs: Record<string, any>): void {
-    let hasMcpSignal = false;
-    if (typeof attrs['mcp.method.name'] === 'string' && attrs['mcp.method.name']) {
-      hasMcpSignal = true;
-    }
-    if (typeof attrs['mcp.tool.name'] === 'string' && attrs['mcp.tool.name']) {
-      hasMcpSignal = true;
-    }
-    if ('mcp.request.argument' in attrs || 'mcp.tool.arguments' in attrs) {
-      hasMcpSignal = true;
-    }
+    const hasMcpSignal =
+      (typeof attrs['mcp.method.name'] === 'string' && !!attrs['mcp.method.name']) ||
+      (typeof attrs['mcp.tool.name'] === 'string' && !!attrs['mcp.tool.name']) ||
+      'mcp.request.argument' in attrs ||
+      'mcp.tool.arguments' in attrs;
 
     if (hasMcpSignal && 'traceloop.entity.output' in attrs && !('mcp.response.value' in attrs)) {
       attrs['mcp.response.value'] = attrs['traceloop.entity.output'];

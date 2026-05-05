@@ -77,19 +77,20 @@ export class NeatlogsExporter {
         logger.warn(
           `Failed to export batch: ${response.status} ${response.statusText}`,
         );
-        // Put failed items back in buffer for retry (up to a limit)
-        if (this.buffer.length < this.batchSize * 3) {
-          this.buffer.unshift(...batch);
-        }
+        this._requeueBatch(batch);
       } else {
         logger.debug(`Exported ${batch.length} log spans`);
       }
     } catch (err) {
       logger.warn(`Failed to export batch: ${err}`);
-      // Put failed items back in buffer for retry (up to a limit)
-      if (this.buffer.length < this.batchSize * 3) {
-        this.buffer.unshift(...batch);
-      }
+      this._requeueBatch(batch);
+    }
+  }
+
+  /** Re-insert a failed batch into the buffer for retry, up to a limit. */
+  private _requeueBatch(batch: Record<string, any>[]): void {
+    if (this.buffer.length < this.batchSize * 3) {
+      this.buffer.unshift(...batch);
     }
   }
 
