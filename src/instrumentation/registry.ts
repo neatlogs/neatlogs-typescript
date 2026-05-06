@@ -19,6 +19,8 @@ export interface LibraryInfo {
   neatlogs: string | null;
   default_span_kind: string;
   auto_load?: string[];
+  /** npm package name for eager patching (used when OTel hooks don't fire) */
+  npm_package?: string;
 }
 
 /**
@@ -97,12 +99,14 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       openllmetry: null,
       neatlogs: null,
       default_span_kind: 'LLM',
+      npm_package: 'openai',
     },
     anthropic: {
       openinference: '@arizeai/openinference-instrumentation-anthropic',
       openllmetry: null,
       neatlogs: null,
       default_span_kind: 'LLM',
+      npm_package: '@anthropic-ai/sdk',
     },
     cohere: {
       openinference: null,
@@ -193,6 +197,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       openllmetry: null,
       neatlogs: null,
       default_span_kind: 'CHAIN',
+      npm_package: '@langchain/core/callbacks/manager',
     },
     langgraph: {
       openinference: null,
@@ -330,8 +335,9 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
     google_genai: {
       openinference: null,
       openllmetry: null,
-      neatlogs: null,
+      neatlogs: '@neatlogs/instrumentation-google-genai',
       default_span_kind: 'LLM',
+      npm_package: '@google/genai',
     },
     google_adk: {
       openinference: null,

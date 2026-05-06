@@ -151,7 +151,12 @@ abstract class BasePromptTemplate {
       );
     }
 
-    this._contextSetter.set(String(this._template), vars);
+    this._contextSetter.set(
+      typeof this._template === 'string'
+        ? this._template
+        : this._template.map((msg) => `${msg.role}: ${msg.content}`).join('\n'),
+      vars,
+    );
 
     if (typeof this._template === 'string') {
       return this._renderString(this._template, vars);

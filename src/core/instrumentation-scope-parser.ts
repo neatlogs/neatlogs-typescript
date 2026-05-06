@@ -24,17 +24,40 @@ export interface ScopeInfo {
 // ────────────────────────────────────────────────────────
 
 const SCOPE_PATTERNS: Record<string, ScopeInfo> = {
-  // OpenInference instrumentations
-  'openinference.instrumentation.openai': { provider: 'openai' },
-  'openinference.instrumentation.anthropic': { provider: 'anthropic' },
-  'openinference.instrumentation.google_genai': { provider: 'google' },
-  'openinference.instrumentation.bedrock': { provider: 'bedrock', platform: 'bedrock' },
-  'openinference.instrumentation.vertexai': { provider: 'vertex_ai', platform: 'vertex_ai' },
-  'openinference.instrumentation.mistralai': { provider: 'mistral' },
-  'openinference.instrumentation.cohere': { provider: 'cohere' },
-  'openinference.instrumentation.groq': { provider: 'groq' },
+  // Neatlogs custom instrumentations
+  '@neatlogs/instrumentation-google-genai': { provider: 'google', framework: 'google_genai' },
+  '@neatlogs/instrumentation-mastra': { framework: 'mastra' },
 
-  // OpenInference frameworks
+  // OpenInference instrumentations (npm @arizeai scope names)
+  '@arizeai/openinference-instrumentation-openai': { provider: 'openai', framework: 'openai' },
+  '@arizeai/openinference-instrumentation-anthropic': { provider: 'anthropic', framework: 'anthropic' },
+  '@arizeai/openinference-instrumentation-langchain': { framework: 'langchain' },
+  '@arizeai/openinference-instrumentation-bedrock': { provider: 'bedrock', platform: 'bedrock', framework: 'bedrock' },
+  '@arizeai/openinference-instrumentation-vertexai': { provider: 'vertex_ai', platform: 'vertex_ai', framework: 'vertex_ai' },
+  '@arizeai/openinference-instrumentation-mistralai': { provider: 'mistral', framework: 'mistral' },
+  '@arizeai/openinference-instrumentation-cohere': { provider: 'cohere', framework: 'cohere' },
+  '@arizeai/openinference-instrumentation-groq': { provider: 'groq', framework: 'groq' },
+  '@arizeai/openinference-instrumentation-llama-index': { framework: 'llamaindex' },
+  '@arizeai/openinference-instrumentation-llamaindex': { framework: 'llamaindex' },
+  '@arizeai/openinference-instrumentation-crewai': { framework: 'crewai' },
+  '@arizeai/openinference-instrumentation-haystack': { framework: 'haystack' },
+  '@arizeai/openinference-instrumentation-dspy': { framework: 'dspy' },
+  '@arizeai/openinference-instrumentation-beeai': { framework: 'beeai' },
+  '@arizeai/openinference-instrumentation-mcp': { framework: 'mcp' },
+  '@arizeai/openinference-instrumentation-claude-agent-sdk': { framework: 'claude_agent_sdk' },
+
+  // OpenInference instrumentations (Python-style scope names)
+  'openinference.instrumentation.openai': { provider: 'openai', framework: 'openai' },
+  'openinference.instrumentation.anthropic': { provider: 'anthropic', framework: 'anthropic' },
+  'openinference.instrumentation.google_genai': { provider: 'google', framework: 'google_genai' },
+  'openinference.instrumentation.bedrock': { provider: 'bedrock', platform: 'bedrock', framework: 'bedrock' },
+  'openinference.instrumentation.vertexai': { provider: 'vertex_ai', platform: 'vertex_ai', framework: 'vertex_ai' },
+  'openinference.instrumentation.mistralai': { provider: 'mistral', framework: 'mistral' },
+  'openinference.instrumentation.cohere': { provider: 'cohere', framework: 'cohere' },
+  'openinference.instrumentation.groq': { provider: 'groq', framework: 'groq' },
+
+  // OpenInference frameworks (Python-style scope names)
+  'openinference.instrumentation.mastra': { framework: 'mastra' },
   'openinference.instrumentation.langchain': { framework: 'langchain' },
   'openinference.instrumentation.llama_index': { framework: 'llamaindex' },
   'openinference.instrumentation.llamaindex': { framework: 'llamaindex' },
@@ -43,13 +66,13 @@ const SCOPE_PATTERNS: Record<string, ScopeInfo> = {
   'openinference.instrumentation.dspy': { framework: 'dspy' },
 
   // OpenLLMetry (Traceloop) instrumentations
-  'opentelemetry.instrumentation.openai': { provider: 'openai' },
-  'opentelemetry.instrumentation.anthropic': { provider: 'anthropic' },
-  'opentelemetry.instrumentation.google_generativeai': { provider: 'google' },
-  'opentelemetry.instrumentation.bedrock': { provider: 'bedrock', platform: 'bedrock' },
-  'opentelemetry.instrumentation.vertexai': { provider: 'vertex_ai', platform: 'vertex_ai' },
-  'opentelemetry.instrumentation.cohere': { provider: 'cohere' },
-  'opentelemetry.instrumentation.mistralai': { provider: 'mistral' },
+  'opentelemetry.instrumentation.openai': { provider: 'openai', framework: 'openai' },
+  'opentelemetry.instrumentation.anthropic': { provider: 'anthropic', framework: 'anthropic' },
+  'opentelemetry.instrumentation.google_generativeai': { provider: 'google', framework: 'google_genai' },
+  'opentelemetry.instrumentation.bedrock': { provider: 'bedrock', platform: 'bedrock', framework: 'bedrock' },
+  'opentelemetry.instrumentation.vertexai': { provider: 'vertex_ai', platform: 'vertex_ai', framework: 'vertex_ai' },
+  'opentelemetry.instrumentation.cohere': { provider: 'cohere', framework: 'cohere' },
+  'opentelemetry.instrumentation.mistralai': { provider: 'mistral', framework: 'mistral' },
 
   // OpenLLMetry frameworks
   'opentelemetry.instrumentation.langchain': { framework: 'langchain' },

@@ -205,15 +205,16 @@ export async function trace<T>(
   if (promptTemplate !== undefined) {
     if (promptTemplate instanceof PromptTemplate) {
       isPromptTemplateObj = true;
-      templateString = String(promptTemplate.template);
+      const t = promptTemplate.template;
+      templateString = typeof t === 'string' ? t : JSON.stringify(t);
       logger.debug(
         `[trace] Using PromptTemplate object with variables: ${promptTemplate.variables.join(', ')}`,
       );
     } else if (typeof promptTemplate === 'string') {
       templateString = promptTemplate;
     } else {
-      // Object matching the structural type (duck typing)
-      templateString = String(promptTemplate.template);
+      const t = promptTemplate.template;
+      templateString = typeof t === 'string' ? t : JSON.stringify(t);
     }
   }
 
@@ -223,14 +224,16 @@ export async function trace<T>(
   if (userPromptTemplate !== undefined) {
     if (userPromptTemplate instanceof UserPromptTemplate) {
       isUserPromptTemplateObj = true;
-      userTemplateString = String(userPromptTemplate.template);
+      const t = userPromptTemplate.template;
+      userTemplateString = typeof t === 'string' ? t : JSON.stringify(t);
       logger.debug(
         `[trace] Using UserPromptTemplate object with variables: ${userPromptTemplate.variables.join(', ')}`,
       );
     } else if (typeof userPromptTemplate === 'string') {
       userTemplateString = userPromptTemplate;
     } else {
-      userTemplateString = String(userPromptTemplate.template);
+      const t = userPromptTemplate.template;
+      userTemplateString = typeof t === 'string' ? t : JSON.stringify(t);
     }
   }
 

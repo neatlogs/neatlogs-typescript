@@ -173,15 +173,20 @@
         },
         "messages": {
           "mappings": {
-            "input": {
+            "input_role": {
               "sources": [
                 "llm.input_messages.{i}.message.role",
-                "llm.input_messages.{i}.message.content",
-                "gen_ai.prompt.{i}.role",
-                "gen_ai.prompt.{i}.content"
+                "gen_ai.prompt.{i}.role"
               ],
               "target": "neatlogs.llm.input_messages.{i}.role",
-              "target_content": "neatlogs.llm.input_messages.{i}.content",
+              "indexed": true
+            },
+            "input_content": {
+              "sources": [
+                "llm.input_messages.{i}.message.content",
+                "gen_ai.prompt.{i}.content"
+              ],
+              "target": "neatlogs.llm.input_messages.{i}.content",
               "indexed": true
             },
             "input_tool_call_id": {
@@ -200,15 +205,20 @@
               "target": "neatlogs.llm.input_messages.{i}.name",
               "indexed": true
             },
-            "output": {
+            "output_role": {
               "sources": [
                 "llm.output_messages.{i}.message.role",
-                "llm.output_messages.{i}.message.content",
-                "gen_ai.completion.{i}.role",
-                "gen_ai.completion.{i}.content"
+                "gen_ai.completion.{i}.role"
               ],
               "target": "neatlogs.llm.output_messages.{i}.role",
-              "target_content": "neatlogs.llm.output_messages.{i}.content",
+              "indexed": true
+            },
+            "output_content": {
+              "sources": [
+                "llm.output_messages.{i}.message.content",
+                "gen_ai.completion.{i}.content"
+              ],
+              "target": "neatlogs.llm.output_messages.{i}.content",
               "indexed": true
             },
             "system_prompt": {
@@ -293,6 +303,7 @@
           "finish_reason": {
             "sources": [
               "llm.response.finish_reason",
+              "llm.finish_reason",
               "gen_ai.response.finish_reasons",
               "gen_ai.completion.0.finish_reason"
             ],

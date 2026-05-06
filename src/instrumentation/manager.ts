@@ -140,6 +140,27 @@ export class InstrumentationManager {
               );
               continue;
             }
+            if (typeof instrumentor.setTracerProvider === 'function' && typeof instrumentor.enable === 'function') {
+              instrumentor.setTracerProvider(this.provider);
+              instrumentor.enable();
+              // Eagerly patch target module for ESM environments where
+              // OTel module hooks don't fire (e.g. tsx, dynamic imports)
+              if (typeof instrumentor.patchEager === 'function' && info.npm_package) {
+                try {
+                  const targetMod = await import(info.npm_package);
+                  instrumentor.patchEager(targetMod);
+                } catch (e) {
+                  logger.debug(
+                    `Eager patch for '${lib}' skipped — ${info.npm_package} not available: ${e}`,
+                  );
+                }
+              }
+              this._instrumented.push(lib);
+              logger.debug(
+                `Instrumented '${lib}' via neatlogs OTel instrumentor`,
+              );
+              continue;
+            }
           }
           logger.debug(
             `neatlogs instrumentor for '${lib}' loaded but has no instrument() method — trying OpenInference`,
@@ -155,21 +176,46 @@ export class InstrumentationManager {
       if (info.openinference) {
         try {
           const mod = await import(info.openinference);
-          // OpenInference instrumentors typically export a class named like OpenAIInstrumentation
+          // OpenInference instrumentors export a class like LangChainInstrumentation, OpenAIInstrumentation
           const InstrumentorClass =
             mod.default ??
             Object.values(mod).find(
               (v: unknown) =>
                 typeof v === 'function' &&
-                (v as { prototype?: { instrument?: unknown } }).prototype
-                  ?.instrument,
+                (v as { prototype?: Record<string, unknown> }).prototype &&
+                ('instrument' in (v as { prototype: Record<string, unknown> }).prototype ||
+                 'manuallyInstrument' in (v as { prototype: Record<string, unknown> }).prototype),
             );
           if (InstrumentorClass && typeof InstrumentorClass === 'function') {
             const instrumentor = new (InstrumentorClass as new () => any)();
+            // Pattern 1: instrument({ tracerProvider })
             if (typeof instrumentor.instrument === 'function') {
               instrumentor.instrument({ tracerProvider: this.provider });
               this._instrumented.push(lib);
               logger.debug(`Instrumented '${lib}' via OpenInference`);
+              continue;
+            }
+            // Pattern 2: setTracerProvider + manuallyInstrument (OpenInference ESM pattern)
+            if (typeof instrumentor.setTracerProvider === 'function' &&
+                typeof instrumentor.manuallyInstrument === 'function') {
+              instrumentor.setTracerProvider(this.provider);
+              if (info.npm_package) {
+                try {
+                  const targetMod = await import(info.npm_package);
+                  instrumentor.manuallyInstrument(targetMod);
+                  this._instrumented.push(lib);
+                  logger.debug(`Instrumented '${lib}' via OpenInference (manual patch)`);
+                  continue;
+                } catch (importErr) {
+                  logger.debug(
+                    `Could not import '${info.npm_package}' for manual instrumentation of '${lib}': ${importErr}`,
+                  );
+                }
+              }
+              // No npm_package or import failed — still mark as instrumented
+              // since setTracerProvider was called (Node module hooks may still fire for CJS)
+              this._instrumented.push(lib);
+              logger.debug(`Instrumented '${lib}' via OpenInference (tracer set, awaiting module hook)`);
               continue;
             }
           }

@@ -271,6 +271,9 @@ export class UnifiedAttributeProcessor {
 
     // Handle vector DB doc attributes
     this.handleVectorDbDocAttributes(attrs);
+
+    // Extract LangChain metadata (ls_*) into standard positions
+    this.extractLangchainMetadata(attrs);
   }
 
   private extractToolCalls(attrs: Record<string, any>): void {
@@ -630,6 +633,64 @@ export class UnifiedAttributeProcessor {
       if (Object.keys(docAttrs).length > 0) {
         attrs['document_attributes'] = JSON.stringify(docAttrs);
       }
+    }
+  }
+
+  // ── LangChain metadata extraction ───────────────────
+
+  /**
+   * LangChain instrumentation puts model info in `metadata` as a JSON string
+   * with `ls_provider`, `ls_model_name`, `ls_temperature`, `ls_max_tokens`.
+   * Extract these into standard positions when the standard attributes are missing.
+   */
+  private extractLangchainMetadata(attrs: Record<string, any>): void {
+    const raw = attrs['metadata'];
+    if (!raw || typeof raw !== 'string') return;
+
+    let meta: Record<string, any>;
+    try {
+      meta = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (typeof meta !== 'object' || meta === null) return;
+
+    // ls_model_name → llm.model_name
+    if (meta.ls_model_name && !attrs['llm.model_name']) {
+      attrs['llm.model_name'] = meta.ls_model_name;
+    }
+
+    // ls_provider → llm.system (used by defaults enricher and provider detection)
+    if (meta.ls_provider && !attrs['llm.system']) {
+      const providerMap: Record<string, string> = {
+        google_genai: 'google',
+        openai: 'openai',
+        anthropic: 'anthropic',
+      };
+      attrs['llm.system'] = providerMap[meta.ls_provider] ?? meta.ls_provider;
+    }
+
+    // ls_temperature / ls_max_tokens → merge into invocation_parameters
+    const hasTemp = meta.ls_temperature !== undefined;
+    const hasMaxTokens = meta.ls_max_tokens !== undefined;
+    if (hasTemp || hasMaxTokens) {
+      let existing: Record<string, any> = {};
+      try {
+        existing = JSON.parse(attrs['llm.invocation_parameters'] ?? '{}');
+      } catch {
+        existing = {};
+      }
+      if (hasTemp && !('temperature' in existing)) {
+        existing['temperature'] = meta.ls_temperature;
+      }
+      if (hasMaxTokens && !('max_tokens' in existing)) {
+        existing['max_tokens'] = meta.ls_max_tokens;
+      }
+      // Also inject model if missing
+      if (meta.ls_model_name && !('model' in existing)) {
+        existing['model'] = meta.ls_model_name;
+      }
+      attrs['llm.invocation_parameters'] = JSON.stringify(existing);
     }
   }
 
@@ -1165,7 +1226,7 @@ export class UnifiedAttributeProcessor {
    * Check if the raw span kind indicates CLIENT (OTel SpanKind.CLIENT = 3).
    */
   private isHttpLikeSpanKind(kind: number | string): boolean {
-    if (typeof kind === 'number') return kind === 3;
+    if (typeof kind === 'number') return kind === 2; // SpanKind.CLIENT = 2
     return String(kind).toUpperCase() === 'CLIENT';
   }
 }

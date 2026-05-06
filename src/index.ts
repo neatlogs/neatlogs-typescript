@@ -47,6 +47,9 @@ export {
   removeTag,
 } from './prompt/client.js';
 
+// Mastra integration
+export { getMastraObservability } from './mastra.js';
+
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';
 export { registerCrewaiTask } from './core/crewai-task-registry.js';

@@ -17,7 +17,9 @@
       }
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=18.0.0"
   },
@@ -37,21 +39,33 @@
     "test:examples:original7": "node scripts/run-original7-examples.mjs",
     "verify:logs": "node scripts/verify-original7-logs.mjs"
   },
-  "keywords": ["observability", "tracing", "opentelemetry", "llm", "ai", "agents", "debugging"],
+  "keywords": [
+    "observability",
+    "tracing",
+    "opentelemetry",
+    "llm",
+    "ai",
+    "agents",
+    "debugging"
+  ],
   "license": "MIT",
   "dependencies": {
+    "@mastra/observability": "^1.11.1",
+    "@neatlogs/instrumentation-google-genai": "file:../instrumentations/packages/js/neatlogs-instrumentation-google-genai",
+    "@neatlogs/instrumentation-mastra": "file:../instrumentations/packages/js/neatlogs-instrumentation-mastra",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/api-logs": "^0.57.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "^0.216.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.57.0",
+    "@opentelemetry/instrumentation": "^0.57.0",
+    "@opentelemetry/instrumentation-http": "^0.57.0",
+    "@opentelemetry/instrumentation-undici": "^0.10.0",
     "@opentelemetry/resources": "^1.30.0",
     "@opentelemetry/sdk-logs": "^0.57.0",
     "@opentelemetry/sdk-metrics": "^1.30.0",
     "@opentelemetry/sdk-trace-base": "^1.30.0",
     "@opentelemetry/sdk-trace-node": "^1.30.0",
-    "@opentelemetry/semantic-conventions": "^1.28.0",
-    "@opentelemetry/instrumentation-http": "^0.57.0",
-    "@opentelemetry/instrumentation-undici": "^0.10.0",
-    "@opentelemetry/instrumentation": "^0.57.0"
+    "@opentelemetry/semantic-conventions": "^1.28.0"
   },
   "devDependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.29.1",
@@ -72,29 +86,47 @@
     "tsx": "^4.20.3",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0",
-    "zod": "^4.1.13",
+    "zod": "^4.4.3",
     "zod-to-json-schema": "^3.24.6"
   },
   "peerDependencies": {
-    "@arizeai/openinference-instrumentation-openai": ">=1.0.0",
     "@arizeai/openinference-instrumentation-anthropic": ">=1.0.0",
-    "@arizeai/openinference-instrumentation-langchain": ">=1.0.0",
     "@arizeai/openinference-instrumentation-bedrock": ">=1.0.0",
-    "@arizeai/openinference-instrumentation-mcp": ">=1.0.0",
     "@arizeai/openinference-instrumentation-beeai": ">=1.0.0",
     "@arizeai/openinference-instrumentation-claude-agent-sdk": ">=1.0.0",
+    "@arizeai/openinference-instrumentation-langchain": ">=1.0.0",
+    "@arizeai/openinference-instrumentation-mcp": ">=1.0.0",
+    "@arizeai/openinference-instrumentation-openai": ">=1.0.0",
     "@google/genai": ">=0.1.0",
-    "@mastra/core": ">=1.0.0"
+    "@mastra/core": "^1.32.1"
   },
   "peerDependenciesMeta": {
-    "@arizeai/openinference-instrumentation-openai": { "optional": true },
-    "@arizeai/openinference-instrumentation-anthropic": { "optional": true },
-    "@arizeai/openinference-instrumentation-langchain": { "optional": true },
-    "@arizeai/openinference-instrumentation-bedrock": { "optional": true },
-    "@arizeai/openinference-instrumentation-mcp": { "optional": true },
-    "@arizeai/openinference-instrumentation-beeai": { "optional": true },
-    "@arizeai/openinference-instrumentation-claude-agent-sdk": { "optional": true },
-    "@google/genai": { "optional": true },
-    "@mastra/core": { "optional": true }
+    "@arizeai/openinference-instrumentation-openai": {
+      "optional": true
+    },
+    "@arizeai/openinference-instrumentation-anthropic": {
+      "optional": true
+    },
+    "@arizeai/openinference-instrumentation-langchain": {
+      "optional": true
+    },
+    "@arizeai/openinference-instrumentation-bedrock": {
+      "optional": true
+    },
+    "@arizeai/openinference-instrumentation-mcp": {
+      "optional": true
+    },
+    "@arizeai/openinference-instrumentation-beeai": {
+      "optional": true
+    },
+    "@arizeai/openinference-instrumentation-claude-agent-sdk": {
+      "optional": true
+    },
+    "@google/genai": {
+      "optional": true
+    },
+    "@mastra/core": {
+      "optional": true
+    }
   }
 }

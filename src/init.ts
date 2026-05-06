@@ -19,7 +19,8 @@ import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { MeterProvider } from '@opentelemetry/sdk-metrics';
-import { LoggerProvider, SimpleLogRecordProcessor } from '@opentelemetry/sdk-logs';
+import { LoggerProvider, SimpleLogRecordProcessor, BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
+import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 
 import { NeatlogsSpanProcessor } from './core/span-processor.js';
 import { FilteringExporter } from './core/filtering-exporter.js';
@@ -269,9 +270,29 @@ export async function init(options: InitOptions = {}): Promise<void> {
     });
 
     _logProvider = new LoggerProvider({ resource });
+
+    // File-based log exporter (for NEATLOGS_LOG_LOGS env var)
     _logProvider.addLogRecordProcessor(
       new SimpleLogRecordProcessor(new NeatlogsLogExporter(_logSpanExporter)),
     );
+
+    // OTLP log export to /v1/logs (same pattern as Python SDK)
+    if (!disableExportResolved) {
+      const logsEndpoint = endpoint.endsWith('/v1/logs')
+        ? endpoint
+        : `${baseUrl}/v1/logs`;
+      const otlpLogExporter = new OTLPLogExporter({
+        url: logsEndpoint,
+        headers: resolvedKey ? { 'x-api-key': resolvedKey } : undefined,
+      });
+      _logProvider.addLogRecordProcessor(
+        new BatchLogRecordProcessor(otlpLogExporter),
+      );
+      if (options.debug) {
+        logger.debug(`OTLP log exporter configured: ${logsEndpoint}`);
+      }
+    }
+
     logs.setGlobalLoggerProvider(_logProvider);
 
     // Wire the OTel logger for neatlogs.log() function
@@ -279,7 +300,7 @@ export async function init(options: InitOptions = {}): Promise<void> {
     _setOtelLogger(otelLogger, options.debug ?? false);
 
     if (options.debug) {
-      logger.debug(`Neatlogs log capture enabled (endpoint: ${baseUrl}/api/data/v4/batch)`);
+      logger.debug(`Neatlogs log capture enabled (endpoint: ${baseUrl}/v1/logs)`);
     }
   } else if (options.debug) {
     logger.debug('Log capture disabled (pass captureLogs: true to enable)');
@@ -452,6 +473,22 @@ export async function shutdown(): Promise<boolean> {
 
   logger.info('Neatlogs SDK shutdown complete');
   return success;
+}
+
+// ---------------------------------------------------------------------------
+// getTracerProvider()
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the active TracerProvider. Throws if init() has not been called.
+ */
+export function getTracerProvider(): NodeTracerProvider {
+  if (!_tracerProvider) {
+    throw new Error(
+      'Neatlogs is not initialized. Call init() before accessing the TracerProvider.',
+    );
+  }
+  return _tracerProvider;
 }
 
 // ---------------------------------------------------------------------------
