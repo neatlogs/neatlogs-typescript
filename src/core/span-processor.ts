@@ -569,11 +569,12 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
           : [],
       };
 
-      // 7. Post-processing: framework span name normalization, CrewAI tasks
+      // 7. Post-processing: framework span name normalization, CrewAI tasks, model resolution
       let results = this._normalizeFrameworkSpanNames([spanData]);
       spanData = results[0] ?? spanData;
       results = this._injectCrewaiTaskTemplates([spanData]);
       spanData = results[0] ?? spanData;
+      this._resolveActualModelName(spanData);
 
       // 7b. Apply mask — if mask returns null, drop the span entirely
       const maskedSpanData = applyMask(spanData, this.mask ?? null);
@@ -748,6 +749,54 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     }
 
     return spans;
+  }
+
+  // ── Resolve actual model name from LLM output ────────
+  // LangChain/Azure spans report deployment names (e.g., "gpt-3.5-turbo") as
+  // the model name. The actual resolved model (e.g., "gpt-5-nano-2025-08-07")
+  // is buried in the LLM output JSON at response_metadata.model_name.
+
+  private _resolveActualModelName(spanData: Record<string, any>): void {
+    const attrs: Record<string, any> = spanData.attributes ?? {};
+    const kind = attrs['neatlogs.span.kind'];
+    if (kind !== 'llm') return;
+
+    const currentModel = attrs['neatlogs.llm.model_name'] as string | undefined;
+    if (!currentModel) return;
+
+    const llmOutput = attrs['neatlogs.llm.output'] as string | undefined;
+    if (!llmOutput) return;
+
+    try {
+      const output = JSON.parse(llmOutput);
+
+      // LangChain format: generations[0][0].message.kwargs.response_metadata.model_name
+      const generations = output?.generations;
+      if (Array.isArray(generations) && generations[0]?.[0]) {
+        const respMeta = generations[0][0]?.message?.kwargs?.response_metadata;
+        if (respMeta?.model_name && respMeta.model_name !== currentModel) {
+          attrs['neatlogs.llm.model_name'] = respMeta.model_name;
+          if (this.debug) {
+            logger.debug(
+              `[ModelResolve] LangChain span: ${currentModel} → ${respMeta.model_name}`,
+            );
+          }
+          return;
+        }
+      }
+
+      // Vercel AI SDK / direct OpenAI format: model field at top level of response
+      if (output?.model && output.model !== currentModel) {
+        attrs['neatlogs.llm.model_name'] = output.model;
+        if (this.debug) {
+          logger.debug(
+            `[ModelResolve] Direct response: ${currentModel} → ${output.model}`,
+          );
+        }
+      }
+    } catch (e: unknown) {
+      logger.warn(`[ModelResolve] Failed to parse LLM output for model extraction: ${e}`);
+    }
   }
 
   // ── forceFlush / shutdown ─────────────────────────────

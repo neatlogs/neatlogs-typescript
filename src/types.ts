@@ -123,6 +123,8 @@ export interface TraceOptions {
   name: string;
   /** Span kind. Defaults to 'CHAIN'. */
   kind?: SpanKind;
+  /** Input data for this span. Auto-serialized to input.value. */
+  input?: any;
   /** Prompt template to associate with this trace (string or PromptTemplate instance). */
   promptTemplate?: string | { template: string | PromptMessage[]; variables: string[] };
   /** Prompt variables used in this trace. */

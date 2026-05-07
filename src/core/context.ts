@@ -25,6 +25,7 @@ import { PromptContext, UserPromptContext, PromptTemplate, UserPromptTemplate } 
 import { registerMask } from './mask.js';
 
 import { getLogger } from './logger.js';
+import { safeJsonDumps, serializeObj } from '../decorators/base.js';
 import type { TraceOptions, MaskFunction } from '../types.js';
 
 const logger = getLogger();
@@ -67,6 +68,7 @@ export const USER_PROMPT_VARIABLES_KEY = createContextKey('neatlogs.user_prompt_
 const KNOWN_OPTION_KEYS = new Set([
   'name',
   'kind',
+  'input',
   'promptTemplate',
   'promptVariables',
   'userPromptTemplate',
@@ -177,6 +179,7 @@ export async function trace<T>(
   const {
     name,
     kind,
+    input,
     promptTemplate,
     promptVariables,
     userPromptTemplate,
@@ -287,6 +290,10 @@ export async function trace<T>(
   const spanCallback = async (span: Span): Promise<T> => {
     _setSpanAttributes(span, kind, extraAttributes);
 
+    if (input !== undefined && input !== null) {
+      span.setAttribute('input.value', safeJsonDumps(serializeObj(input)));
+    }
+
     if (mask) {
       const maskId = registerMask(mask);
       span.setAttribute('neatlogs.mask_id', maskId);
@@ -296,6 +303,16 @@ export async function trace<T>(
       const result: T = await fn(span);
 
       _finalizePromptCapture(span, isPromptTemplateObj, isUserPromptTemplateObj);
+
+      if (result !== undefined && result !== null) {
+        const spanAttrs = (span as any).attributes ?? (span as any)._attributes;
+        const hasOutput = spanAttrs && (
+          'output.value' in spanAttrs || 'neatlogs.output.value' in spanAttrs
+        );
+        if (!hasOutput) {
+          span.setAttribute('output.value', safeJsonDumps(serializeObj(result)));
+        }
+      }
 
       return result;
     } catch (error) {
