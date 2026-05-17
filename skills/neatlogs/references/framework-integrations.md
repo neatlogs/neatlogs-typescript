@@ -355,7 +355,7 @@ await shutdown();
 ```
 
 Each wrapped call:
-1. Opens a parent OTel span on the active `TracerProvider` with `openinference.span.kind = 'LLM'`.
+1. Opens a parent OTel span on the active `TracerProvider` with `openinference.span.kind = 'WORKFLOW'` (so the trace-finalizer accepts it as a valid root). The AI SDK's native `ai.doGenerate` / `ai.doStream` child spans remain `LLM`; tool-call children remain `TOOL`.
 2. Forces `experimental_telemetry: { isEnabled: true, recordInputs: true, recordOutputs: true, tracer, metadata: { neatlogsWrapped: true } }` for that call. **`isEnabled: false` is overridden** — to skip telemetry for a specific call, use the unwrapped `ai` import directly.
 3. Captures `input.value` (always) and `output.value` (async functions only — streams cannot be JSON-serialized, so `output.value` is unset on streaming parents; native AI SDK child spans still share the trace).
 4. Sets `SpanStatusCode.ERROR` on rethrown exceptions.

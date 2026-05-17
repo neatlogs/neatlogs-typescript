@@ -43,7 +43,7 @@ The `InstrumentationManager` in [src/instrumentation/manager.ts](../../../src/in
 ```
 user code
   └─ wrapAISDK(ai).generateText(...)
-       └─ tracer.startActiveSpan('ai.generateText', { kind: LLM })  ← neatlogs parent
+       └─ tracer.startActiveSpan('ai.generateText', { kind: WORKFLOW })  ← neatlogs parent
             └─ ai.generateText(..., experimental_telemetry: { tracer })
                  ├─ ai.doGenerate                     ← AI SDK child (LLM)
                  ├─ ai.toolCall                       ← AI SDK child (TOOL)
@@ -214,7 +214,7 @@ Each commit lands independently buildable. Commits 1-2 can land before any user-
 
 ## Success criteria
 
-- A user runs `neatlogs.init(...)`, calls `wrapAISDK(ai).generateText({...})`, and sees a single grouped trace in the Neatlogs dashboard with: parent `ai.generateText` span (kind=LLM), child `ai.doGenerate` span (kind=LLM, model name + token counts), and any `ai.toolCall` spans (kind=TOOL, input/output captured).
+- A user runs `neatlogs.init(...)`, calls `wrapAISDK(ai).generateText({...})`, and sees a single grouped trace in the Neatlogs dashboard with: parent `ai.generateText` span (kind=WORKFLOW — required for the trace-finalizer to accept it as a valid root), child `ai.doGenerate` span (kind=LLM, model name + token counts), and any `ai.toolCall` spans (kind=TOOL, input/output captured).
 - Without the wrapper, a user who manually sets `experimental_telemetry: createAITelemetry()` (or even just `{ isEnabled: true }`) gets the same span shape — wrapper-vs-manual produces equivalent traces, the wrapper just removes boilerplate.
 - The integration test in `tests/integration/ai-sdk.test.ts` passes with locked-in attribute names.
 - The new package builds and tests pass via `pnpm -C instrumentations/packages/js/neatlogs-instrumentation-ai-sdk test`.
