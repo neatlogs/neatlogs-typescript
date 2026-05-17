@@ -84,7 +84,9 @@ async function main() {
         }),
       },
     },
-    maxToolRoundtrips: 2,
+    // AI SDK v3 uses maxToolRoundtrips, v4+ uses maxSteps. The wrapper is
+    // version-agnostic — pick whichever your installed `ai` version supports.
+    maxSteps: 2,
   });
 
   for await (const delta of stream.textStream) {
