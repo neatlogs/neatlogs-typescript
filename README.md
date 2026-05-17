@@ -458,6 +458,33 @@ The following libraries are registered in the instrumentation registry for futur
 
 `cohere`, `groq`, `together`, `vertexai`, `google_generativeai`, `mistralai`, `ollama`, `watsonx`, `alephalpha`, `replicate`, `sagemaker`, `huggingface_hub`, `litellm`, `langgraph`, `llamaindex`, `autogen`, `haystack`, `dspy`, `chromadb`, `pinecone`, `weaviate`, `qdrant`, `milvus`, `opensearch`, `elasticsearch`, `redis`, `marqo`, `instructor`, `guardrails`, `google_adk`, `agno`, `openai_agents`, `pydantic_ai`, `smolagents`, `strands`, `pipecat`, `portkey`, `promptflow`
 
+## Framework Integrations
+
+For frameworks that don't fit the auto-instrument-on-init pattern, neatlogs ships dedicated companion packages. Install only the ones you need:
+
+| Framework | Package | Helper |
+|-----------|---------|--------|
+| Mastra (`@mastra/core`) | `@neatlogs/instrumentation-mastra` | `getMastraObservability()` — pass to `new Mastra({ observability })` |
+| Vercel AI SDK (`ai`) | `@neatlogs/instrumentation-ai-sdk` | `getAISDKWrapper()` — wraps `generateText` / `streamText` / `generateObject` / `streamObject` |
+
+```typescript
+// Vercel AI SDK
+import { init, getAISDKWrapper, shutdown } from 'neatlogs';
+import * as ai from 'ai';
+import { openai } from '@ai-sdk/openai';
+
+await init({ apiKey: process.env.NEATLOGS_API_KEY });
+const wrapAISDK = await getAISDKWrapper();
+const { generateText } = wrapAISDK(ai);
+
+const { text } = await generateText({
+  model: openai('gpt-4o-mini'),
+  prompt: 'What is TypeScript?',
+});
+
+await shutdown();
+```
+
 ## Configuration
 
 ### Environment Variables
@@ -559,6 +586,7 @@ See the [`examples/`](./examples/) directory for complete, runnable examples:
 | [`prompt-management.ts`](./examples/prompt-management.ts) | PromptTemplate + trace() for prompt versioning |
 | [`multi-agent-workflow.ts`](./examples/multi-agent-workflow.ts) | Nested spans: WORKFLOW → AGENT → TOOL |
 | [`custom-spans.ts`](./examples/custom-spans.ts) | All span kinds: WORKFLOW, CHAIN, AGENT, TOOL, RETRIEVER, EMBEDDING, GUARDRAIL |
+| [`sdk_examples/ai_sdk_basic/`](./examples/sdk_examples/ai_sdk_basic/) | Vercel AI SDK via `wrapAISDK` — generateText + streamText + tools |
 
 Run any example with:
 
