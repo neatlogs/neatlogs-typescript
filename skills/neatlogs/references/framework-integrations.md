@@ -322,7 +322,84 @@ await shutdown();
 
 ---
 
-## 10. Long-Running Servers (Express, Fastify, etc.)
+## 10. Vercel AI SDK (`ai` package)
+
+- **Package**: `@neatlogs/instrumentation-ai-sdk`
+- **Compatibility**: `ai >=3 <7` (v3, v4, v5, v6) — declared as an optional peer dependency.
+- **No monkey-patching**: the AI SDK already supports OpenTelemetry natively via `experimental_telemetry`. The companion package opts in per call site through a wrapper, so there's no fragile module patching.
+
+> **Two APIs**: use `wrapAISDK(ai)` for the ergonomic wrapper (recommended), or `createAITelemetry()` for direct `experimental_telemetry` injection on individual calls.
+
+### Recommended: `wrapAISDK`
+
+```typescript
+import { init, getAISDKWrapper, flush, shutdown } from 'neatlogs';
+import * as ai from 'ai';
+import { openai } from '@ai-sdk/openai';
+
+// 1. Initialize neatlogs first so a TracerProvider is registered globally
+await init({ apiKey: '...', workflowName: 'ai-sdk-app' });
+
+// 2. Resolve the wrapper from the optional peer package
+const wrapAISDK = await getAISDKWrapper();
+const { generateText, streamText, generateObject, streamObject } = wrapAISDK(ai);
+
+// 3. Use the wrapped functions exactly like the originals
+const { text } = await generateText({
+  model: openai('gpt-4o-mini'),
+  prompt: 'What is the capital of France?',
+});
+
+await flush();
+await shutdown();
+```
+
+Each wrapped call:
+1. Opens a parent OTel span on the active `TracerProvider` with `openinference.span.kind = 'LLM'`.
+2. Forces `experimental_telemetry: { isEnabled: true, recordInputs: true, recordOutputs: true, tracer, metadata: { neatlogsWrapped: true } }` for that call. **`isEnabled: false` is overridden** — to skip telemetry for a specific call, use the unwrapped `ai` import directly.
+3. Captures `input.value` (always) and `output.value` (async functions only — streams cannot be JSON-serialized, so `output.value` is unset on streaming parents; native AI SDK child spans still share the trace).
+4. Sets `SpanStatusCode.ERROR` on rethrown exceptions.
+
+### Lower-level: `createAITelemetry`
+
+When you want telemetry on a single call without wrapping the whole module:
+
+```typescript
+import { generateText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import { createAITelemetry } from '@neatlogs/instrumentation-ai-sdk';
+
+await generateText({
+  model: openai('gpt-4o-mini'),
+  prompt: 'Hello',
+  experimental_telemetry: createAITelemetry({ metadata: { userId: 'u-123' } }),
+});
+```
+
+### Captured attributes (after pipeline normalization)
+
+The Vercel AI SDK emits its own `ai.*` namespace; the SDK's `UnifiedAttributeProcessor` maps these to `neatlogs.*`:
+
+| AI SDK attribute | Neatlogs attribute |
+|------------------|--------------------|
+| `ai.model.id` | `neatlogs.llm.model_name` |
+| `ai.model.provider` | `neatlogs.llm.provider` |
+| `ai.usage.promptTokens` | `neatlogs.llm.token_count.prompt` |
+| `ai.usage.completionTokens` | `neatlogs.llm.token_count.completion` |
+| `ai.usage.totalTokens` | `neatlogs.llm.token_count.total` |
+| `ai.prompt.messages` (JSON array) | `neatlogs.llm.input_messages.{i}.{role,content}` |
+| `ai.response.text` | `neatlogs.llm.output_messages.0.content` |
+| `ai.response.toolCalls` (JSON array) | `neatlogs.llm.tool_calls.{i}.{name,arguments,id}` |
+| `ai.toolCall.name` / `args` / `result` | `tool.name` / `input.value` / `output.value` (on `ai.toolCall` spans) |
+| `ai.settings.{temperature,maxTokens,topP,…}` | `neatlogs.llm.{temperature,max_tokens,top_p,…}` |
+
+### Note on `init({ instrumentations: ['ai_sdk'] })`
+
+`ai_sdk` exists in the instrumentation registry for scope-detection consistency, but passing it to `init()` is a **no-op**. The wrapper is always opt-in per call site — listing it in `instrumentations` does nothing useful and is not required.
+
+---
+
+## 11. Long-Running Servers (Express, Fastify, etc.)
 
 For server applications, `init()` is called **once at startup**. Do NOT call `flush()` or `shutdown()` on every request.
 

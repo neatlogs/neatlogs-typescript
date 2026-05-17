@@ -130,6 +130,7 @@ Pass these string values in the `instrumentations` array to `init()`.
 | `beeai` | BeeAI | `@arizeai/openinference-instrumentation-beeai` |
 | `claude_agent_sdk` | Claude Agent SDK | `@arizeai/openinference-instrumentation-claude-agent-sdk` |
 | `mastra` | Mastra | `@neatlogs/instrumentation-mastra` (custom) |
+| `ai_sdk` | Vercel AI SDK (`ai`) | `@neatlogs/instrumentation-ai-sdk` (custom; opt-in via `wrapAISDK(ai)`) |
 
 ### Registered but Not Instrumentable (TS SDK v1)
 
