@@ -50,6 +50,9 @@ export {
 // Mastra integration
 export { getMastraObservability } from './mastra.js';
 
+// Vercel AI SDK integration
+export { getAISDKWrapper } from './ai-sdk.js';
+
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';
 export { registerCrewaiTask } from './core/crewai-task-registry.js';
