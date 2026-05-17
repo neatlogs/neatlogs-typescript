@@ -236,6 +236,12 @@ export class UnifiedAttributeProcessor {
     // CrewAI kickoff telemetry
     this.addCrewaiKickoffTelemetry(attrs);
 
+    // Vercel AI SDK ai.* normalization MUST run before extractToolCalls so
+    // the exploded llm.output_messages.0.message.tool_calls.* keys get
+    // collapsed into the canonical llm.tool_calls.{i}.* shape that
+    // attribute-mapping.json understands.
+    this.extractVercelAiSdkAttrs(attrs);
+
     // Extract tool calls from output messages (OpenInference format)
     this.extractToolCalls(attrs);
 
@@ -274,9 +280,6 @@ export class UnifiedAttributeProcessor {
 
     // Extract LangChain metadata (ls_*) into standard positions
     this.extractLangchainMetadata(attrs);
-
-    // Extract Vercel AI SDK ai.* attributes into canonical llm.* / gen_ai.* / tool.*
-    this.extractVercelAiSdkAttrs(attrs);
   }
 
   private extractToolCalls(attrs: Record<string, any>): void {

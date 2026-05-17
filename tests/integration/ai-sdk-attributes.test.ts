@@ -143,14 +143,14 @@ describe('Vercel AI SDK attribute extraction', () => {
         ]),
       }),
     );
-    // Verify the AI SDK explosion wrote the expected keys. extractToolCalls
-    // runs BEFORE extractVercelAiSdkAttrs, so these keys do NOT get collapsed
-    // into llm.tool_calls.*; they remain as llm.output_messages.* keys.
-    expect(out['llm.output_messages.0.message.tool_calls.0.tool_call.function.name']).toBe('search');
-    expect(out['llm.output_messages.0.message.tool_calls.1.tool_call.function.name']).toBe('calculate');
-    expect(out['llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments']).toContain('weather');
-    expect(out['llm.output_messages.0.message.tool_calls.1.tool_call.function.arguments']).toContain('2+2');
-    expect(out['llm.output_messages.0.message.tool_calls.0.tool_call.id']).toBe('call_1');
-    expect(out['llm.output_messages.0.message.tool_calls.1.tool_call.id']).toBe('call_2');
+    // After dispatch reordering, extractVercelAiSdkAttrs runs before
+    // extractToolCalls, so the exploded keys get collapsed into the
+    // canonical neatlogs.llm.tool_calls.* shape.
+    expect(out['neatlogs.llm.tool_calls.0.name']).toBe('search');
+    expect(out['neatlogs.llm.tool_calls.1.name']).toBe('calculate');
+    expect(String(out['neatlogs.llm.tool_calls.0.arguments'] ?? '')).toContain('weather');
+    expect(String(out['neatlogs.llm.tool_calls.1.arguments'] ?? '')).toContain('2+2');
+    expect(out['neatlogs.llm.tool_calls.0.id']).toBe('call_1');
+    expect(out['neatlogs.llm.tool_calls.1.id']).toBe('call_2');
   });
 });
