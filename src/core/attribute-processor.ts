@@ -274,6 +274,9 @@ export class UnifiedAttributeProcessor {
 
     // Extract LangChain metadata (ls_*) into standard positions
     this.extractLangchainMetadata(attrs);
+
+    // Extract Vercel AI SDK ai.* attributes into canonical llm.* / gen_ai.* / tool.*
+    this.extractVercelAiSdkAttrs(attrs);
   }
 
   private extractToolCalls(attrs: Record<string, any>): void {
@@ -691,6 +694,158 @@ export class UnifiedAttributeProcessor {
         existing['model'] = meta.ls_model_name;
       }
       attrs['llm.invocation_parameters'] = JSON.stringify(existing);
+    }
+  }
+
+  // ── Vercel AI SDK extraction ───────────────────────
+
+  /**
+   * The Vercel AI SDK emits its own `ai.*` namespace alongside `gen_ai.*`. Map
+   * the AI-SDK-specific keys onto the canonical `llm.*` / `gen_ai.*` / `tool.*`
+   * keys that the existing pipeline already understands. Span-kind inference
+   * runs first so downstream `applyNamespaceMapping` resolves it correctly.
+   */
+  private extractVercelAiSdkAttrs(attrs: Record<string, any>): void {
+    const spanName: string = attrs['_span_name'] ?? '';
+    const isAiSdkSpan =
+      spanName.startsWith('ai.') ||
+      'ai.model.id' in attrs ||
+      'ai.toolCall.name' in attrs;
+
+    if (!isAiSdkSpan) return;
+
+    // Span-kind inference (only when not already set)
+    if (!('openinference.span.kind' in attrs)) {
+      if (spanName === 'ai.toolCall') {
+        attrs['openinference.span.kind'] = 'TOOL';
+      } else if (spanName === 'ai.embed' || spanName === 'ai.embedMany') {
+        attrs['openinference.span.kind'] = 'EMBEDDING';
+      } else if (spanName.startsWith('ai.generate') || spanName.startsWith('ai.stream')) {
+        attrs['openinference.span.kind'] = 'LLM';
+      }
+    }
+
+    // Model id / provider
+    if ('ai.model.id' in attrs && !('llm.model_name' in attrs)) {
+      attrs['llm.model_name'] = attrs['ai.model.id'];
+    }
+    if ('ai.model.provider' in attrs && !('llm.provider' in attrs)) {
+      // ai.model.provider is e.g. "openai.chat" — take the leading segment
+      const raw = String(attrs['ai.model.provider']);
+      attrs['llm.provider'] = raw.split('.')[0];
+    }
+
+    // Token usage
+    if ('ai.usage.promptTokens' in attrs && !('llm.token_count.prompt' in attrs)) {
+      attrs['llm.token_count.prompt'] = attrs['ai.usage.promptTokens'];
+    }
+    if ('ai.usage.completionTokens' in attrs && !('llm.token_count.completion' in attrs)) {
+      attrs['llm.token_count.completion'] = attrs['ai.usage.completionTokens'];
+    }
+    if ('ai.usage.totalTokens' in attrs && !('llm.token_count.total' in attrs)) {
+      attrs['llm.token_count.total'] = attrs['ai.usage.totalTokens'];
+    }
+
+    // Settings → gen_ai.request.*
+    const settingMap: Record<string, string> = {
+      'ai.settings.temperature': 'gen_ai.request.temperature',
+      'ai.settings.maxTokens': 'gen_ai.request.max_tokens',
+      'ai.settings.topP': 'gen_ai.request.top_p',
+      'ai.settings.topK': 'gen_ai.request.top_k',
+      'ai.settings.frequencyPenalty': 'gen_ai.request.frequency_penalty',
+      'ai.settings.presencePenalty': 'gen_ai.request.presence_penalty',
+      'ai.settings.stopSequences': 'gen_ai.request.stop_sequences',
+    };
+    for (const [src, tgt] of Object.entries(settingMap)) {
+      if (src in attrs && !(tgt in attrs)) {
+        attrs[tgt] = attrs[src];
+      }
+    }
+
+    // Operation id → gen_ai.operation.name (helps RERANKER detection)
+    if ('ai.operationId' in attrs && !('gen_ai.operation.name' in attrs)) {
+      attrs['gen_ai.operation.name'] = attrs['ai.operationId'];
+    }
+
+    // Response text → output message 0
+    if (
+      'ai.response.text' in attrs &&
+      !('llm.output_messages.0.message.content' in attrs)
+    ) {
+      attrs['llm.output_messages.0.message.role'] = 'assistant';
+      attrs['llm.output_messages.0.message.content'] = attrs['ai.response.text'];
+    }
+
+    // Response finish reason / id
+    if ('ai.response.finishReason' in attrs && !('llm.response.finish_reason' in attrs)) {
+      attrs['llm.response.finish_reason'] = attrs['ai.response.finishReason'];
+    }
+    if ('ai.response.id' in attrs && !('gen_ai.response.id' in attrs)) {
+      attrs['gen_ai.response.id'] = attrs['ai.response.id'];
+    }
+
+    // Prompt messages → exploded indexed keys
+    const rawMessages = attrs['ai.prompt.messages'];
+    if (typeof rawMessages === 'string') {
+      try {
+        const parsed = JSON.parse(rawMessages);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((msg, i) => {
+            if (msg && typeof msg === 'object') {
+              if (typeof msg.role === 'string') {
+                attrs[`llm.input_messages.${i}.message.role`] = msg.role;
+              }
+              if (typeof msg.content === 'string') {
+                attrs[`llm.input_messages.${i}.message.content`] = msg.content;
+              } else if (msg.content !== undefined) {
+                attrs[`llm.input_messages.${i}.message.content`] = JSON.stringify(msg.content);
+              }
+            }
+          });
+        }
+      } catch {
+        // Leave the raw string in place if parse fails
+      }
+    }
+
+    // Response toolCalls → exploded under output message 0
+    const rawToolCalls = attrs['ai.response.toolCalls'];
+    if (typeof rawToolCalls === 'string') {
+      try {
+        const parsed = JSON.parse(rawToolCalls);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((tc, i) => {
+            if (tc && typeof tc === 'object') {
+              if (tc.toolName !== undefined) {
+                attrs[`llm.output_messages.0.message.tool_calls.${i}.tool_call.function.name`] = tc.toolName;
+              }
+              if (tc.args !== undefined) {
+                const argStr =
+                  typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args);
+                attrs[`llm.output_messages.0.message.tool_calls.${i}.tool_call.function.arguments`] = argStr;
+              }
+              if (tc.toolCallId !== undefined) {
+                attrs[`llm.output_messages.0.message.tool_calls.${i}.tool_call.id`] = tc.toolCallId;
+              }
+            }
+          });
+        }
+      } catch {
+        // Ignore parse failure
+      }
+    }
+
+    // Tool span attributes
+    if (spanName === 'ai.toolCall') {
+      if ('ai.toolCall.name' in attrs && !('tool.name' in attrs)) {
+        attrs['tool.name'] = attrs['ai.toolCall.name'];
+      }
+      if ('ai.toolCall.args' in attrs && !('input.value' in attrs)) {
+        attrs['input.value'] = attrs['ai.toolCall.args'];
+      }
+      if ('ai.toolCall.result' in attrs && !('output.value' in attrs)) {
+        attrs['output.value'] = attrs['ai.toolCall.result'];
+      }
     }
   }
 
