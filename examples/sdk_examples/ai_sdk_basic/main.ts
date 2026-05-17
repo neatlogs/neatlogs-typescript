@@ -76,7 +76,9 @@ async function main() {
     tools: {
       getWeather: {
         description: 'Get the current weather for a location',
-        parameters: z.object({ location: z.string() }),
+        // AI SDK v3 uses `parameters`; v4+ uses `inputSchema`. Pick whichever
+        // your installed `ai` version supports.
+        inputSchema: z.object({ location: z.string() }),
         execute: async ({ location }: { location: string }) => ({
           location,
           temperature: 72,
@@ -84,7 +86,7 @@ async function main() {
         }),
       },
     },
-    // AI SDK v3 uses maxToolRoundtrips, v4+ uses maxSteps. The wrapper is
+    // AI SDK v3 uses maxToolRoundtrips; v4+ uses maxSteps. The wrapper is
     // version-agnostic — pick whichever your installed `ai` version supports.
     maxSteps: 2,
   });
