@@ -53,6 +53,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       'litellm',
       'google_genai',
       'portkey',
+      'ai_sdk',
     ],
     embedding: ['openai', 'cohere', 'huggingface', 'vertexai', 'mistralai', 'ollama'],
     retrieval: [
@@ -82,6 +83,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       'smolagents',
       'strands',
       'pipecat',
+      'ai_sdk',
     ],
     tool: ['langchain', 'llamaindex', 'haystack', 'mcp'],
     http: ['requests', 'httpx', 'urllib3', 'aiohttp'],
@@ -92,6 +94,15 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       openinference: null,
       openllmetry: null,
       neatlogs: null,
+      default_span_kind: 'LLM',
+    },
+    ai_sdk: {
+      openinference: null,
+      openllmetry: null,
+      // The wrapper is opt-in per call site; init({ instrumentations: ['ai_sdk'] })
+      // is a no-op. This registry entry exists so scope detection and tagging stay
+      // consistent with other LLM/agent libraries.
+      neatlogs: '@neatlogs/instrumentation-ai-sdk',
       default_span_kind: 'LLM',
     },
     openai: {
