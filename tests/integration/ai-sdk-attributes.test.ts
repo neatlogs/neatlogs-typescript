@@ -132,4 +132,25 @@ describe('Vercel AI SDK attribute extraction', () => {
     );
     expect(out['neatlogs.span.kind']).toBe('embedding');
   });
+
+  it('explodes ai.response.toolCalls into indexed output-message tool_calls', () => {
+    const out = processSpan(
+      makeAiSdkSpan('ai.generateText.doGenerate', {
+        'ai.model.id': 'gpt-4o-mini',
+        'ai.response.toolCalls': JSON.stringify([
+          { toolName: 'search', args: { q: 'weather' }, toolCallId: 'call_1' },
+          { toolName: 'calculate', args: { expr: '2+2' }, toolCallId: 'call_2' },
+        ]),
+      }),
+    );
+    // Verify the AI SDK explosion wrote the expected keys. extractToolCalls
+    // runs BEFORE extractVercelAiSdkAttrs, so these keys do NOT get collapsed
+    // into llm.tool_calls.*; they remain as llm.output_messages.* keys.
+    expect(out['llm.output_messages.0.message.tool_calls.0.tool_call.function.name']).toBe('search');
+    expect(out['llm.output_messages.0.message.tool_calls.1.tool_call.function.name']).toBe('calculate');
+    expect(out['llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments']).toContain('weather');
+    expect(out['llm.output_messages.0.message.tool_calls.1.tool_call.function.arguments']).toContain('2+2');
+    expect(out['llm.output_messages.0.message.tool_calls.0.tool_call.id']).toBe('call_1');
+    expect(out['llm.output_messages.0.message.tool_calls.1.tool_call.id']).toBe('call_2');
+  });
 });

@@ -840,11 +840,15 @@ export class UnifiedAttributeProcessor {
       if ('ai.toolCall.name' in attrs && !('tool.name' in attrs)) {
         attrs['tool.name'] = attrs['ai.toolCall.name'];
       }
+      // Normalize args/result to JSON strings so downstream parsers
+      // (e.g. extractToolCallIdFromOutput) can JSON.parse them safely.
       if ('ai.toolCall.args' in attrs && !('input.value' in attrs)) {
-        attrs['input.value'] = attrs['ai.toolCall.args'];
+        const raw = attrs['ai.toolCall.args'];
+        attrs['input.value'] = typeof raw === 'string' ? raw : JSON.stringify(raw);
       }
       if ('ai.toolCall.result' in attrs && !('output.value' in attrs)) {
-        attrs['output.value'] = attrs['ai.toolCall.result'];
+        const raw = attrs['ai.toolCall.result'];
+        attrs['output.value'] = typeof raw === 'string' ? raw : JSON.stringify(raw);
       }
     }
   }
