@@ -201,11 +201,14 @@ export class AttributeMapper {
     const mapped: Record<string, any> = {};
 
     for (const [key, value] of Object.entries(config)) {
-      if (['description', 'sources', 'target', 'indexed', 'priority', 'values'].includes(key)) {
+      if (['description', 'sources', 'target', 'indexed', 'priority', 'values', 'applies_to'].includes(key)) {
         continue;
       }
 
       if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        if (Array.isArray(value.applies_to) && spanKind && !value.applies_to.includes(spanKind)) {
+          continue;
+        }
         if ('sources' in value) {
           if (value.indexed) {
             const target = value.target ?? '';
@@ -254,6 +257,10 @@ export class AttributeMapper {
       if (sectionName === 'span_kind' || sectionName === 'keep_as_is' || sectionName === 'ignore') continue;
 
       if (typeof sectionConfig === 'object' && sectionConfig !== null) {
+        // Skip sections that don't apply to this span kind
+        if (Array.isArray(sectionConfig.applies_to) && spanKind && !sectionConfig.applies_to.includes(spanKind)) {
+          continue;
+        }
         if ('mappings' in sectionConfig) {
           // Process the explicit 'mappings' sub-key
           const nestedMapped = this.mapNestedConfig(
@@ -264,8 +271,11 @@ export class AttributeMapper {
           Object.assign(mapped, nestedMapped);
           // Also process sibling sub-sections (e.g. generic_io, span, tool, etc.)
           for (const [subKey, subVal] of Object.entries(sectionConfig)) {
-            if (subKey === 'mappings' || subKey === 'description') continue;
+            if (subKey === 'mappings' || subKey === 'description' || subKey === 'applies_to') continue;
             if (typeof subVal === 'object' && subVal !== null && !Array.isArray(subVal)) {
+              if (Array.isArray((subVal as any).applies_to) && spanKind && !(subVal as any).applies_to.includes(spanKind)) {
+                continue;
+              }
               if ('sources' in subVal) {
                 if ((subVal as any).indexed) {
                   const target = (subVal as any).target ?? '';

@@ -683,23 +683,61 @@
       },
       "reranker": {
         "description": "Reranker model attributes",
+        "applies_to": ["reranker"],
         "model_name": {
           "sources": [
-            "reranker.model_name"
+            "reranker.model_name",
+            "ai.model.id"
           ],
           "target": "neatlogs.reranker.model_name"
         },
+        "provider": {
+          "sources": [
+            "ai.model.provider"
+          ],
+          "target": "neatlogs.reranker.provider",
+          "description": "Vercel AI SDK reranker provider (e.g. gateway, cohere)"
+        },
         "query": {
           "sources": [
-            "reranker.query"
+            "reranker.query",
+            "ai.rerank.query"
           ],
           "target": "neatlogs.reranker.query"
+        },
+        "documents": {
+          "sources": [
+            "ai.documents"
+          ],
+          "target": "neatlogs.reranker.input_documents",
+          "description": "Vercel AI SDK rerank input documents array"
+        },
+        "ranking": {
+          "sources": [
+            "ai.ranking"
+          ],
+          "target": "neatlogs.reranker.output_documents",
+          "description": "Vercel AI SDK rerank output ranking array"
+        },
+        "ranking_type": {
+          "sources": [
+            "ai.ranking.type"
+          ],
+          "target": "neatlogs.reranker.ranking_type",
+          "description": "Vercel AI SDK rerank type (e.g. text)"
         },
         "top_k": {
           "sources": [
             "reranker.top_k"
           ],
           "target": "neatlogs.reranker.top_k"
+        },
+        "max_retries": {
+          "sources": [
+            "ai.settings.maxRetries"
+          ],
+          "target": "neatlogs.reranker.max_retries",
+          "description": "Vercel AI SDK max retries setting"
         },
         "input_documents": {
           "sources": {
@@ -738,9 +776,19 @@
       },
       "embedding": {
         "description": "Embedding model attributes",
+        "applies_to": ["embedding"],
+        "input": {
+          "sources": [
+            "ai.value",
+            "ai.values"
+          ],
+          "target": "neatlogs.embedding.input",
+          "description": "Vercel AI SDK embed/embedMany input value(s)"
+        },
         "model_name": {
           "sources": [
-            "embedding.model_name"
+            "embedding.model_name",
+            "ai.model.id"
           ],
           "target": "neatlogs.embedding.model_name"
         },
@@ -758,7 +806,8 @@
         },
         "token_count": {
           "sources": [
-            "embedding.token_count"
+            "embedding.token_count",
+            "ai.usage.tokens"
           ],
           "target": "neatlogs.embedding.token_count"
         },

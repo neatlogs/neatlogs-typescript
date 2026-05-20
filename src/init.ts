@@ -310,10 +310,7 @@ export async function init(options: InitOptions = {}): Promise<void> {
   const manager = new InstrumentationManager({
     provider,
     debug: options.debug,
-    excludedUrls: [baseUrl, endpoint].filter(Boolean) as string[],
   });
-
-  await manager.instrumentHttp();
 
   if (options.instrumentations?.length) {
     await manager.instrument(options.instrumentations);

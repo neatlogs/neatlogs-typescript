@@ -721,10 +721,22 @@ export class UnifiedAttributeProcessor {
     if (!('openinference.span.kind' in attrs)) {
       if (spanName === 'ai.toolCall') {
         attrs['openinference.span.kind'] = 'TOOL';
-      } else if (spanName === 'ai.embed' || spanName === 'ai.embedMany') {
+      } else if (spanName.startsWith('ai.embed')) {
         attrs['openinference.span.kind'] = 'EMBEDDING';
-      } else if (spanName.startsWith('ai.generate') || spanName.startsWith('ai.stream')) {
-        attrs['openinference.span.kind'] = 'LLM';
+      } else if (spanName.startsWith('ai.rerank')) {
+        attrs['openinference.span.kind'] = 'RERANKER';
+      } else if (spanName.endsWith('.doStream') || spanName.endsWith('.doGenerate') || spanName.endsWith('.doRerank') || spanName.endsWith('.doEmbed')) {
+        // Actual provider API calls (ai.streamText.doStream, ai.generateText.doGenerate, etc.)
+        if (spanName.includes('embed')) {
+          attrs['openinference.span.kind'] = 'EMBEDDING';
+        } else if (spanName.includes('rerank')) {
+          attrs['openinference.span.kind'] = 'RERANKER';
+        } else {
+          attrs['openinference.span.kind'] = 'LLM';
+        }
+      } else if (spanName === 'ai.generateText' || spanName === 'ai.streamText' || spanName === 'ai.generateObject' || spanName === 'ai.streamObject') {
+        // Top-level AI SDK orchestration spans (multi-step loops)
+        attrs['openinference.span.kind'] = 'CHAIN';
       }
     }
 
@@ -762,6 +774,21 @@ export class UnifiedAttributeProcessor {
     for (const [src, tgt] of Object.entries(settingMap)) {
       if (src in attrs && !(tgt in attrs)) {
         attrs[tgt] = attrs[src];
+      }
+    }
+
+    // Build llm.invocation_parameters from gen_ai.request.* if not already set
+    if (!('llm.invocation_parameters' in attrs)) {
+      const params: Record<string, any> = {};
+      if ('gen_ai.request.temperature' in attrs) params.temperature = attrs['gen_ai.request.temperature'];
+      if ('gen_ai.request.max_tokens' in attrs) params.max_tokens = attrs['gen_ai.request.max_tokens'];
+      if ('gen_ai.request.top_p' in attrs) params.top_p = attrs['gen_ai.request.top_p'];
+      if ('gen_ai.request.top_k' in attrs) params.top_k = attrs['gen_ai.request.top_k'];
+      if ('gen_ai.request.frequency_penalty' in attrs) params.frequency_penalty = attrs['gen_ai.request.frequency_penalty'];
+      if ('gen_ai.request.presence_penalty' in attrs) params.presence_penalty = attrs['gen_ai.request.presence_penalty'];
+      if ('gen_ai.request.stop_sequences' in attrs) params.stop_sequences = attrs['gen_ai.request.stop_sequences'];
+      if (Object.keys(params).length > 0) {
+        attrs['llm.invocation_parameters'] = JSON.stringify(params);
       }
     }
 
@@ -836,6 +863,17 @@ export class UnifiedAttributeProcessor {
       } catch {
         // Ignore parse failure
       }
+    }
+
+    // Embedding input: Vercel AI SDK JSON.stringify()s each value for OTel transport — unwrap
+    if ('ai.value' in attrs && typeof attrs['ai.value'] === 'string') {
+      try { attrs['ai.value'] = JSON.parse(attrs['ai.value']); } catch {}
+    }
+    if ('ai.values' in attrs && Array.isArray(attrs['ai.values'])) {
+      attrs['ai.values'] = JSON.stringify(attrs['ai.values'].map((v: unknown) => {
+        if (typeof v === 'string') { try { return JSON.parse(v); } catch {} }
+        return v;
+      }));
     }
 
     // Tool span attributes
@@ -1085,24 +1123,28 @@ export class UnifiedAttributeProcessor {
       if (oiKind) {
         unified['neatlogs.span.kind'] = String(oiKind).toLowerCase();
       } else {
-        // Fallback: infer from span name
+        // Fallback: infer from span name — skip for framework-internal spans (e.g. next.js routes)
+        const scopeName = attrs['neatlogs.instrumentation.name'] ?? '';
         const spanName = attrs['_span_name'] ?? '';
-        if (spanName) {
+        if (spanName && scopeName !== 'next.js') {
           const inferred = inferSpanKindFromName(spanName).toLowerCase();
           unified['neatlogs.span.kind'] = inferred;
         }
       }
     }
 
-    // Detect RERANKER operations
+    // Detect RERANKER operations (only infer if kind wasn't explicitly set)
     const llmRequestType = (attrs['llm.request.type'] ?? '').toLowerCase();
     const genAiOperation = (attrs['gen_ai.operation.name'] ?? '').toLowerCase();
     const spanNameLower = (attrs['_span_name'] ?? '').toLowerCase();
+    const hasExplicitKind = 'openinference.span.kind' in attrs || 'traceloop.span.kind' in attrs;
 
     if (
-      llmRequestType === 'rerank' ||
-      genAiOperation === 'rerank' ||
-      spanNameLower.includes('rerank')
+      !hasExplicitKind && (
+        llmRequestType === 'rerank' ||
+        genAiOperation === 'rerank' ||
+        spanNameLower.includes('rerank')
+      )
     ) {
       unified['neatlogs.span.kind'] = 'reranker';
     }
@@ -1355,7 +1397,7 @@ export class UnifiedAttributeProcessor {
     const filtered: Record<string, any> = {};
     for (const [key, value] of Object.entries(attrs)) {
       // Skip embedding vector keys
-      if (key.includes('.embedding.vector') || key.includes('.embeddings.')) {
+      if (key.includes('.embedding.vector') || key.includes('.embeddings.') || key === 'ai.embeddings' || key === 'ai.embedding') {
         if (this.debug) {
           logger.debug(`[FILTER] Dropped embedding vector key: ${key}`);
         }
@@ -1388,7 +1430,7 @@ export class UnifiedAttributeProcessor {
    * Check if the raw span kind indicates CLIENT (OTel SpanKind.CLIENT = 3).
    */
   private isHttpLikeSpanKind(kind: number | string): boolean {
-    if (typeof kind === 'number') return kind === 2; // SpanKind.CLIENT = 2
+    if (typeof kind === 'number') return kind === 3; // SpanKind.CLIENT = 3
     return String(kind).toUpperCase() === 'CLIENT';
   }
 }

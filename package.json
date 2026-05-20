@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -12,8 +12,18 @@
         "default": "./dist/index.mjs"
       },
       "require": {
-        "types": "./dist/index.d.cts",
+        "types": "./dist/index.d.ts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./ai": {
+      "import": {
+        "types": "./dist/ai-sdk.d.mts",
+        "default": "./dist/ai-sdk.mjs"
+      },
+      "require": {
+        "types": "./dist/ai-sdk.d.ts",
+        "default": "./dist/ai-sdk.cjs"
       }
     }
   },
@@ -24,7 +34,7 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && rm -f dist/*.d.mts",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
@@ -50,7 +60,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@ai-sdk/azure": "^3.0.63",
+    "@ai-sdk/cohere": "^3.0.36",
     "@mastra/observability": "^1.11.1",
     "@neatlogs/instrumentation-google-genai": "^0.1.2",
     "@neatlogs/instrumentation-mastra": "^0.1.2",
@@ -69,6 +79,8 @@
     "@opentelemetry/semantic-conventions": "^1.28.0"
   },
   "devDependencies": {
+    "@ai-sdk/azure": "^3.0.65",
+    "@ai-sdk/openai": "^3.0.64",
     "@anthropic-ai/bedrock-sdk": "^0.29.1",
     "@anthropic-ai/sdk": "^0.68.0",
     "@arizeai/openinference-instrumentation-anthropic": "^0.1.10",
@@ -82,6 +94,7 @@
     "@langchain/langgraph": "^0.3.12",
     "@langchain/openai": "^0.6.17",
     "@types/node": "^20.0.0",
+    "ai": "^6.0.184",
     "dotenv": "^17.4.2",
     "openai": "^6.34.0",
     "tsup": "^8.0.0",

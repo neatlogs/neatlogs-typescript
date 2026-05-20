@@ -394,6 +394,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       return;
     }
 
+
     const startTime = performance.now();
     this.perfStats.spansProcessed += 1;
 
@@ -439,9 +440,8 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
           ) {
             keysToRemove.push(key);
           } else if (
-            skipOutput &&
-            (key === 'neatlogs.embedding.input' ||
-              key === 'neatlogs.embedding.output')
+            key === 'neatlogs.embedding.output' ||
+            (skipOutput && key === 'neatlogs.embedding.input')
           ) {
             keysToRemove.push(key);
           }

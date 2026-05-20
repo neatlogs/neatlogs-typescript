@@ -27,7 +27,8 @@ process.env.NEATLOGS_LOG_SPANS_FILE ??= 'ai_sdk_basic_spans.log';
 process.env.NEATLOGS_LOG_RAW_SPANS ??= 'true';
 process.env.NEATLOGS_LOG_RAW_SPANS_FILE ??= 'ai_sdk_basic_raw_spans.log';
 
-import { init, flush, shutdown, getAISDKWrapper } from 'neatlogs';
+import { init, flush, shutdown } from 'neatlogs';
+import { wrapAISDK } from 'neatlogs/ai';
 
 async function main() {
   await init({
@@ -51,7 +52,6 @@ async function main() {
   const { createAzure } = await import('@ai-sdk/azure' as string);
   const { z } = await import('zod' as string);
 
-  const wrapAISDK = await getAISDKWrapper();
   const { generateText, streamText } = wrapAISDK(ai);
 
   const azureResourceName = process.env.AZURE_OPENAI_ENDPOINT!

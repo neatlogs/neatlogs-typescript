@@ -17,7 +17,7 @@ export class FilteringExporter implements SpanExporter {
     resultCallback: (result: ExportResult) => void,
   ): void {
     const filtered = spans.filter(
-      (s) => !s.attributes['neatlogs.dropped'],
+      (s) => !s.attributes['neatlogs.dropped'] && s.instrumentationLibrary.name !== 'next.js',
     );
     if (filtered.length === 0) {
       // Nothing to export — report success immediately

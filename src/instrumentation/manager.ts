@@ -18,86 +18,19 @@ const logger = getLogger();
 export interface InstrumentationManagerOptions {
   provider: TracerProvider;
   debug?: boolean;
-  excludedUrls?: string[];
 }
 
 export class InstrumentationManager {
   private provider: TracerProvider;
-  private debug: boolean;
-  private excludedUrls: string[];
   private _instrumented: string[] = [];
 
   constructor(options: InstrumentationManagerOptions) {
     this.provider = options.provider;
-    this.debug = options.debug ?? false;
-    this.excludedUrls = options.excludedUrls ?? [];
   }
 
   /** Get list of successfully instrumented libraries. */
   get instrumented(): string[] {
     return [...this._instrumented];
-  }
-
-  /**
-   * Instrument HTTP (fetch/undici) for W3C traceparent context propagation.
-   * Always called by init().
-   */
-  async instrumentHttp(): Promise<void> {
-    // Build a hook that suppresses tracing for the SDK's own HTTP calls
-    // (OTLP exporter, NeatlogsExporter batch endpoint, prompt client).
-    const excludedUrls = this.excludedUrls;
-    const ignoreOutgoingRequestHook = excludedUrls.length > 0
-      ? (request: any) => {
-          try {
-            const url = typeof request === 'string'
-              ? request
-              : (request?.href ?? request?.path ?? '');
-            return excludedUrls.some((excluded) => url.includes(excluded));
-          } catch {
-            return false;
-          }
-        }
-      : undefined;
-
-    try {
-      // Instrument Node.js http/https modules for context propagation
-      const { HttpInstrumentation } = await import(
-        '@opentelemetry/instrumentation-http'
-      );
-      const httpInstr = new HttpInstrumentation({
-        ...(ignoreOutgoingRequestHook ? { ignoreOutgoingRequestHook } : {}),
-      });
-      httpInstr.setTracerProvider(this.provider);
-      httpInstr.enable();
-      logger.debug('Instrumented http/https for context propagation');
-    } catch {
-      logger.debug('http instrumentation not available — skipping');
-    }
-
-    try {
-      // Instrument undici (Node.js native fetch backend)
-      const { UndiciInstrumentation } = await import(
-        '@opentelemetry/instrumentation-undici'
-      );
-      const ignoreUndiciHook = excludedUrls.length > 0
-        ? (request: any) => {
-            try {
-              const url = `${request?.origin ?? ''}${request?.path ?? ''}`;
-              return excludedUrls.some((excluded) => url.includes(excluded));
-            } catch {
-              return false;
-            }
-          }
-        : undefined;
-      const undiciInstr = new UndiciInstrumentation({
-        ...(ignoreUndiciHook ? { ignoreRequestHook: ignoreUndiciHook } : {}),
-      });
-      undiciInstr.setTracerProvider(this.provider);
-      undiciInstr.enable();
-      logger.debug('Instrumented undici for context propagation');
-    } catch {
-      logger.debug('undici instrumentation not available — skipping');
-    }
   }
 
   /**

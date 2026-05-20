@@ -51,7 +51,7 @@ export {
 export { getMastraObservability } from './mastra.js';
 
 // Vercel AI SDK integration
-export { getAISDKWrapper } from './ai-sdk.js';
+export { wrapAISDK, createAITelemetry } from './ai-sdk.js';
 
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';
