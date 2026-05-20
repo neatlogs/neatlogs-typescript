@@ -44,7 +44,8 @@ Complete minimal working example:
 import { init, span, flush, shutdown } from 'neatlogs';
 
 await init({
-  apiKey: 'your-api-key',        // or set NEATLOGS_API_KEY env var
+  apiKey: process.env.NEATLOGS_API_KEY ?? '',
+  endpoint: process.env.NEATLOGS_ENDPOINT ?? 'https://staging-cloud.neatlogs.com',
   workflowName: 'my-app',
   instrumentations: ['openai'],
 });
@@ -109,7 +110,7 @@ await init(options);
 | `piiSpanTypes` | `string[]` | `undefined` | Override which span types have PII redaction |
 | `mask` | `MaskFunction` | `undefined` | Client-side mask function |
 | `metadata` | `Record<string, any>` | `undefined` | Custom metadata to attach to all spans |
-| `endpoint` | `string` | `'https://staging-cloud.neatlogs.com/api/data/v4/batch'` | Backend endpoint URL |
+| `endpoint` | `string` | `'https://staging-cloud.neatlogs.com'` | Backend endpoint URL |
 | `baseUrl` | `string` | `undefined` | Base URL for the Neatlogs API |
 
 ---
@@ -130,13 +131,14 @@ Pass these string values in the `instrumentations` array to `init()`.
 | `beeai` | BeeAI | `@arizeai/openinference-instrumentation-beeai` |
 | `claude_agent_sdk` | Claude Agent SDK | `@arizeai/openinference-instrumentation-claude-agent-sdk` |
 | `mastra` | Mastra | `@neatlogs/instrumentation-mastra` (custom) |
-| `ai_sdk` | Vercel AI SDK (`ai`) | `@neatlogs/instrumentation-ai-sdk` (custom; opt-in via `wrapAISDK(ai)`) |
+| `google_genai` | Google GenAI (`@google/genai`) | `@neatlogs/instrumentation-google-genai` (custom) |
+| `ai_sdk` | Vercel AI SDK (`ai`) | Built into `neatlogs/ai` (opt-in via `wrapAISDK(ai)`) |
 
 ### Registered but Not Instrumentable (TS SDK v1)
 
 These are in the registry but have `null` instrumentation fields — they cannot be auto-instrumented in the current TypeScript SDK version:
 
-`google_genai`, `litellm`, `crewai`
+`litellm`, `crewai`
 
 > **HTTP auto-instrumentation** (fetch/undici) is always enabled by `init()` for trace context propagation — you do not need to list it in `instrumentations`.
 

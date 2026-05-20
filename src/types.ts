@@ -55,7 +55,7 @@ export interface InitOptions {
   mask?: MaskFunction;
   /** Sampling rate (0.0 to 1.0). Defaults to 1.0. */
   sampleRate?: number;
-  /** Whether to capture log records. Defaults to true. */
+  /** Whether to capture log records. Defaults to false. */
   captureLogs?: boolean;
   /** Whether to capture input/output content. Defaults to true. */
   traceContent?: boolean;
@@ -63,7 +63,7 @@ export interface InitOptions {
   pii?: 'redact' | 'hash' | false;
   /** SDK version override. */
   version?: string;
-  /** Backend endpoint URL. Defaults to https://staging-cloud.neatlogs.com/api/data/v4/batch */
+  /** Backend endpoint URL. Defaults to https://staging-cloud.neatlogs.com */
   endpoint?: string;
   /** Maximum spans per export batch. Defaults to 100. */
   batchSize?: number;

@@ -288,61 +288,53 @@ await shutdown();
 
 ## 9. Mastra
 
+- **Instrumentation key**: `instrumentations: ['mastra']`
 - **Package**: `@neatlogs/instrumentation-mastra`
 
-> **⚠️ @mastra/core@1.x compatibility note:** `@mastra/core@1.x` ships a sealed CJS bundle where `Mastra` property is `configurable: false`. Constructor-level patching via `instrumentations: ['mastra']` is **not possible** — a `[neatlogs]` warning is emitted to stderr and no spans are collected.
->
-> **Use the direct `observability` injection approach instead:**
+Pass `instrumentations: ['mastra']` to `init()`, then use `getMastraObservability()` to get the observability config for the Mastra constructor:
 
 ```typescript
-import { Mastra } from '@mastra/core';
-import { trace } from '@opentelemetry/api';
-import { createNeatlogsMastraObservability } from '@neatlogs/instrumentation-mastra';
-import { init, flush, shutdown } from 'neatlogs';
+import { init, getMastraObservability } from 'neatlogs';
+import { Mastra } from '@mastra/core/mastra';
 
-// 1. Initialize neatlogs telemetry first
-await init({ apiKey: '...', workflowName: 'mastra-app' });
-
-// 2. Reuse the active provider installed by neatlogs
-const provider = trace.getTracerProvider();
-const { observability } = createNeatlogsMastraObservability(provider);
-
-// 3. Pass observability directly to Mastra constructor
-const mastra = new Mastra({
-  observability,
-  // ... other Mastra config
+await init({
+  apiKey: '...',
+  endpoint: 'https://staging-cloud.neatlogs.com',
+  workflowName: 'mastra-app',
+  instrumentations: ['mastra'],
 });
 
-// Mastra agent, workflow, and tool calls now emit spans to Neatlogs
-// ... your Mastra code ...
-
-await flush();
-await shutdown();
+export const mastra = new Mastra({
+  agents: { /* ... */ },
+  observability: await getMastraObservability(),
+});
 ```
+
+Mastra agent, workflow, tool, and LLM step spans are automatically captured.
 
 ---
 
 ## 10. Vercel AI SDK (`ai` package)
 
-- **Package**: `@neatlogs/instrumentation-ai-sdk`
-- **Compatibility**: `ai >=3 <7` (v3, v4, v5, v6) — declared as an optional peer dependency.
-- **No monkey-patching**: the AI SDK already supports OpenTelemetry natively via `experimental_telemetry`. The companion package opts in per call site through a wrapper, so there's no fragile module patching.
+- **Import**: `import { wrapAISDK } from 'neatlogs/ai'` (built into the SDK, no separate package)
+- **Compatibility**: `ai >=3 <7` (v3, v4, v5, v6)
+- **No monkey-patching**: the AI SDK supports OpenTelemetry natively via `experimental_telemetry`. The wrapper opts in per call site, so there's no fragile module patching.
 
 > **Two APIs**: use `wrapAISDK(ai)` for the ergonomic wrapper (recommended), or `createAITelemetry()` for direct `experimental_telemetry` injection on individual calls.
 
 ### Recommended: `wrapAISDK`
 
 ```typescript
-import { init, getAISDKWrapper, flush, shutdown } from 'neatlogs';
+import { init, flush, shutdown } from 'neatlogs';
+import { wrapAISDK } from 'neatlogs/ai';
 import * as ai from 'ai';
 import { openai } from '@ai-sdk/openai';
 
 // 1. Initialize neatlogs first so a TracerProvider is registered globally
 await init({ apiKey: '...', workflowName: 'ai-sdk-app' });
 
-// 2. Resolve the wrapper from the optional peer package
-const wrapAISDK = await getAISDKWrapper();
-const { generateText, streamText, generateObject, streamObject } = wrapAISDK(ai);
+// 2. Wrap the ai module — wraps generateText, streamText, generateObject, streamObject, embed, embedMany, rerank
+const { generateText, streamText, generateObject, streamObject, embed, embedMany, rerank } = wrapAISDK(ai);
 
 // 3. Use the wrapped functions exactly like the originals
 const { text } = await generateText({
@@ -355,7 +347,7 @@ await shutdown();
 ```
 
 Each wrapped call:
-1. Opens a parent OTel span on the active `TracerProvider` with `openinference.span.kind = 'WORKFLOW'` (so the trace-finalizer accepts it as a valid root). The AI SDK's native `ai.doGenerate` / `ai.doStream` child spans remain `LLM`; tool-call children remain `TOOL`.
+1. Opens a parent OTel span on the active `TracerProvider` with `openinference.span.kind = 'WORKFLOW'` (for generateText/streamText/generateObject/streamObject) or `'CHAIN'` (for embed/embedMany/rerank). The AI SDK's native `ai.doGenerate` / `ai.doStream` child spans remain `LLM`; tool-call children remain `TOOL`.
 2. Forces `experimental_telemetry: { isEnabled: true, recordInputs: true, recordOutputs: true, tracer, metadata: { neatlogsWrapped: true } }` for that call. **`isEnabled: false` is overridden** — to skip telemetry for a specific call, use the unwrapped `ai` import directly.
 3. Captures `input.value` (always) and `output.value` (async functions only — streams cannot be JSON-serialized, so `output.value` is unset on streaming parents; native AI SDK child spans still share the trace).
 4. Sets `SpanStatusCode.ERROR` on rethrown exceptions.
@@ -367,7 +359,7 @@ When you want telemetry on a single call without wrapping the whole module:
 ```typescript
 import { generateText } from 'ai';
 import { openai } from '@ai-sdk/openai';
-import { createAITelemetry } from '@neatlogs/instrumentation-ai-sdk';
+import { createAITelemetry } from 'neatlogs/ai';
 
 await generateText({
   model: openai('gpt-4o-mini'),
@@ -395,7 +387,7 @@ The Vercel AI SDK emits its own `ai.*` namespace; the SDK's `UnifiedAttributePro
 
 ### Note on `init({ instrumentations: ['ai_sdk'] })`
 
-`ai_sdk` exists in the instrumentation registry for scope-detection consistency, but passing it to `init()` is a **no-op**. The wrapper is always opt-in per call site — listing it in `instrumentations` does nothing useful and is not required.
+`ai_sdk` exists in the instrumentation registry for scope-detection consistency, but passing it to `init()` is a **no-op**. The wrapper is always opt-in per call site via `wrapAISDK(ai)` — listing it in `instrumentations` does nothing useful and is not required.
 
 ---
 

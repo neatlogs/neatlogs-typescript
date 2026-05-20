@@ -149,7 +149,7 @@ The Prompt Management API stores and retrieves prompt templates from the NeatLog
 import { getPrompt, fetchPrompt } from 'neatlogs';
 
 // Get a prompt by name (returns PromptHandle)
-const prompt = await getPrompt({ name: 'research-agent', label: 'production' });
+const prompt = await getPrompt('research-agent', { label: 'production' });
 
 // Access properties
 console.log(prompt.name);       // 'research-agent'
@@ -158,8 +158,8 @@ console.log(prompt.content);    // Raw template string
 console.log(prompt.labels);     // ['production']
 console.log(prompt.config);     // Config object
 
-// Fetch cached prompt (returns CachedPrompt)
-const cached = await fetchPrompt({ name: 'research-agent', label: 'production' });
+// Fetch prompt (returns PromptHandle)
+const cached = await fetchPrompt('research-agent', { label: 'production' });
 ```
 
 ### Creating and Managing Prompts
@@ -170,28 +170,24 @@ import { createPrompt, updatePrompt, saveAsVersion, listPrompts, deletePrompt, r
 // Create a prompt
 const newPrompt = await createPrompt({
   name: 'research-agent',
-  prompt: 'You are a research assistant for {{topic}}.',
+  content: 'You are a research assistant for {{topic}}.',
   labels: ['staging'],
 });
 
-// Move labels to a specific version
-await updatePrompt({ name: 'research-agent', version: 1, newLabels: ['production'] });
+// Update a prompt (content, messages, config, or labels)
+await updatePrompt('research-agent', { labels: ['production'] });
 
-// Save new content as a new version
-await saveAsVersion({
-  promptName: 'research-agent',
-  content: 'Updated research assistant for {{topic}}.',
-  labels: ['staging'],
-});
+// Save current version with a label
+await saveAsVersion('research-agent', { label: 'staging' });
 
 // List all prompts
 const allPrompts = await listPrompts();
 
-// Delete a specific version
-await deletePrompt({ name: 'research-agent', version: 1 });
+// Delete a prompt by name
+await deletePrompt('research-agent');
 
-// Remove a label from a version
-await removeTag({ name: 'research-agent', version: 2, tag: 'staging' });
+// Remove a label from a prompt
+await removeTag('research-agent', 'staging');
 ```
 
 ### Error Handling
@@ -200,7 +196,7 @@ await removeTag({ name: 'research-agent', version: 2, tag: 'staging' });
 import { PromptNotFoundError, PromptApiError, PromptClientError } from 'neatlogs';
 
 try {
-  const prompt = await getPrompt({ name: 'nonexistent' });
+  const prompt = await getPrompt('nonexistent');
 } catch (error) {
   if (error instanceof PromptNotFoundError) {
     console.log('Prompt not found');

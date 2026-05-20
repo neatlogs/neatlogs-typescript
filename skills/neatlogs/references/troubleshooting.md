@@ -107,7 +107,6 @@ process.on('SIGTERM', async () => {
 
 The following libraries are in the instrumentation registry but have `null` instrumentation fields. Passing them in `instrumentations` will NOT produce an error but they will NOT be instrumented:
 
-- `google_genai` — no OpenInference/Neatlogs TypeScript instrumentor available
 - `litellm` — Python-only library
 - `crewai` — Python-only library
 

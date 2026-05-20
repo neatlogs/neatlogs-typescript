@@ -151,7 +151,7 @@ export async function init(options: InitOptions = {}): Promise<void> {
   // 7. Parse base URL from endpoint
   const endpoint =
     options.endpoint ??
-    'https://staging-cloud.neatlogs.com/api/data/v4/batch';
+    'https://staging-cloud.neatlogs.com';
   const baseUrl = new URL(endpoint).origin;
 
   // 8. Set session config
