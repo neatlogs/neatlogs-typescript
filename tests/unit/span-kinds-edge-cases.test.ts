@@ -68,7 +68,14 @@ describe('inferSpanKindFromName edge cases', () => {
     expect(inferSpanKindFromName('milvus.fetch')).toBe('RETRIEVER');
     expect(inferSpanKindFromName('lancedb.find')).toBe('RETRIEVER');
     expect(inferSpanKindFromName('marqo.retrieve')).toBe('RETRIEVER');
-    expect(inferSpanKindFromName('astra.discover')).toBe('RETRIEVER');
+  });
+
+  it('should NOT misclassify the Mastra framework as a vector store', () => {
+    // Regression: 'astra' (DataStax Astra DB) was a substring match that hit
+    // 'm·astra' agent spans. Astra is unused (no instrumentation emits it), so
+    // it was removed from the vector-DB name list.
+    expect(inferSpanKindFromName('mastra.agent.Project Manager')).toBe('AGENT');
+    expect(inferSpanKindFromName('mastra.workflow.sprint')).toBe('CHAIN');
   });
 
   it('should return VECTOR_STORE for vector DB write operations', () => {

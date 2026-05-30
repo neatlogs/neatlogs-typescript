@@ -6,4 +6,19 @@ logs/
 .env
 .env.local
 *.log
+*.tgz
 .DS_Store
+
+# Next.js / build output from example apps (e.g. examples/sdk_examples/gemini-chatbot)
+**/.next/
+**/build/
+**/.turbo/
+**/.vercel/
+
+# Span dumps produced by example/test runs (may contain prompts + keys)
+**/spans_*.log
+
+# Python artifacts (if any examples use Python tooling)
+**/__pycache__/
+**/.venv/
+**/venv/

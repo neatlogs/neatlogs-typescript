@@ -15,7 +15,6 @@ export const VECTOR_DB_SYSTEMS = new Set([
   'marqo',
   'weaviate',
   'lancedb',
-  'astra',
   'pgvector',
   'elasticsearch',
 ]);
@@ -61,5 +60,4 @@ export const VECTOR_DB_NAMES = [
   'milvus',
   'lancedb',
   'marqo',
-  'astra',
 ];

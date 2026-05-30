@@ -1,0 +1,430 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import {
+  trace as otelTrace,
+  context as otelContext,
+} from '@opentelemetry/api';
+import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import {
+  SimpleSpanProcessor,
+  InMemorySpanExporter,
+  type ReadableSpan,
+} from '@opentelemetry/sdk-trace-base';
+
+import { wrapOpenAI, traceTool as traceToolOpenAI } from '../../src/openai.js';
+import { wrapAnthropic, traceTool as traceToolAnthropic } from '../../src/anthropic.js';
+import { langchainHandler } from '../../src/langchain.js';
+import { strandsHooks } from '../../src/strands.js';
+import { openaiAgentsProcessor } from '../../src/openai-agents.js';
+import { wrapMastra } from '../../src/mastra-wrap.js';
+
+let provider: NodeTracerProvider;
+let exporter: InMemorySpanExporter;
+
+beforeAll(() => {
+  exporter = new InMemorySpanExporter();
+  provider = new NodeTracerProvider();
+  provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+  provider.register();
+});
+
+afterAll(async () => {
+  await provider.shutdown();
+});
+
+beforeEach(() => {
+  exporter.reset();
+});
+
+function getSpans(): ReadableSpan[] {
+  return exporter.getFinishedSpans();
+}
+
+function attr(span: ReadableSpan, key: string): any {
+  return span.attributes[key];
+}
+
+// ---------------------------------------------------------------------------
+// wrapOpenAI
+// ---------------------------------------------------------------------------
+
+describe('wrapOpenAI', () => {
+  it('traces non-streaming chat.completions.create', async () => {
+    const fakeResponse = {
+      id: 'chatcmpl-123',
+      model: 'gpt-4o',
+      choices: [{ message: { role: 'assistant', content: 'Hello!' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    };
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async () => fakeResponse,
+        },
+      },
+    };
+
+    const wrapped = wrapOpenAI(fakeClient as any);
+    const result = await wrapped.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi' }],
+    });
+
+    expect(result).toEqual(fakeResponse);
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'neatlogs.span.kind')).toBe('LLM');
+    expect(attr(spans[0], 'neatlogs.llm.model_name')).toBe('gpt-4o');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.role')).toBe('user');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.content')).toBe('Hi');
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello!');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(10);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(5);
+  });
+
+  it('traces streaming chat.completions.create', async () => {
+    const chunks = [
+      { choices: [{ delta: { content: 'He' }, finish_reason: null }], model: 'gpt-4o' },
+      { choices: [{ delta: { content: 'llo' }, finish_reason: null }], model: 'gpt-4o' },
+      { choices: [{ delta: {}, finish_reason: 'stop' }], model: 'gpt-4o' },
+      { choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } },
+    ];
+
+    async function* fakeStream() {
+      for (const chunk of chunks) yield chunk;
+    }
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (opts: any) => {
+            const iter = fakeStream();
+            return { [Symbol.asyncIterator]: () => iter };
+          },
+        },
+      },
+    };
+
+    const wrapped = wrapOpenAI(fakeClient as any);
+    const stream = await wrapped.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi' }],
+      stream: true,
+    });
+
+    const collected: any[] = [];
+    for await (const chunk of stream) {
+      collected.push(chunk);
+    }
+
+    expect(collected.length).toBe(4);
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(5);
+  });
+
+  it('traceTool wraps a function with TOOL span', async () => {
+    const getWeather = traceToolOpenAI('get_weather', async (args: { city: string }) => {
+      return `Sunny in ${args.city}`;
+    });
+
+    const result = await getWeather({ city: 'NYC' });
+    expect(result).toBe('Sunny in NYC');
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'neatlogs.span.kind')).toBe('TOOL');
+    expect(attr(spans[0], 'neatlogs.tool.name')).toBe('get_weather');
+    expect(attr(spans[0], 'output.value')).toBe('"Sunny in NYC"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wrapAnthropic
+// ---------------------------------------------------------------------------
+
+describe('wrapAnthropic', () => {
+  it('traces non-streaming messages.create', async () => {
+    const fakeResponse = {
+      id: 'msg_123',
+      model: 'claude-sonnet-4-20250514',
+      content: [{ type: 'text', text: 'Hello there!' }],
+      usage: { input_tokens: 12, output_tokens: 4 },
+      stop_reason: 'end_turn',
+    };
+
+    const fakeClient = {
+      messages: {
+        create: async () => fakeResponse,
+      },
+    };
+
+    const wrapped = wrapAnthropic(fakeClient as any);
+    const result = await wrapped.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'Hi' }],
+    });
+
+    expect(result).toEqual(fakeResponse);
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'neatlogs.span.kind')).toBe('LLM');
+    expect(attr(spans[0], 'neatlogs.llm.provider')).toBe('anthropic');
+    expect(attr(spans[0], 'neatlogs.llm.model_name')).toBe('claude-sonnet-4-20250514');
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello there!');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(12);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(4);
+  });
+
+  it('traceTool wraps a function with TOOL span', async () => {
+    const search = traceToolAnthropic('web_search', async (input: { query: string }) => {
+      return { results: ['result1'] };
+    });
+
+    const result = await search({ query: 'test' });
+    expect(result).toEqual({ results: ['result1'] });
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'neatlogs.span.kind')).toBe('TOOL');
+    expect(attr(spans[0], 'neatlogs.tool.name')).toBe('web_search');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// langchainHandler
+// ---------------------------------------------------------------------------
+
+describe('langchainHandler', () => {
+  it('creates CHAIN, LLM, and TOOL spans with parent-child relationships', async () => {
+    const handler = langchainHandler({ workflowName: 'test-chain' });
+
+    await handler.handleChainStart({ name: 'RunnableSequence' }, { input: 'test' }, 'run-1');
+    await handler.handleLLMStart({ kwargs: { model_name: 'gpt-4o' } }, ['Hello'], 'run-2', 'run-1');
+    await handler.handleLLMEnd({ generations: [[{ message: { content: 'Hi!' } }]], llmOutput: { tokenUsage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 } } }, 'run-2');
+    await handler.handleToolStart({ name: 'calculator' }, '2+2', 'run-3', 'run-1');
+    await handler.handleToolEnd('4', 'run-3');
+    await handler.handleChainEnd({ output: 'done' }, 'run-1');
+
+    const spans = getSpans();
+    expect(spans.length).toBe(3);
+
+    const chainSpan = spans.find(s => s.attributes['neatlogs.span.kind'] === 'CHAIN');
+    const llmSpan = spans.find(s => s.attributes['neatlogs.span.kind'] === 'LLM');
+    const toolSpan = spans.find(s => s.attributes['neatlogs.span.kind'] === 'TOOL');
+
+    expect(chainSpan).toBeDefined();
+    expect(llmSpan).toBeDefined();
+    expect(toolSpan).toBeDefined();
+
+    expect(attr(chainSpan!, 'neatlogs.workflow.name')).toBe('test-chain');
+    expect(attr(llmSpan!, 'neatlogs.llm.model_name')).toBe('gpt-4o');
+    expect(attr(llmSpan!, 'neatlogs.llm.token_count.prompt')).toBe(5);
+    expect(attr(toolSpan!, 'neatlogs.tool.name')).toBe('calculator');
+    expect(attr(toolSpan!, 'output.value')).toBe('4');
+  });
+
+  it('handles errors correctly', async () => {
+    const handler = langchainHandler();
+
+    await handler.handleChainStart({ name: 'test' }, {}, 'run-err');
+    await handler.handleChainError(new Error('boom'), 'run-err');
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(spans[0].status.code).toBe(2); // ERROR
+  });
+});
+
+// ---------------------------------------------------------------------------
+// strandsHooks
+// ---------------------------------------------------------------------------
+
+describe('strandsHooks', () => {
+  it('is a pass-through that does not emit its own spans (Strands self-instruments)', async () => {
+    const fakeAgent = {
+      name: 'test-agent',
+      invoke: async (input: string) => `echo: ${input}`,
+    };
+
+    const returned = strandsHooks(fakeAgent);
+    // Returns the same agent, does not patch invoke.
+    expect(returned).toBe(fakeAgent);
+    const result = await fakeAgent.invoke('hello');
+    expect(result).toBe('echo: hello');
+
+    // No neatlogs spans — Strands' native OpenTelemetry spans are the source,
+    // captured via init()'s tracer provider and the attribute mapper.
+    expect(getSpans().length).toBe(0);
+    expect((fakeAgent as any)._neatlogs_patched).toBe(true);
+  });
+
+  it('is idempotent (double-call is a no-op)', () => {
+    const fakeAgent = { name: 'a', invoke: async () => 'ok' };
+    strandsHooks(fakeAgent);
+    const first = fakeAgent.invoke;
+    strandsHooks(fakeAgent);
+    expect(fakeAgent.invoke).toBe(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// openaiAgentsProcessor
+// ---------------------------------------------------------------------------
+
+describe('openaiAgentsProcessor', () => {
+  it('creates WORKFLOW and AGENT spans from trace lifecycle', () => {
+    const processor = openaiAgentsProcessor();
+
+    processor.onTraceStart({ trace_id: 'trace-1', workflow_name: 'my-workflow' });
+    processor.onSpanStart({ span_id: 'span-1', span_type: 'agent', agent_name: 'planner' });
+    processor.onSpanEnd({ span_id: 'span-1', span_type: 'agent', output: 'done' });
+    processor.onTraceEnd({ trace_id: 'trace-1' });
+
+    const spans = getSpans();
+    expect(spans.length).toBe(2);
+
+    const workflowSpan = spans.find(s => s.attributes['neatlogs.span.kind'] === 'WORKFLOW');
+    const agentSpan = spans.find(s => s.attributes['neatlogs.span.kind'] === 'AGENT');
+
+    expect(workflowSpan).toBeDefined();
+    expect(agentSpan).toBeDefined();
+    expect(attr(workflowSpan!, 'neatlogs.workflow.name')).toBe('my-workflow');
+    expect(attr(agentSpan!, 'neatlogs.agent.name')).toBe('planner');
+  });
+
+  it('creates LLM and TOOL spans', () => {
+    const processor = openaiAgentsProcessor();
+
+    processor.onSpanStart({ span_id: 'gen-1', span_type: 'generation', model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] });
+    processor.onSpanEnd({ span_id: 'gen-1', span_type: 'generation', output: { content: 'hello' }, usage: { input_tokens: 5, output_tokens: 2 } });
+
+    processor.onSpanStart({ span_id: 'tool-1', span_type: 'function', name: 'search', input: '{"q":"test"}' });
+    processor.onSpanEnd({ span_id: 'tool-1', span_type: 'function', output: 'results' });
+
+    const spans = getSpans();
+    expect(spans.length).toBe(2);
+
+    const llmSpan = spans.find(s => s.attributes['neatlogs.span.kind'] === 'LLM');
+    const toolSpan = spans.find(s => s.attributes['neatlogs.span.kind'] === 'TOOL');
+
+    expect(llmSpan).toBeDefined();
+    expect(attr(llmSpan!, 'neatlogs.llm.model_name')).toBe('gpt-4o');
+    expect(attr(llmSpan!, 'neatlogs.llm.token_count.prompt')).toBe(5);
+    expect(toolSpan).toBeDefined();
+    expect(attr(toolSpan!, 'neatlogs.tool.name')).toBe('search');
+  });
+
+  it('handles the @openai/agents 0.11 Span shape (nested spanData + _response)', () => {
+    const processor = openaiAgentsProcessor();
+
+    // Trace + agent + response (LLM) + function (tool), as the real SDK passes them.
+    processor.onTraceStart({ traceId: 'trace-x', name: 'Agent workflow' });
+    processor.onSpanStart({ spanId: 'a1', traceId: 'trace-x', spanData: { type: 'agent', name: 'Weather Assistant', tools: ['get_weather'] } });
+    processor.onSpanStart({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response' } });
+    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response', _response: {
+      model: 'gpt-4o-mini-2024-07-18',
+      usage: { input_tokens: 57, output_tokens: 15, total_tokens: 72 },
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Sunny' }] }],
+    } } });
+    processor.onSpanStart({ spanId: 't1', traceId: 'trace-x', spanData: { type: 'function', name: 'get_weather', input: '{"city":"Paris"}' } });
+    processor.onSpanEnd({ spanId: 't1', traceId: 'trace-x', spanData: { type: 'function', name: 'get_weather', output: '18C' } });
+    processor.onSpanEnd({ spanId: 'a1', traceId: 'trace-x', spanData: { type: 'agent', name: 'Weather Assistant' } });
+    processor.onTraceEnd({ traceId: 'trace-x' });
+
+    const spans = getSpans();
+    const kinds = spans.map(s => s.attributes['neatlogs.span.kind']).sort();
+    expect(kinds).toEqual(['AGENT', 'LLM', 'TOOL', 'WORKFLOW']);
+
+    const llm = spans.find(s => s.attributes['neatlogs.span.kind'] === 'LLM')!;
+    expect(attr(llm, 'neatlogs.llm.model_name')).toBe('gpt-4o-mini-2024-07-18');
+    expect(attr(llm, 'neatlogs.llm.token_count.total')).toBe(72);
+    expect(attr(llm, 'neatlogs.llm.output_messages.0.content')).toBe('Sunny');
+
+    const tool = spans.find(s => s.attributes['neatlogs.span.kind'] === 'TOOL')!;
+    expect(attr(tool, 'neatlogs.tool.name')).toBe('get_weather');
+
+    const agent = spans.find(s => s.attributes['neatlogs.span.kind'] === 'AGENT')!;
+    expect(attr(agent, 'neatlogs.agent.name')).toBe('Weather Assistant');
+  });
+
+  it('shutdown cleans up pending spans', () => {
+    const processor = openaiAgentsProcessor();
+    processor.onSpanStart({ span_id: 'orphan', span_type: 'agent', agent_name: 'x' });
+    processor.shutdown();
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(spans[0].status.code).toBe(2); // ERROR
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wrapMastra
+// ---------------------------------------------------------------------------
+
+describe('wrapMastra', () => {
+  it('wraps Agent.generate() with AGENT span', async () => {
+    const fakeAgent = {
+      name: 'planner',
+      model: { modelId: 'gpt-4o' },
+      generate: async (input: string) => ({
+        text: 'Plan: do things',
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+        finishReason: 'stop',
+        toolCalls: [],
+      }),
+    };
+
+    const wrapped = wrapMastra(fakeAgent as any);
+    const result = await (wrapped as any).generate('Create a plan');
+
+    expect(result.text).toBe('Plan: do things');
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'neatlogs.span.kind')).toBe('AGENT');
+    expect(attr(spans[0], 'neatlogs.agent.name')).toBe('planner');
+    expect(attr(spans[0], 'neatlogs.llm.model_name')).toBe('gpt-4o');
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Plan: do things');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(10);
+  });
+
+  it('wraps Workflow.createRun().start() with WORKFLOW span', async () => {
+    const fakeWorkflow = {
+      name: 'health-check',
+      createRun: async () => ({
+        start: async (opts: any) => ({
+          status: 'completed',
+          result: { score: 85 },
+        }),
+      }),
+    };
+
+    const wrapped = wrapMastra(fakeWorkflow as any);
+    const run = await (wrapped as any).createRun();
+    const result = await run.start({ inputData: { accountId: '123' } });
+
+    expect(result.status).toBe('completed');
+
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'neatlogs.span.kind')).toBe('WORKFLOW');
+    expect(attr(spans[0], 'neatlogs.workflow.name')).toBe('health-check');
+    // status is not a canonical neatlogs key — it is folded into neatlogs.metadata
+    expect(attr(spans[0], 'neatlogs.metadata')).toContain('completed');
+  });
+
+  it('is idempotent', async () => {
+    const fakeAgent = { name: 'a', generate: async () => ({ text: 'ok' }) };
+    wrapMastra(fakeAgent as any);
+    const first = fakeAgent.generate;
+    wrapMastra(fakeAgent as any);
+    expect(fakeAgent.generate).toBe(first);
+  });
+});

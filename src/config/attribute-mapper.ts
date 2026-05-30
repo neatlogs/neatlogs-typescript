@@ -101,8 +101,20 @@ export class AttributeMapper {
       }
     }
 
+    // Honor a kind already set directly on the neatlogs namespace by a wrapper
+    // (e.g. wrapMastra/strands/openai set `neatlogs.span.kind` = 'AGENT'/'TOOL'/'LLM').
+    // Without this the value below gets clobbered to 'unknown' and re-inferred from
+    // the span name, which mis-classifies (e.g. 'mastra.agent.*' → vector_store).
+    if (!spanKindValue && 'neatlogs.span.kind' in attributes) {
+      spanKindValue = attributes['neatlogs.span.kind'];
+    }
+
     if (spanKindValue && spanKindValue in valuesMap) {
       return valuesMap[spanKindValue];
+    }
+    // A pre-set neatlogs kind may already be the normalized lowercase form.
+    if (spanKindValue && Object.values(valuesMap).includes(spanKindValue)) {
+      return spanKindValue;
     }
 
     // Infer LLM span from attributes
@@ -113,6 +125,9 @@ export class AttributeMapper {
       'llm.token_count.completion',
       'gen_ai.usage.prompt_tokens',
       'gen_ai.usage.completion_tokens',
+      'neatlogs.llm.model_name',
+      'neatlogs.llm.token_count.prompt',
+      'neatlogs.llm.token_count.completion',
     ].some((key) => key in attributes);
 
     if (isLlmSpan) {

@@ -440,7 +440,8 @@
       "tool": {
         "name": {
           "sources": [
-            "tool.name"
+            "tool.name",
+            "gen_ai.tool.name"
           ],
           "target": "neatlogs.tool.name"
         },

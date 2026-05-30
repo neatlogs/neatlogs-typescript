@@ -1,9 +1,0 @@
-{
-  "pages": {
-    "/(chat)/api/chat/route": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(chat)/api/chat/route.js"
-    ]
-  }
-}

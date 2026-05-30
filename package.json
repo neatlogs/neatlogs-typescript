@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -8,7 +8,7 @@
   "exports": {
     ".": {
       "import": {
-        "types": "./dist/index.d.mts",
+        "types": "./dist/index.d.ts",
         "default": "./dist/index.mjs"
       },
       "require": {
@@ -18,12 +18,72 @@
     },
     "./ai": {
       "import": {
-        "types": "./dist/ai-sdk.d.mts",
+        "types": "./dist/ai-sdk.d.ts",
         "default": "./dist/ai-sdk.mjs"
       },
       "require": {
         "types": "./dist/ai-sdk.d.ts",
         "default": "./dist/ai-sdk.cjs"
+      }
+    },
+    "./openai": {
+      "import": {
+        "types": "./dist/openai.d.ts",
+        "default": "./dist/openai.mjs"
+      },
+      "require": {
+        "types": "./dist/openai.d.ts",
+        "default": "./dist/openai.cjs"
+      }
+    },
+    "./anthropic": {
+      "import": {
+        "types": "./dist/anthropic.d.ts",
+        "default": "./dist/anthropic.mjs"
+      },
+      "require": {
+        "types": "./dist/anthropic.d.ts",
+        "default": "./dist/anthropic.cjs"
+      }
+    },
+    "./langchain": {
+      "import": {
+        "types": "./dist/langchain.d.ts",
+        "default": "./dist/langchain.mjs"
+      },
+      "require": {
+        "types": "./dist/langchain.d.ts",
+        "default": "./dist/langchain.cjs"
+      }
+    },
+    "./strands": {
+      "import": {
+        "types": "./dist/strands.d.ts",
+        "default": "./dist/strands.mjs"
+      },
+      "require": {
+        "types": "./dist/strands.d.ts",
+        "default": "./dist/strands.cjs"
+      }
+    },
+    "./openai-agents": {
+      "import": {
+        "types": "./dist/openai-agents.d.ts",
+        "default": "./dist/openai-agents.mjs"
+      },
+      "require": {
+        "types": "./dist/openai-agents.d.ts",
+        "default": "./dist/openai-agents.cjs"
+      }
+    },
+    "./mastra": {
+      "import": {
+        "types": "./dist/mastra-wrap.d.ts",
+        "default": "./dist/mastra-wrap.mjs"
+      },
+      "require": {
+        "types": "./dist/mastra-wrap.d.ts",
+        "default": "./dist/mastra-wrap.cjs"
       }
     }
   },

@@ -53,6 +53,16 @@ export { getMastraObservability } from './mastra.js';
 // Vercel AI SDK integration
 export { wrapAISDK, createAITelemetry } from './ai-sdk.js';
 
+// Provider wrappers
+export { wrapOpenAI, traceTool as traceToolOpenAI } from './openai.js';
+export { wrapAnthropic, traceTool as traceToolAnthropic } from './anthropic.js';
+
+// Agent framework integrations
+export { langchainHandler } from './langchain.js';
+export { strandsHooks } from './strands.js';
+export { openaiAgentsProcessor } from './openai-agents.js';
+export { wrapMastra } from './mastra-wrap.js';
+
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';
 export { registerCrewaiTask } from './core/crewai-task-registry.js';

@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/ai-sdk.ts'],
+  entry: ['src/index.ts', 'src/ai-sdk.ts', 'src/openai.ts', 'src/anthropic.ts', 'src/langchain.ts', 'src/strands.ts', 'src/openai-agents.ts', 'src/mastra-wrap.ts'],
   format: ['cjs', 'esm'],
   dts: true,
   splitting: false,
