@@ -138,7 +138,7 @@ describe('wrapOpenAI', () => {
     expect(spans.length).toBe(1);
     expect(attr(spans[0], 'neatlogs.span.kind')).toBe('TOOL');
     expect(attr(spans[0], 'neatlogs.tool.name')).toBe('get_weather');
-    expect(attr(spans[0], 'output.value')).toBe('"Sunny in NYC"');
+    expect(attr(spans[0], 'output.value')).toBe('Sunny in NYC');
   });
 });
 

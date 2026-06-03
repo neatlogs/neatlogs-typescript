@@ -183,9 +183,11 @@ describe('UnifiedAttributeProcessor', () => {
     });
 
     it('should detect RERANKER from llm.request.type', () => {
+      // RERANKER is inferred from llm.request.type only when the span kind
+      // wasn't explicitly set (see hasExplicitKind guard in attribute-processor).
+      // An explicit openinference.span.kind is respected and not overridden.
       const span = makeSpan({
         attributes: {
-          'openinference.span.kind': 'LLM',
           'llm.request.type': 'rerank',
         },
       });

@@ -62,6 +62,7 @@ export { langchainHandler } from './langchain.js';
 export { strandsHooks } from './strands.js';
 export { openaiAgentsProcessor } from './openai-agents.js';
 export { wrapMastra } from './mastra-wrap.js';
+export { piAgentHooks } from './pi-agent.js';
 
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';

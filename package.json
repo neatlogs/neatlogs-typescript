@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -85,6 +85,16 @@
         "types": "./dist/mastra-wrap.d.ts",
         "default": "./dist/mastra-wrap.cjs"
       }
+    },
+    "./pi-agent": {
+      "import": {
+        "types": "./dist/pi-agent.d.ts",
+        "default": "./dist/pi-agent.mjs"
+      },
+      "require": {
+        "types": "./dist/pi-agent.d.ts",
+        "default": "./dist/pi-agent.cjs"
+      }
     }
   },
   "files": [
@@ -94,6 +104,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
+    "version:sync": "node scripts/sync-version.mjs",
+    "prebuild": "node scripts/sync-version.mjs",
     "build": "tsup && rm -f dist/*.d.mts",
     "test": "vitest run",
     "test:watch": "vitest",

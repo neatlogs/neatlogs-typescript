@@ -18,18 +18,21 @@ describe('instrumentation-scope-parser', () => {
     it('should detect openai from OpenInference scope', () => {
       expect(parseInstrumentationScope('openinference.instrumentation.openai')).toEqual({
         provider: 'openai',
+        framework: 'openai',
       });
     });
 
     it('should detect anthropic from OpenInference scope', () => {
       expect(parseInstrumentationScope('openinference.instrumentation.anthropic')).toEqual({
         provider: 'anthropic',
+        framework: 'anthropic',
       });
     });
 
     it('should detect google from OpenInference scope', () => {
       expect(parseInstrumentationScope('openinference.instrumentation.google_genai')).toEqual({
         provider: 'google',
+        framework: 'google_genai',
       });
     });
 
@@ -37,6 +40,7 @@ describe('instrumentation-scope-parser', () => {
       expect(parseInstrumentationScope('openinference.instrumentation.bedrock')).toEqual({
         provider: 'bedrock',
         platform: 'bedrock',
+        framework: 'bedrock',
       });
     });
 
@@ -44,12 +48,14 @@ describe('instrumentation-scope-parser', () => {
       expect(parseInstrumentationScope('openinference.instrumentation.vertexai')).toEqual({
         provider: 'vertex_ai',
         platform: 'vertex_ai',
+        framework: 'vertex_ai',
       });
     });
 
     it('should detect groq from OpenInference scope', () => {
       expect(parseInstrumentationScope('openinference.instrumentation.groq')).toEqual({
         provider: 'groq',
+        framework: 'groq',
       });
     });
 
@@ -88,12 +94,14 @@ describe('instrumentation-scope-parser', () => {
     it('should detect openai from OpenLLMetry scope', () => {
       expect(parseInstrumentationScope('opentelemetry.instrumentation.openai')).toEqual({
         provider: 'openai',
+        framework: 'openai',
       });
     });
 
     it('should detect anthropic from OpenLLMetry scope', () => {
       expect(parseInstrumentationScope('opentelemetry.instrumentation.anthropic')).toEqual({
         provider: 'anthropic',
+        framework: 'anthropic',
       });
     });
 
@@ -114,6 +122,7 @@ describe('instrumentation-scope-parser', () => {
     it('should handle versioned scopes via prefix match', () => {
       expect(parseInstrumentationScope('openinference.instrumentation.openai.v1')).toEqual({
         provider: 'openai',
+        framework: 'openai',
       });
     });
 
@@ -121,6 +130,7 @@ describe('instrumentation-scope-parser', () => {
     it('should be case-insensitive', () => {
       expect(parseInstrumentationScope('OpenInference.Instrumentation.OpenAI')).toEqual({
         provider: 'openai',
+        framework: 'openai',
       });
     });
 

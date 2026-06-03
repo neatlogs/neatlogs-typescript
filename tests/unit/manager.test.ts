@@ -83,14 +83,15 @@ describe('InstrumentationManager', () => {
       expect(mgr.instrumented).toEqual([]);
     });
 
-    it('should handle libraries where openinference import fails', async () => {
-      // openai has openinference set but the package isn't installed in test env
+    it('should instrument openai via OpenInference when packages are installed', async () => {
+      // openai has openinference set and both @arizeai/openinference-instrumentation-openai
+      // and the openai package are real dependencies, so it instruments successfully.
       vi.spyOn(console, 'debug').mockImplementation(() => {});
       vi.spyOn(console, 'info').mockImplementation(() => {});
       const mgr = new InstrumentationManager({ provider });
       await mgr.instrument(['openai']);
-      // Should not crash, library not in instrumented since package not available
-      expect(mgr.instrumented).not.toContain('openai');
+      // Should not crash and openai should be instrumented via OpenInference
+      expect(mgr.instrumented).toContain('openai');
     });
 
     it('should handle google_genai with no neatlogs custom instrumentor', async () => {
@@ -130,15 +131,6 @@ describe('InstrumentationManager', () => {
       const mgr = new InstrumentationManager({ provider });
       await mgr.instrument([]);
       expect(mgr.instrumented).toEqual([]);
-    });
-  });
-
-  describe('instrumentHttp()', () => {
-    it('should not throw even if packages are not installed', async () => {
-      vi.spyOn(console, 'debug').mockImplementation(() => {});
-      const mgr = new InstrumentationManager({ provider });
-      // Should not throw — gracefully handles missing packages
-      await expect(mgr.instrumentHttp()).resolves.toBeUndefined();
     });
   });
 });

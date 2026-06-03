@@ -112,9 +112,9 @@ describe('INSTRUMENTATION_REGISTRY', () => {
   });
 
   describe('instrumentor entries for google_genai and crewai', () => {
-    it('should have null neatlogs path for google_genai (external package)', () => {
+    it('should have neatlogs instrumentor path for google_genai', () => {
       const info = INSTRUMENTATION_REGISTRY.libraries['google_genai'];
-      expect(info.neatlogs).toBeNull();
+      expect(info.neatlogs).toBe('@neatlogs/instrumentation-google-genai');
     });
 
     it('should have null neatlogs path for crewai (external package)', () => {
@@ -222,9 +222,9 @@ describe('getLibraryInfo', () => {
     expect(getLibraryInfo('nonexistent')).toBeUndefined();
   });
 
-  it('should return info with null neatlogs field for google_genai (external package)', () => {
+  it('should return info with neatlogs instrumentor path for google_genai', () => {
     const info = getLibraryInfo('google_genai');
     expect(info).toBeDefined();
-    expect(info!.neatlogs).toBeNull();
+    expect(info!.neatlogs).toBe('@neatlogs/instrumentation-google-genai');
   });
 });

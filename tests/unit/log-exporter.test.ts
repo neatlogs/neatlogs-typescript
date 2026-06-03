@@ -58,7 +58,11 @@ describe('NeatlogsLogExporter', () => {
     expect(spanDict.name).toBe('Test {key}');
     expect(spanDict.kind).toBe('LOG');
     expect(spanDict.trace_id).toBe('abc123');
-    expect(spanDict.span_id).toBe('def456');
+    // span_id is freshly generated to avoid colliding with the originating
+    // span; the originating span's id is preserved as parent_span_id.
+    expect(spanDict.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(spanDict.span_id).not.toBe('def456');
+    expect(spanDict.parent_span_id).toBe('def456');
     expect(spanDict.status).toBe('OK');
     expect(spanDict.attributes['log.template']).toBe('Test {key}');
     expect(spanDict.attributes['log.key']).toBe('value');
@@ -122,7 +126,10 @@ describe('NeatlogsLogExporter', () => {
 
     const spanDict = exportSpy.mock.calls[0][0];
     expect(spanDict.trace_id).toBe('');
-    expect(spanDict.span_id).toBe('');
+    // span_id is always freshly generated; parent_span_id falls back to ''
+    // when spanContext (and thus the originating spanId) is missing.
+    expect(spanDict.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(spanDict.parent_span_id).toBe('');
   });
 
   it('should convert hrTime to ISO string', () => {
