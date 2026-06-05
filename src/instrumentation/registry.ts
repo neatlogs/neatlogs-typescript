@@ -35,6 +35,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
   tags: {
     llm: [
       'azure_ai_inference',
+      'azure_openai',
       'openai',
       'anthropic',
       'cohere',
@@ -84,6 +85,9 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       'strands',
       'pipecat',
       'ai_sdk',
+      'claude_agent_sdk',
+      'openrouter_agent',
+      'opencode',
     ],
     tool: ['langchain', 'llamaindex', 'haystack', 'mcp'],
     http: ['requests', 'httpx', 'urllib3', 'aiohttp'],
@@ -128,7 +132,15 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
     bedrock: {
       openinference: '@arizeai/openinference-instrumentation-bedrock',
       openllmetry: null,
-      neatlogs: null,
+      // The wrapper is opt-in per call site (wrapBedrock); this entry keeps
+      // scope detection and tagging consistent.
+      neatlogs: 'neatlogs/bedrock',
+      default_span_kind: 'LLM',
+    },
+    azure_openai: {
+      openinference: null,
+      openllmetry: null,
+      neatlogs: 'neatlogs/azure-openai',
       default_span_kind: 'LLM',
     },
     groq: {
@@ -146,7 +158,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
     vertexai: {
       openinference: null,
       openllmetry: null,
-      neatlogs: null,
+      neatlogs: 'neatlogs/vertex-ai',
       default_span_kind: 'LLM',
     },
     google_generativeai: {
@@ -419,7 +431,20 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
     claude_agent_sdk: {
       openinference: '@arizeai/openinference-instrumentation-claude-agent-sdk',
       openllmetry: null,
-      neatlogs: null,
+      // Opt-in wrapper (wrapClaudeAgentSDK); entry kept for scope detection/tagging.
+      neatlogs: 'neatlogs/claude-agent-sdk',
+      default_span_kind: 'AGENT',
+    },
+    openrouter_agent: {
+      openinference: null,
+      openllmetry: null,
+      neatlogs: 'neatlogs/openrouter-agent',
+      default_span_kind: 'AGENT',
+    },
+    opencode: {
+      openinference: null,
+      openllmetry: null,
+      neatlogs: 'neatlogs/opencode',
       default_span_kind: 'AGENT',
     },
   },

@@ -1,0 +1,9 @@
+{
+  "name": "neatlogs-opencode-example",
+  "private": true,
+  "type": "module",
+  "description": "opencode + Neatlogs plugin example (uses the local neatlogs build)",
+  "dependencies": {
+    "neatlogs": "file:../../.."
+  }
+}

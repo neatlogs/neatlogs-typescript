@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.0.6",
+  "version": "1.0.8",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -44,6 +44,66 @@
       "require": {
         "types": "./dist/anthropic.d.ts",
         "default": "./dist/anthropic.cjs"
+      }
+    },
+    "./azure-openai": {
+      "import": {
+        "types": "./dist/azure-openai.d.ts",
+        "default": "./dist/azure-openai.mjs"
+      },
+      "require": {
+        "types": "./dist/azure-openai.d.ts",
+        "default": "./dist/azure-openai.cjs"
+      }
+    },
+    "./vertex-ai": {
+      "import": {
+        "types": "./dist/vertex-ai.d.ts",
+        "default": "./dist/vertex-ai.mjs"
+      },
+      "require": {
+        "types": "./dist/vertex-ai.d.ts",
+        "default": "./dist/vertex-ai.cjs"
+      }
+    },
+    "./bedrock": {
+      "import": {
+        "types": "./dist/bedrock.d.ts",
+        "default": "./dist/bedrock.mjs"
+      },
+      "require": {
+        "types": "./dist/bedrock.d.ts",
+        "default": "./dist/bedrock.cjs"
+      }
+    },
+    "./claude-agent-sdk": {
+      "import": {
+        "types": "./dist/claude-agent-sdk.d.ts",
+        "default": "./dist/claude-agent-sdk.mjs"
+      },
+      "require": {
+        "types": "./dist/claude-agent-sdk.d.ts",
+        "default": "./dist/claude-agent-sdk.cjs"
+      }
+    },
+    "./openrouter-agent": {
+      "import": {
+        "types": "./dist/openrouter-agent.d.ts",
+        "default": "./dist/openrouter-agent.mjs"
+      },
+      "require": {
+        "types": "./dist/openrouter-agent.d.ts",
+        "default": "./dist/openrouter-agent.cjs"
+      }
+    },
+    "./opencode": {
+      "import": {
+        "types": "./dist/opencode-plugin.d.ts",
+        "default": "./dist/opencode-plugin.mjs"
+      },
+      "require": {
+        "types": "./dist/opencode-plugin.d.ts",
+        "default": "./dist/opencode-plugin.cjs"
       }
     },
     "./langchain": {
@@ -95,6 +155,16 @@
         "types": "./dist/pi-agent.d.ts",
         "default": "./dist/pi-agent.cjs"
       }
+    },
+    "./browser": {
+      "import": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.mjs"
+      },
+      "require": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.cjs"
+      }
     }
   },
   "files": [
@@ -118,6 +188,10 @@
     "example:langgraph": "tsx examples/langgraph_multiagent/main.ts",
     "example:marketing": "tsx examples/marketing_strategy_demo/main.ts",
     "example:reasoning": "tsx examples/reasoning_model_workflow/main.ts",
+    "example:azure-openai": "tsx examples/sdk_examples/azure_openai_basic/main.ts",
+    "example:vertex-ai": "tsx examples/sdk_examples/vertex_ai_basic/main.ts",
+    "example:bedrock": "tsx examples/sdk_examples/bedrock_basic/main.ts",
+    "example:openrouter": "tsx examples/sdk_examples/openrouter_agent_basic/main.ts",
     "test:examples:original7": "node scripts/run-original7-examples.mjs",
     "verify:logs": "node scripts/verify-original7-logs.mjs"
   },
@@ -163,6 +237,7 @@
     "@langchain/google-genai": "^0.2.18",
     "@langchain/langgraph": "^0.3.12",
     "@langchain/openai": "^0.6.17",
+    "@openrouter/agent": "^0.7.1",
     "@types/node": "^20.0.0",
     "ai": "^6.0.190",
     "dotenv": "^17.4.2",

@@ -106,7 +106,7 @@ class NeatlogsTraceProcessor {
           const role = typeof msg === 'object' ? (msg.role ?? '') : '';
           const content = typeof msg === 'object' ? (msg.content ?? '') : String(msg);
           if (role) attrs[`neatlogs.llm.input_messages.${i}.role`] = role;
-          if (content) attrs[`neatlogs.llm.input_messages.${i}.content`] = (typeof content === 'string' ? content : safeStringify(content)).slice(0, 10000);
+          if (content) attrs[`neatlogs.llm.input_messages.${i}.content`] = (typeof content === 'string' ? content : safeStringify(content));
         }
       }
 
@@ -121,7 +121,7 @@ class NeatlogsTraceProcessor {
 
       const toolInput = data?.input ?? data?.arguments;
       if (toolInput !== undefined) {
-        attrs['input.value'] = (typeof toolInput === 'string' ? toolInput : safeStringify(toolInput)).slice(0, 10000);
+        attrs['input.value'] = (typeof toolInput === 'string' ? toolInput : safeStringify(toolInput));
       }
 
       otelSpan = tracer.startSpan(`openai_agents.tool.${toolName}`, { attributes: attrs }, parentCtx);
@@ -168,7 +168,7 @@ class NeatlogsTraceProcessor {
           .join('');
         if (text) {
           otelSpan.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          otelSpan.setAttribute('neatlogs.llm.output_messages.0.content', text.slice(0, 10000));
+          otelSpan.setAttribute('neatlogs.llm.output_messages.0.content', text);
         }
         // Tool-call items advertised in the response output
         const toolCalls = outputItems.filter((o: any) => o?.type === 'function_call');
@@ -181,7 +181,7 @@ class NeatlogsTraceProcessor {
       } else if (outputItems?.content) {
         otelSpan.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
         const c = outputItems.content;
-        otelSpan.setAttribute('neatlogs.llm.output_messages.0.content', (typeof c === 'string' ? c : safeStringify(c)).slice(0, 10000));
+        otelSpan.setAttribute('neatlogs.llm.output_messages.0.content', (typeof c === 'string' ? c : safeStringify(c)));
       }
 
       const usage = data?.usage ?? resp?.usage;
@@ -200,13 +200,13 @@ class NeatlogsTraceProcessor {
     } else if (spanType === 'function' || spanType === 'tool' || spanType === 'tool_call') {
       const output = data?.output ?? data?.result;
       if (output != null) {
-        otelSpan.setAttribute('output.value', (typeof output === 'string' ? output : safeStringify(output)).slice(0, 10000));
+        otelSpan.setAttribute('output.value', (typeof output === 'string' ? output : safeStringify(output)));
       }
 
     } else if (spanType === 'agent' || spanType === 'agent_run') {
       const output = data?.output;
       if (output != null) {
-        otelSpan.setAttribute('output.value', (typeof output === 'string' ? output : safeStringify(output)).slice(0, 10000));
+        otelSpan.setAttribute('output.value', (typeof output === 'string' ? output : safeStringify(output)));
       }
     }
 

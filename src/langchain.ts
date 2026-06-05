@@ -61,7 +61,7 @@ class NeatlogsCallbackHandler {
       'neatlogs.chain.name': name,
     };
     if (this._workflowName) attrs['neatlogs.workflow.name'] = this._workflowName;
-    if (inputs) attrs['input.value'] = safeStringify(inputs).slice(0, 10000);
+    if (inputs) attrs['input.value'] = safeStringify(inputs);
     if (tags?.length) attrs['neatlogs.tags'] = tags.join(',');
 
     const span = tracer.startSpan(`langchain.chain.${name}`, { attributes: attrs }, parentCtx);
@@ -75,7 +75,7 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    if (outputs) span.setAttribute('output.value', safeStringify(outputs).slice(0, 10000));
+    if (outputs) span.setAttribute('output.value', safeStringify(outputs));
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
@@ -119,7 +119,7 @@ class NeatlogsCallbackHandler {
 
     for (let i = 0; i < prompts.length; i++) {
       attrs[`neatlogs.llm.input_messages.${i}.role`] = 'user';
-      attrs[`neatlogs.llm.input_messages.${i}.content`] = prompts[i].slice(0, 10000);
+      attrs[`neatlogs.llm.input_messages.${i}.content`] = prompts[i];
     }
 
     if (extraParams?.invocation_params) {
@@ -160,7 +160,7 @@ class NeatlogsCallbackHandler {
       const role = msg?.role ?? msg?._getType?.() ?? msg?.constructor?.name ?? 'unknown';
       const content = typeof msg?.content === 'string' ? msg.content : safeStringify(msg?.content);
       attrs[`neatlogs.llm.input_messages.${i}.role`] = mapRole(role);
-      attrs[`neatlogs.llm.input_messages.${i}.content`] = content.slice(0, 10000);
+      attrs[`neatlogs.llm.input_messages.${i}.content`] = content;
     }
 
     if (extraParams?.invocation_params) {
@@ -189,7 +189,7 @@ class NeatlogsCallbackHandler {
         const msg = gen[j]?.message ?? gen[j];
         const content = msg?.content ?? msg?.text ?? '';
         span.setAttribute(`neatlogs.llm.output_messages.${i}.role`, 'assistant');
-        span.setAttribute(`neatlogs.llm.output_messages.${i}.content`, String(content).slice(0, 10000));
+        span.setAttribute(`neatlogs.llm.output_messages.${i}.content`, String(content));
 
         const toolCalls = msg?.tool_calls ?? msg?.additional_kwargs?.tool_calls;
         if (toolCalls && Array.isArray(toolCalls)) {
@@ -270,7 +270,7 @@ class NeatlogsCallbackHandler {
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'TOOL',
       'neatlogs.tool.name': name,
-      'input.value': String(input).slice(0, 10000),
+      'input.value': String(input),
     };
     if (toolCallId) attrs['neatlogs.tool_call.id'] = toolCallId;
 
@@ -285,7 +285,7 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    span.setAttribute('output.value', String(output).slice(0, 10000));
+    span.setAttribute('output.value', String(output));
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
@@ -323,7 +323,7 @@ class NeatlogsCallbackHandler {
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'RETRIEVER',
       'neatlogs.retriever.name': name,
-      'input.value': query.slice(0, 10000),
+      'input.value': query,
     };
 
     const span = tracer.startSpan(`langchain.retriever.${name}`, { attributes: attrs }, parentCtx);
@@ -342,7 +342,7 @@ class NeatlogsCallbackHandler {
       for (let i = 0; i < Math.min(documents.length, 10); i++) {
         const doc = documents[i];
         if (doc?.pageContent) {
-          span.setAttribute(`neatlogs.retriever.documents.${i}.content`, doc.pageContent.slice(0, 2000));
+          span.setAttribute(`neatlogs.retriever.documents.${i}.content`, doc.pageContent);
         }
       }
     }

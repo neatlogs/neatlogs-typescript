@@ -80,14 +80,14 @@ export function wrapMastraRerank<F extends (...args: any[]) => any>(rerankFn: F)
       const query = args?.[1];
       const options = args?.[3];
       if (typeof query === 'string') {
-        span.setAttribute('neatlogs.reranker.query', query.slice(0, 10000));
-        span.setAttribute('input.value', query.slice(0, 10000));
+        span.setAttribute('neatlogs.reranker.query', query);
+        span.setAttribute('input.value', query);
       }
-      if (Array.isArray(results)) span.setAttribute('neatlogs.reranker.input_documents', safeStringify(results).slice(0, 10000));
+      if (Array.isArray(results)) span.setAttribute('neatlogs.reranker.input_documents', safeStringify(results));
       if (options?.topK != null) span.setAttribute('neatlogs.reranker.top_k', options.topK);
       return Promise.resolve(rerankFn(...args)).then((result) => {
-        span.setAttribute('neatlogs.reranker.output_documents', safeStringify(result).slice(0, 10000));
-        span.setAttribute('output.value', safeStringify(result).slice(0, 10000));
+        span.setAttribute('neatlogs.reranker.output_documents', safeStringify(result));
+        span.setAttribute('output.value', safeStringify(result));
         return result;
       });
     });
@@ -158,7 +158,7 @@ function patchAgentMethod(agent: any, method: 'generate' | 'stream', streaming: 
     };
     if (model) attrs['neatlogs.llm.model_name'] = model;
     if (agent.instructions && typeof agent.instructions === 'string') {
-      attrs['neatlogs.llm.system_prompt'] = agent.instructions.slice(0, 5000);
+      attrs['neatlogs.llm.system_prompt'] = agent.instructions;
     }
     if (streaming) attrs['neatlogs.llm.is_streaming'] = true;
 
@@ -229,7 +229,7 @@ function patchModelInPlace(model: any): void {
       if (provider) attrs['neatlogs.llm.provider'] = provider;
       if (isStream) attrs['neatlogs.llm.is_streaming'] = true;
       const promptInput = callOpts?.prompt ?? callOpts?.messages;
-      if (promptInput !== undefined) attrs['input.value'] = safeStringify(promptInput).slice(0, 10000);
+      if (promptInput !== undefined) attrs['input.value'] = safeStringify(promptInput);
       captureInvocationParams(attrs, callOpts);
 
       return withActiveSpan(`mastra.llm.${modelId || 'model'}.${fn}`, attrs, async (span) => {
@@ -270,13 +270,13 @@ function patchToolExecute(tool: any, key: string): void {
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'TOOL',
       'neatlogs.tool.name': toolName,
-      'input.value': safeStringify(params).slice(0, 10000),
+      'input.value': safeStringify(params),
     };
-    if (tool.description) attrs['neatlogs.tool.description'] = String(tool.description).slice(0, 2000);
+    if (tool.description) attrs['neatlogs.tool.description'] = String(tool.description);
 
     return withActiveSpan(`mastra.tool.${toolName}`, attrs, async (span) => {
       const result = await orig(params, options);
-      span.setAttribute('output.value', safeStringify(result).slice(0, 10000));
+      span.setAttribute('output.value', safeStringify(result));
       return result;
     });
   };
@@ -310,14 +310,14 @@ function patchRunMethod(run: any, method: 'start' | 'resume', workflowName: stri
       'neatlogs.workflow.name': workflowName,
     };
     if (startOpts?.inputData !== undefined) {
-      attrs['input.value'] = safeStringify(startOpts.inputData).slice(0, 10000);
+      attrs['input.value'] = safeStringify(startOpts.inputData);
     }
 
     return withActiveSpan(`mastra.workflow.${workflowName}`, attrs, async (span) => {
       const result = await orig(startOpts);
       if (result?.status) span.setAttribute('neatlogs.metadata', safeStringify({ status: result.status }));
       if (result?.result !== undefined) {
-        span.setAttribute('output.value', safeStringify(result.result).slice(0, 10000));
+        span.setAttribute('output.value', safeStringify(result.result));
       }
       return result;
     });
@@ -346,14 +346,14 @@ function patchVectorOp(vector: any, op: string, kind: 'RETRIEVER' | 'VECTOR_STOR
       'neatlogs.span.kind': kind,
       'neatlogs.db.system': dbName,
       'neatlogs.db.operation': op,
-      'input.value': safeStringify(params).slice(0, 10000),
+      'input.value': safeStringify(params),
     };
     const indexName = params?.indexName;
     if (indexName) attrs['neatlogs.vectordb.index_name'] = String(indexName);
     if (kind === 'RETRIEVER' && params?.topK != null) attrs['neatlogs.retriever.top_k'] = params.topK;
     return withActiveSpan(`mastra.vector.${op}`, attrs, async (span) => {
       const result = await orig(params);
-      span.setAttribute('output.value', safeStringify(result).slice(0, 10000));
+      span.setAttribute('output.value', safeStringify(result));
       return result;
     });
   };
@@ -373,11 +373,11 @@ function patchMemory(memory: any): void {
       const attrs: Record<string, any> = {
         'neatlogs.span.kind': 'CHAIN',
         'neatlogs.db.operation': op,
-        'input.value': safeStringify(args?.[0]).slice(0, 10000),
+        'input.value': safeStringify(args?.[0]),
       };
       return withActiveSpan(`mastra.memory.${op}`, attrs, async (span) => {
         const result = await orig(...args);
-        span.setAttribute('output.value', safeStringify(result).slice(0, 8000));
+        span.setAttribute('output.value', safeStringify(result));
         return result;
       });
     };
@@ -473,7 +473,7 @@ function wrapStreamingOutput(output: any, span: Span, ctx: ReturnType<typeof ote
         ]);
         if (typeof text === 'string' && text) {
           span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          span.setAttribute('neatlogs.llm.output_messages.0.content', text.slice(0, 10000));
+          span.setAttribute('neatlogs.llm.output_messages.0.content', text);
         }
         if (usage) recordUsage(span, usage);
         if (finishReason) span.setAttribute('neatlogs.llm.stop_reason', normalizeFinishReason(finishReason));
@@ -501,7 +501,7 @@ function wrapStreamingOutput(output: any, span: Span, ctx: ReturnType<typeof ote
       const finish = () => {
         if (textParts.length) {
           span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          span.setAttribute('neatlogs.llm.output_messages.0.content', textParts.join('').slice(0, 10000));
+          span.setAttribute('neatlogs.llm.output_messages.0.content', textParts.join(''));
         }
         endOnce();
       };
@@ -574,7 +574,7 @@ function finalizeAgentResult(span: Span, result: any): void {
 
   if (result.text) {
     span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', String(result.text).slice(0, 10000));
+    span.setAttribute('neatlogs.llm.output_messages.0.content', String(result.text));
   }
 
   if (Array.isArray(result.toolCalls)) {
@@ -596,7 +596,7 @@ function finalizeModelResult(span: Span, result: any): void {
   // `content` is an array of typed parts (text / tool-call); `text` may be absent.
   if (typeof result.text === 'string' && result.text) {
     span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', result.text.slice(0, 10000));
+    span.setAttribute('neatlogs.llm.output_messages.0.content', result.text);
   } else if (Array.isArray(result.content)) {
     const text = result.content
       .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
@@ -604,7 +604,7 @@ function finalizeModelResult(span: Span, result: any): void {
       .join('');
     if (text) {
       span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-      span.setAttribute('neatlogs.llm.output_messages.0.content', text.slice(0, 10000));
+      span.setAttribute('neatlogs.llm.output_messages.0.content', text);
     }
     // Tool-call parts → indexed tool_calls
     const toolCalls = result.content.filter((p: any) => p?.type === 'tool-call');
@@ -612,7 +612,7 @@ function finalizeModelResult(span: Span, result: any): void {
       const tc = toolCalls[i];
       setToolCall(span, i, tc.toolName, tc.input ?? tc.args, tc.toolCallId);
     }
-    span.setAttribute('output.value', safeStringify(result.content).slice(0, 10000));
+    span.setAttribute('output.value', safeStringify(result.content));
   }
   if (result.usage) recordUsage(span, result.usage);
   span.setAttribute('neatlogs.llm.stop_reason', normalizeFinishReason(result.finishReason));
@@ -665,12 +665,12 @@ function captureInvocationParams(attrs: Record<string, any>, callOpts: any): voi
   // Tool definitions advertised to the model → neatlogs.llm.tools.{i}
   if (Array.isArray(callOpts.tools)) {
     for (let i = 0; i < callOpts.tools.length; i++) {
-      attrs[`neatlogs.llm.tools.${i}`] = safeStringify(callOpts.tools[i]).slice(0, 4000);
+      attrs[`neatlogs.llm.tools.${i}`] = safeStringify(callOpts.tools[i]);
     }
     invocation.toolChoice = callOpts.toolChoice;
   }
   if (Object.keys(invocation).length) {
-    attrs['neatlogs.llm.invocation_parameters'] = safeStringify(invocation).slice(0, 4000);
+    attrs['neatlogs.llm.invocation_parameters'] = safeStringify(invocation);
   }
 }
 
@@ -768,7 +768,7 @@ function extractModelId(model: any): string {
 }
 
 function toInputValue(input: any): string {
-  return (typeof input === 'string' ? input : safeStringify(input)).slice(0, 10000);
+  return (typeof input === 'string' ? input : safeStringify(input));
 }
 
 function safeStringify(value: unknown): string {

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Support Assistant — instrumented with Neatlogs (browser)</title>
+    <style>
+      :root { --bg:#0b0f17; --panel:#141b27; --ink:#e6edf3; --muted:#8b98a9; --accent:#6ee7b7; --user:#1f6feb; }
+      * { box-sizing: border-box; }
+      body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; flex-direction:column; }
+      header { padding:14px 20px; border-bottom:1px solid #222c3a; display:flex; align-items:center; gap:12px; }
+      header h1 { font-size:16px; margin:0; font-weight:600; }
+      header .tag { font-size:11px; color:var(--muted); border:1px solid #2a3647; border-radius:999px; padding:2px 8px; }
+      #log { flex:1; overflow:auto; padding:20px; display:flex; flex-direction:column; gap:12px; max-width:760px; width:100%; margin:0 auto; }
+      .msg { padding:10px 14px; border-radius:12px; max-width:80%; white-space:pre-wrap; line-height:1.4; }
+      .user { background:var(--user); align-self:flex-end; }
+      .bot { background:var(--panel); align-self:flex-start; border:1px solid #222c3a; }
+      .meta { font-size:11px; color:var(--muted); align-self:flex-start; }
+      form { display:flex; gap:10px; padding:16px 20px; border-top:1px solid #222c3a; max-width:760px; width:100%; margin:0 auto; }
+      input[type=text] { flex:1; padding:11px 14px; border-radius:10px; border:1px solid #2a3647; background:#0e1420; color:var(--ink); font-size:15px; }
+      button { padding:11px 18px; border-radius:10px; border:0; background:var(--accent); color:#03241a; font-weight:600; cursor:pointer; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Support Assistant</h1>
+      <span class="tag">traced via <code>neatlogs/browser</code></span>
+      <span class="tag" id="status">ready</span>
+    </header>
+    <div id="log">
+      <div class="bot msg">Hi! Ask me anything about your account. Every turn is traced to Neatlogs from the browser with a write key.</div>
+    </div>
+    <form id="form">
+      <input id="q" type="text" placeholder="e.g. how do I reset my password?" autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+
+    <script type="module">
+      // In a real app: import { Neatlogs } from 'neatlogs/browser';
+      // Here we import the built bundle from the repo.
+      import { Neatlogs } from "../../dist/browser.mjs";
+
+      // === Neatlogs setup — the ONLY integration code a customer writes ===
+      const nl = new Neatlogs({
+        apiKey: "nlw_088b156ab751a3278ee4fb0778aadf20", // public WRITE key (safe in browser)
+        project: "test",                                 // which project to log into
+        endpoint: "http://localhost:4100",
+        onError: (e) => setStatus("trace error: " + (e?.message || e)),
+      });
+
+      const log = document.getElementById("log");
+      const form = document.getElementById("form");
+      const q = document.getElementById("q");
+      const statusEl = document.getElementById("status");
+      const setStatus = (s) => (statusEl.textContent = s);
+
+      function bubble(text, cls) {
+        const d = document.createElement("div");
+        d.className = `msg ${cls}`;
+        d.textContent = text;
+        log.appendChild(d);
+        log.scrollTop = log.scrollHeight;
+        return d;
+      }
+      function metaLine(text) {
+        const d = document.createElement("div");
+        d.className = "meta";
+        d.textContent = text;
+        log.appendChild(d);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      // A fake "RAG + LLM" pipeline so the trace has real structure (retriever → llm).
+      const KB = {
+        password: "Click 'Forgot password' on the login page; we'll email a reset link.",
+        billing: "Go to Settings → Billing to update your card or download invoices.",
+        default: "I'm not sure about that one — try rephrasing, or contact support@acme.com.",
+      };
+      function retrieve(query) {
+        const key = /pass|reset|login/i.test(query) ? "password"
+                  : /bill|invoice|card|charge/i.test(query) ? "billing" : "default";
+        return { key, docs: [KB[key]] };
+      }
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const question = q.value.trim();
+        if (!question) return;
+        q.value = "";
+        bubble(question, "user");
+        setStatus("thinking…");
+
+        const t0 = performance.now();
+        const { key, docs } = retrieve(question);
+        const tRetrieve = Math.round(performance.now() - t0);
+
+        // simulate an LLM answer
+        const answer = docs[0];
+        await new Promise((r) => setTimeout(r, 300 + Math.random() * 400));
+        const tLlm = Math.round(performance.now() - t0) - tRetrieve;
+        bubble(answer, "bot");
+
+        // === one trace per chat turn: WORKFLOW → RETRIEVER + LLM ===
+        const res = await nl.trace({
+          name: "support-chat-turn",
+          input: question,
+          output: answer,
+          duration_ms: tRetrieve + tLlm,
+          children: [
+            { name: "retrieve-kb", kind: "retriever", query: question,
+              documents: docs, duration_ms: tRetrieve,
+              attributes: { "neatlogs.retriever.top_k": 1 } },
+            { name: "answer", kind: "llm", model: "gpt-4o-mini",
+              input: `Q: ${question}\nContext: ${docs[0]}`, output: answer,
+              tokens: { prompt: 40 + question.length, completion: answer.length },
+              duration_ms: tLlm,
+              attributes: { "neatlogs.llm.temperature": 0.3 },
+              logs: [{ level: "info", message: `kb match: ${key}` }] },
+          ],
+        });
+
+        if (res.ok) metaLine(`✓ traced — trace_id ${res.trace_id} (${res.spans} spans)`);
+        setStatus(res.ok ? "ready" : "trace failed");
+      });
+    </script>
+  </body>
+</html>

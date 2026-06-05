@@ -1,0 +1,129 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Neatlogs Browser SDK — examples</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 820px; margin: 40px auto; color: #111; }
+      h1 { margin-bottom: 4px; }
+      .sub { color: #666; margin-top: 0; }
+      .row { margin: 10px 0; }
+      label { display:inline-block; width: 90px; font-weight: 600; }
+      input { padding: 6px; width: 420px; font-family: monospace; }
+      .ex { border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin: 14px 0; }
+      .ex h3 { margin: 0 0 8px; }
+      pre.code { background: #f6f8fa; color: #111; padding: 12px; border-radius: 6px; overflow:auto; font-size: 13px; }
+      button { padding: 9px 14px; font-size: 14px; cursor: pointer; }
+      pre.out { background: #111; color: #4ade80; padding: 12px; border-radius: 6px; min-height: 22px; overflow:auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Neatlogs Browser SDK</h1>
+    <p class="sub">The same examples Raindrop's browser docs show — mapped onto <code>neatlogs/browser</code>.</p>
+
+    <div class="row"><label>API key</label><input id="key" value="EQZO8zBsJkDRvmIL06m-EQ7faMUHEIN5" /></div>
+    <div class="row"><label>Endpoint</label><input id="endpoint" value="http://localhost:4100" /></div>
+
+    <!-- Init -->
+    <div class="ex">
+      <h3>Initialization</h3>
+      <pre class="code">import { Neatlogs } from 'neatlogs/browser';
+const nl = new Neatlogs({ apiKey: 'nl_xxx' });</pre>
+    </div>
+
+    <!-- trackAI (Raindrop: trackAi single-shot) -->
+    <div class="ex">
+      <h3>trackAI — single-shot AI interaction</h3>
+      <pre class="code">const res = await nl.trackAI({
+  name: 'ai_completion',
+  model: 'gpt-4o',
+  input: 'hello',
+  output: 'hi there',
+  tokens: { prompt: 5, completion: 3 },
+  metadata: { page: '/home' },
+});
+console.log(res.trace_id);</pre>
+      <button id="trackAI">Run trackAI</button>
+      <pre class="out" id="out-trackAI"></pre>
+    </div>
+
+    <!-- startTrace/finish (Raindrop: trackAiPartial streaming) -->
+    <div class="ex">
+      <h3>startTrace → finish — streaming</h3>
+      <pre class="code">const t = nl.startTrace({ name: 'chat', model: 'gpt-4o', input: 'hello' });
+// ... stream chunks ...
+const res = await t.finish({ output: 'final answer' });</pre>
+      <button id="stream">Run startTrace/finish</button>
+      <pre class="out" id="out-stream"></pre>
+    </div>
+
+    <!-- trace nested (our richer equivalent) -->
+    <div class="ex">
+      <h3>trace — full nested trace (all kinds + canonical attributes)</h3>
+      <pre class="code">const res = await nl.trace({
+  name: 'support-chat',
+  children: [
+    { name: 'retrieve', kind: 'retriever', query: 'reset password', documents: ['doc1','doc2'] },
+    { name: 'answer', kind: 'llm', model: 'gpt-4o', input: 'ctx', output: 'click forgot password',
+      tokens: { prompt: 120, completion: 18 },
+      attributes: { 'neatlogs.llm.temperature': 0.2 },
+      logs: [{ level: 'info', message: 'cache miss' }] },
+    { name: 'safety', kind: 'evaluator', input: 'click forgot password', output: '0.98' },
+  ],
+});</pre>
+      <button id="nested">Run trace</button>
+      <pre class="out" id="out-nested"></pre>
+    </div>
+
+    <script type="module">
+      import { Neatlogs } from "./dist/browser.mjs";
+
+      const nl = () =>
+        new Neatlogs({
+          apiKey: document.getElementById("key").value.trim(),
+          endpoint: document.getElementById("endpoint").value.trim(),
+        });
+      const show = (id, res) => {
+        document.getElementById(id).textContent = JSON.stringify(res, null, 2);
+        console.log(id, res);
+      };
+
+      document.getElementById("trackAI").onclick = async () => {
+        const res = await nl().trackAI({
+          name: "ai_completion",
+          model: "gpt-4o",
+          input: "hello",
+          output: "hi there",
+          tokens: { prompt: 5, completion: 3 },
+          metadata: { page: "/home" },
+        });
+        show("out-trackAI", res);
+      };
+
+      document.getElementById("stream").onclick = async () => {
+        const t = nl().startTrace({ name: "chat", model: "gpt-4o", input: "hello" });
+        await new Promise((r) => setTimeout(r, 400)); // simulate streaming
+        const res = await t.finish({ output: "final answer", tokens: { prompt: 5, completion: 20 } });
+        show("out-stream", res);
+      };
+
+      document.getElementById("nested").onclick = async () => {
+        const res = await nl().trace({
+          name: "support-chat",
+          duration_ms: 1500,
+          children: [
+            { name: "retrieve", kind: "retriever", query: "reset password",
+              documents: ["doc1", "doc2"], duration_ms: 120 },
+            { name: "answer", kind: "llm", model: "gpt-4o", input: "ctx",
+              output: "click forgot password", tokens: { prompt: 120, completion: 18 },
+              duration_ms: 1200, attributes: { "neatlogs.llm.temperature": 0.2 },
+              logs: [{ level: "info", message: "cache miss" }] },
+            { name: "safety", kind: "evaluator", input: "click forgot password",
+              output: "0.98", duration_ms: 60 },
+          ],
+        });
+        show("out-nested", res);
+      };
+    </script>
+  </body>
+</html>

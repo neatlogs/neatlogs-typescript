@@ -504,7 +504,7 @@ export class UnifiedAttributeProcessor {
             attrs['mcp.server.version'] = info.version ?? '';
           }
           if ('capabilities' in output) {
-            attrs['mcp.server.capabilities'] = JSON.stringify(output.capabilities).slice(0, 2000);
+            attrs['mcp.server.capabilities'] = JSON.stringify(output.capabilities);
           }
         }
       } catch {
@@ -1290,7 +1290,7 @@ export class UnifiedAttributeProcessor {
       if (typeof r !== 'string' || r.toLowerCase() !== role) continue;
       const c = unified[`${prefix}.${i}.content`];
       if (typeof c === 'string' && c.toLowerCase().includes('thought:')) {
-        texts.push(c.slice(0, 20000));
+        texts.push(c);
       }
     }
     return texts;

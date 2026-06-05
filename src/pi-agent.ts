@@ -147,7 +147,7 @@ function handleEvent(
             'neatlogs.span.kind': 'TOOL',
             ...(event.toolName ? { 'neatlogs.tool.name': String(event.toolName) } : {}),
             ...(event.args !== undefined
-              ? { 'input.value': safeStringify(event.args).slice(0, 10000) }
+              ? { 'input.value': safeStringify(event.args) }
               : {}),
           },
         },
@@ -161,7 +161,7 @@ function handleEvent(
       const span = event.toolCallId ? state.toolSpans.get(event.toolCallId) : undefined;
       if (!span) return;
       if (event.result !== undefined) {
-        span.setAttribute('output.value', safeStringify(event.result).slice(0, 10000));
+        span.setAttribute('output.value', safeStringify(event.result));
       }
       if (event.isError) {
         span.setStatus({ code: SpanStatusCode.ERROR });
@@ -187,9 +187,9 @@ function handleEvent(
       if (state.agentSpan) {
         // Agent input = the first user message of the run; output = final answer.
         const firstUser = state.inputMessages.find((m) => m.role === 'user');
-        if (firstUser) state.agentSpan.setAttribute('input.value', firstUser.content.slice(0, 10000));
+        if (firstUser) state.agentSpan.setAttribute('input.value', firstUser.content);
         const finalText = lastAssistantText(event.messages);
-        if (finalText) state.agentSpan.setAttribute('output.value', finalText.slice(0, 10000));
+        if (finalText) state.agentSpan.setAttribute('output.value', finalText);
         state.agentSpan.setStatus({ code: SpanStatusCode.OK });
         state.agentSpan.end();
         state.agentSpan = undefined;
@@ -220,10 +220,10 @@ function emitLlmSpan(
   if (inMsgs.length) {
     inMsgs.forEach((m, i) => {
       attrs[`neatlogs.llm.input_messages.${i}.role`] = m.role;
-      attrs[`neatlogs.llm.input_messages.${i}.content`] = m.content.slice(0, 10000);
+      attrs[`neatlogs.llm.input_messages.${i}.content`] = m.content;
     });
-    attrs['neatlogs.llm.input'] = safeStringify({ messages: inMsgs }).slice(0, 20000);
-    attrs['input.value'] = safeStringify({ messages: inMsgs }).slice(0, 10000);
+    attrs['neatlogs.llm.input'] = safeStringify({ messages: inMsgs });
+    attrs['input.value'] = safeStringify({ messages: inMsgs });
   }
 
   const { text, toolCalls } = splitAssistantContent(msg.content);
@@ -231,7 +231,7 @@ function emitLlmSpan(
   const outText = text || toolCalls.map((tc) => `${tc.name}(${safeStringify(tc.arguments)})`).join('\n');
   if (outText || toolCalls.length) {
     attrs['neatlogs.llm.output_messages.0.role'] = 'assistant';
-    attrs['neatlogs.llm.output_messages.0.content'] = (outText || '').slice(0, 10000);
+    attrs['neatlogs.llm.output_messages.0.content'] = (outText || '');
     const outBlob: Record<string, unknown> = { role: 'assistant', content: outText || '' };
     if (toolCalls.length) {
       outBlob.tool_calls = toolCalls.map((tc) => ({ name: tc.name, arguments: tc.arguments }));
@@ -242,8 +242,8 @@ function emitLlmSpan(
         if (tc.id) attrs[`neatlogs.llm.tool_calls.${j}.id`] = String(tc.id);
       });
     }
-    attrs['neatlogs.llm.output'] = safeStringify(outBlob).slice(0, 20000);
-    attrs['output.value'] = (outText || '').slice(0, 10000);
+    attrs['neatlogs.llm.output'] = safeStringify(outBlob);
+    attrs['output.value'] = (outText || '');
   }
 
   const usage = msg.usage;

@@ -8,9 +8,9 @@ importers:
 
   .:
     dependencies:
-      '@ai-sdk/azure':
-        specifier: ^3.0.63
-        version: 3.0.63(zod@4.4.3)
+      '@ai-sdk/cohere':
+        specifier: ^3.0.36
+        version: 3.0.36(zod@4.4.3)
       '@mastra/core':
         specifier: ^1.32.1
         version: 1.32.1(@cfworker/json-schema@4.1.1)(@standard-community/standard-json@0.3.5(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(quansync@0.2.11)(zod-to-json-schema@3.25.2(zod@4.4.3))(zod@4.4.3))(@standard-community/standard-openapi@0.2.9(@standard-community/standard-json@0.3.5(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(quansync@0.2.11)(zod-to-json-schema@3.25.2(zod@4.4.3))(zod@4.4.3))(@standard-schema/spec@1.1.0)(openapi-types@12.1.3)(zod@4.4.3))(@types/json-schema@7.0.15)(express@5.2.1)(openapi-types@12.1.3)(zod@4.4.3)
@@ -56,7 +56,16 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.28.0
         version: 1.40.0
+      neatlogs:
+        specifier: ^1.0.3
+        version: 1.0.6(bba2eade4d34eea8fdae934eb1c23544)
     devDependencies:
+      '@ai-sdk/azure':
+        specifier: ^3.0.66
+        version: 3.0.70(zod@4.4.3)
+      '@ai-sdk/openai':
+        specifier: ^3.0.64
+        version: 3.0.68(zod@4.4.3)
       '@anthropic-ai/bedrock-sdk':
         specifier: ^0.29.1
         version: 0.29.1(zod@4.4.3)
@@ -93,9 +102,15 @@ importers:
       '@langchain/openai':
         specifier: ^0.6.17
         version: 0.6.17(@langchain/core@0.3.80(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.57.2(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@1.30.1(@opentelemetry/api@1.9.1))(openai@6.36.0(ws@8.20.0)(zod@4.4.3)))(ws@8.20.0)
+      '@openrouter/agent':
+        specifier: ^0.7.1
+        version: 0.7.1
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.39
+      ai:
+        specifier: ^6.0.190
+        version: 6.0.197(zod@4.4.3)
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
@@ -138,14 +153,26 @@ packages:
       express:
         optional: true
 
-  '@ai-sdk/azure@3.0.63':
-    resolution: {integrity: sha512-sPGxn5Wliht1o7SSc3agHC4YIluRIKHnQF77FVFQEjep+f/KnZ1VdjhT8LIqAcam8FA4PB/XUMrfuhfnESqHCg==}
+  '@ai-sdk/azure@3.0.70':
+    resolution: {integrity: sha512-FGwFAt1k/ZU90DydRqpAg6eFjmFxhaBh2rlI3kAIsCrbM6bbQAdYhmQJ3hlR0289uSDzsW0jRk7lDYCW1kSXRQ==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/openai@3.0.62':
-    resolution: {integrity: sha512-Oy74Bztik2X25wZD9HRd83BAXOKcRvrfgz9gvVGqKj68yegf447NiElPbB6TSVb8zyiY9wv1GSGywMCxnnoF9g==}
+  '@ai-sdk/cohere@3.0.36':
+    resolution: {integrity: sha512-a3xUVhBYP5FuThYA3Q7NjuEyl/ObBhx9z0zFDRebW0UqEoExS3zJwtE9OB+gHc/uvwx93hNg5ZITAFAvqG3GMQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/gateway@3.0.125':
+    resolution: {integrity: sha512-tocl7cUDoTpmhZqeW8XVKMMznZQwwQAEunF0VyNKmf64qt8NbMIAEiet/vRMzh7Jr9WcFeb6EZjmhLTP4Qx2Og==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/openai@3.0.68':
+    resolution: {integrity: sha512-FCs/DPr4M95UyZ/ABHJmTmCEYRCka/4J0Bna0nsd78QCdGIS0X/zhn+fVzB7mZJo7464uOWYUjROx9PGNGOb0w==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -168,8 +195,8 @@ packages:
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/provider-utils@4.0.26':
-    resolution: {integrity: sha512-CsKNLKsOpvPujRlIYvoz+Ybw+kGn7J4/fIZa/58+R7iWLLfwn6ifE2G6Yq8K9XvH/I/3bzaDAJ3NhRwEMsLBKQ==}
+  '@ai-sdk/provider-utils@4.0.27':
+    resolution: {integrity: sha512-ubkAJ+xODouwtmN1tYlvTPphH1hPOBfZaEQe8U7skGvFAnIRs9PPpsq57bC2+Ky/MB4yzhd6YOsxTAx9sGpazw==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -840,6 +867,12 @@ packages:
 
   '@nodable/entities@2.1.0':
     resolution: {integrity: sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA==}
+
+  '@openrouter/agent@0.7.1':
+    resolution: {integrity: sha512-NrxszvWG/C2biUjKva4qDgA/DyIIiKaa0AoKLLVq1PPfClHb4GIdOREMIne3rL+IIRsshWVTXDKL4SdEF4Gw6w==}
+
+  '@openrouter/sdk@0.12.79':
+    resolution: {integrity: sha512-0ZpwtnuHh3/B1piW9kHCUIQy6PAsaK/vjFdZuHxmCdAenCyUNsLA2mFpmfHNWRNb+bOO3yBc4IALa264UyzmBA==}
 
   '@opentelemetry/api-logs@0.216.0':
     resolution: {integrity: sha512-KmGTgvxTJ0J01d4mOeX1wMV5NUTNf9HebIuOOGDfIn0a/IrnXIQbOnlylDyl9tkDv4h0DUpdI/GqCdLzfTkUXg==}
@@ -1578,6 +1611,10 @@ packages:
   '@types/uuid@10.0.0':
     resolution: {integrity: sha512-7gqG38EyHgyP1S+7+xomFtL+ZNHcKv6DwNaCZmJmo1vgMugyF3TCnXVg4t1uk89mLNwnLtnY3TpOpCOyp1/xHQ==}
 
+  '@vercel/oidc@3.2.0':
+    resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
+    engines: {node: '>= 20'}
+
   '@vitest/expect@2.1.9':
     resolution: {integrity: sha512-UJCIkTBenHeKT1TTlKMJWy1laZewsRIzYighyYiJKZreqtdxSos/S1t+ktRMQWu2CKqaarrkeszJx1cgC5tGZw==}
 
@@ -1633,6 +1670,12 @@ packages:
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
+
+  ai@6.0.197:
+    resolution: {integrity: sha512-U3KsjkqwQXGHC0u0VeUDqUaNaBS/uQc7v4Vj92Cjv5lPx5DIyRBQYk4Hipy5vwD9AQKIG8uRvdaN9R+pAvrtcQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
@@ -2368,6 +2411,48 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
+  neatlogs@1.0.6:
+    resolution: {integrity: sha512-KqUZgzbDcKtxh8AjYMFBrFQlYT1ssdT726CSezxE+jEgpNwgW5h2/aRPD1UncU0uAr7sdcGmqGeDePKzV3JL5A==}
+    engines: {node: '>=18.0.0'}
+    peerDependencies:
+      '@arizeai/openinference-instrumentation-anthropic': '>=1.0.0'
+      '@arizeai/openinference-instrumentation-bedrock': '>=1.0.0'
+      '@arizeai/openinference-instrumentation-beeai': '>=1.0.0'
+      '@arizeai/openinference-instrumentation-claude-agent-sdk': '>=1.0.0'
+      '@arizeai/openinference-instrumentation-langchain': '>=1.0.0'
+      '@arizeai/openinference-instrumentation-mcp': '>=1.0.0'
+      '@arizeai/openinference-instrumentation-openai': '>=1.0.0'
+      '@google/genai': '>=0.1.0'
+      '@mastra/core': ^1.32.1
+      '@mastra/observability': ^1.11.1
+      '@neatlogs/instrumentation-google-genai': ^0.1.2
+      '@neatlogs/instrumentation-mastra': ^0.1.2
+    peerDependenciesMeta:
+      '@arizeai/openinference-instrumentation-anthropic':
+        optional: true
+      '@arizeai/openinference-instrumentation-bedrock':
+        optional: true
+      '@arizeai/openinference-instrumentation-beeai':
+        optional: true
+      '@arizeai/openinference-instrumentation-claude-agent-sdk':
+        optional: true
+      '@arizeai/openinference-instrumentation-langchain':
+        optional: true
+      '@arizeai/openinference-instrumentation-mcp':
+        optional: true
+      '@arizeai/openinference-instrumentation-openai':
+        optional: true
+      '@google/genai':
+        optional: true
+      '@mastra/core':
+        optional: true
+      '@mastra/observability':
+        optional: true
+      '@neatlogs/instrumentation-google-genai':
+        optional: true
+      '@neatlogs/instrumentation-mastra':
+        optional: true
+
   negotiator@1.0.0:
     resolution: {integrity: sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg==}
     engines: {node: '>= 0.6'}
@@ -2991,17 +3076,30 @@ snapshots:
     optionalDependencies:
       express: 5.2.1
 
-  '@ai-sdk/azure@3.0.63(zod@4.4.3)':
+  '@ai-sdk/azure@3.0.70(zod@4.4.3)':
     dependencies:
-      '@ai-sdk/openai': 3.0.62(zod@4.4.3)
+      '@ai-sdk/openai': 3.0.68(zod@4.4.3)
       '@ai-sdk/provider': 3.0.10
-      '@ai-sdk/provider-utils': 4.0.26(zod@4.4.3)
+      '@ai-sdk/provider-utils': 4.0.27(zod@4.4.3)
       zod: 4.4.3
 
-  '@ai-sdk/openai@3.0.62(zod@4.4.3)':
+  '@ai-sdk/cohere@3.0.36(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 3.0.10
-      '@ai-sdk/provider-utils': 4.0.26(zod@4.4.3)
+      '@ai-sdk/provider-utils': 4.0.27(zod@4.4.3)
+      zod: 4.4.3
+
+  '@ai-sdk/gateway@3.0.125(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 3.0.10
+      '@ai-sdk/provider-utils': 4.0.27(zod@4.4.3)
+      '@vercel/oidc': 3.2.0
+      zod: 4.4.3
+
+  '@ai-sdk/openai@3.0.68(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 3.0.10
+      '@ai-sdk/provider-utils': 4.0.27(zod@4.4.3)
       zod: 4.4.3
 
   '@ai-sdk/provider-utils@2.2.8(zod@4.4.3)':
@@ -3025,7 +3123,7 @@ snapshots:
       eventsource-parser: 3.0.8
       zod: 4.4.3
 
-  '@ai-sdk/provider-utils@4.0.26(zod@4.4.3)':
+  '@ai-sdk/provider-utils@4.0.27(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 3.0.10
       '@standard-schema/spec': 1.1.0
@@ -4009,6 +4107,15 @@ snapshots:
 
   '@nodable/entities@2.1.0': {}
 
+  '@openrouter/agent@0.7.1':
+    dependencies:
+      '@openrouter/sdk': 0.12.79
+      zod: 4.4.3
+
+  '@openrouter/sdk@0.12.79':
+    dependencies:
+      zod: 4.4.3
+
   '@opentelemetry/api-logs@0.216.0':
     dependencies:
       '@opentelemetry/api': 1.9.1
@@ -4845,6 +4952,8 @@ snapshots:
 
   '@types/uuid@10.0.0': {}
 
+  '@vercel/oidc@3.2.0': {}
+
   '@vitest/expect@2.1.9':
     dependencies:
       '@vitest/spy': 2.1.9
@@ -4903,6 +5012,14 @@ snapshots:
   acorn@8.16.0: {}
 
   agent-base@7.1.4: {}
+
+  ai@6.0.197(zod@4.4.3):
+    dependencies:
+      '@ai-sdk/gateway': 3.0.125(zod@4.4.3)
+      '@ai-sdk/provider': 3.0.10
+      '@ai-sdk/provider-utils': 4.0.27(zod@4.4.3)
+      '@opentelemetry/api': 1.9.1
+      zod: 4.4.3
 
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:
@@ -5843,6 +5960,34 @@ snapshots:
       thenify-all: 1.6.0
 
   nanoid@3.3.12: {}
+
+  neatlogs@1.0.6(bba2eade4d34eea8fdae934eb1c23544):
+    dependencies:
+      '@ai-sdk/cohere': 3.0.36(zod@4.4.3)
+      '@opentelemetry/api': 1.9.1
+      '@opentelemetry/api-logs': 0.57.2
+      '@opentelemetry/exporter-logs-otlp-proto': 0.216.0(@opentelemetry/api@1.9.1)
+      '@opentelemetry/exporter-trace-otlp-proto': 0.57.2(@opentelemetry/api@1.9.1)
+      '@opentelemetry/instrumentation': 0.57.2(@opentelemetry/api@1.9.1)
+      '@opentelemetry/instrumentation-http': 0.57.2(@opentelemetry/api@1.9.1)
+      '@opentelemetry/instrumentation-undici': 0.10.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/resources': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-logs': 0.57.2(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-metrics': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-trace-base': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-trace-node': 1.30.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/semantic-conventions': 1.40.0
+    optionalDependencies:
+      '@arizeai/openinference-instrumentation-anthropic': 0.1.10
+      '@arizeai/openinference-instrumentation-langchain': 4.0.9(@langchain/core@0.3.80(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.57.2(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@1.30.1(@opentelemetry/api@1.9.1))(openai@6.36.0(ws@8.20.0)(zod@4.4.3)))
+      '@arizeai/openinference-instrumentation-mcp': 0.2.15
+      '@arizeai/openinference-instrumentation-openai': 4.1.0
+      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))
+      '@mastra/core': 1.32.1(@cfworker/json-schema@4.1.1)(@standard-community/standard-json@0.3.5(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(quansync@0.2.11)(zod-to-json-schema@3.25.2(zod@4.4.3))(zod@4.4.3))(@standard-community/standard-openapi@0.2.9(@standard-community/standard-json@0.3.5(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(quansync@0.2.11)(zod-to-json-schema@3.25.2(zod@4.4.3))(zod@4.4.3))(@standard-schema/spec@1.1.0)(openapi-types@12.1.3)(zod@4.4.3))(@types/json-schema@7.0.15)(express@5.2.1)(openapi-types@12.1.3)(zod@4.4.3)
+      '@mastra/observability': 1.11.1(@mastra/core@1.32.1(@cfworker/json-schema@4.1.1)(@standard-community/standard-json@0.3.5(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(quansync@0.2.11)(zod-to-json-schema@3.25.2(zod@4.4.3))(zod@4.4.3))(@standard-community/standard-openapi@0.2.9(@standard-community/standard-json@0.3.5(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(quansync@0.2.11)(zod-to-json-schema@3.25.2(zod@4.4.3))(zod@4.4.3))(@standard-schema/spec@1.1.0)(openapi-types@12.1.3)(zod@4.4.3))(@types/json-schema@7.0.15)(express@5.2.1)(openapi-types@12.1.3)(zod@4.4.3))
+    transitivePeerDependencies:
+      - supports-color
+      - zod
 
   negotiator@1.0.0: {}
 

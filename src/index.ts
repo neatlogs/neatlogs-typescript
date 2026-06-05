@@ -56,6 +56,9 @@ export { wrapAISDK, createAITelemetry } from './ai-sdk.js';
 // Provider wrappers
 export { wrapOpenAI, traceTool as traceToolOpenAI } from './openai.js';
 export { wrapAnthropic, traceTool as traceToolAnthropic } from './anthropic.js';
+export { wrapAzureOpenAI, traceTool as traceToolAzureOpenAI } from './azure-openai.js';
+export { wrapVertexAI, wrapVertexAIChat, traceTool as traceToolVertexAI } from './vertex-ai.js';
+export { wrapBedrock, traceTool as traceToolBedrock } from './bedrock.js';
 
 // Agent framework integrations
 export { langchainHandler } from './langchain.js';
@@ -63,6 +66,9 @@ export { strandsHooks } from './strands.js';
 export { openaiAgentsProcessor } from './openai-agents.js';
 export { wrapMastra } from './mastra-wrap.js';
 export { piAgentHooks } from './pi-agent.js';
+export { wrapClaudeAgentSDK } from './claude-agent-sdk.js';
+export { wrapOpenRouterAgent, wrapCallModel } from './openrouter-agent.js';
+export { NeatlogsOpencodePlugin } from './opencode-plugin.js';
 
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';
