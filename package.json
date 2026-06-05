@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -220,7 +220,8 @@
     "@opentelemetry/sdk-trace-base": "^1.30.0",
     "@opentelemetry/sdk-trace-node": "^1.30.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
-    "neatlogs": "^1.0.3"
+    "neatlogs": "^1.0.3",
+    "protobufjs": "^7.5.5"
   },
   "devDependencies": {
     "@ai-sdk/azure": "^3.0.66",

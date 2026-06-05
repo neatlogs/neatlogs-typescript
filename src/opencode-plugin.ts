@@ -4,152 +4,271 @@
  * opencode loads plugins from its config (`opencode.json` → `"plugin": [...]`)
  * or from local `.opencode/plugin/*.ts` files. A plugin is an async factory that
  * receives an app context and returns lifecycle hooks. This plugin instruments
- * opencode automatically — no per-call wiring — translating opencode's run into
+ * opencode automatically — no per-call wiring — turning an opencode session into
  * a neatlogs span tree:
  *
- *   LLM   assistant turn        (from `message.updated` completion events)
- *   TOOL  tool execution        (tool.execute.before → tool.execute.after)
+ *   AGENT  opencode.session       (one per user turn; parents that turn's spans)
+ *     ↳ LLM   assistant turn      (per completed assistant message)
+ *     ↳ TOOL  tool execution      (tool.execute.before → tool.execute.after)
  *
  * Every span carries `neatlogs.conversation.id` = the opencode session ID.
  *
+ * Export model (mirrors @raindrop-ai/opencode-plugin and neatlogs-claude-code):
+ * opencode loads the plugin in-process but `opencode run` is short-lived. Rather
+ * than the OpenTelemetry BatchSpanProcessor (whose async, scheduled-delay export
+ * + `beforeExit` shutdown races the teardown and drops spans), this plugin builds
+ * spans directly and ships them via AWAITED `fetch(POST /v1/traces)` — and it
+ * flushes after every completed assistant turn (incremental persistence) plus a
+ * final flush on `session.idle`. A `neatlogs.trace.complete` marker is sent so
+ * the backend enqueues the trace for finalization (simplification → UI).
+ *
  * Setup — either:
- *   • npm package, in opencode.json: `{ "plugin": ["neatlogs"] }`, OR
- *   • local file `.opencode/plugin/neatlogs.ts` (project) or
- *     `~/.config/opencode/plugin/neatlogs.ts` (global):
+ *   • npm package, in opencode.json: `{ "plugin": ["neatlogs/opencode"] }`, OR
+ *   • local file `.opencode/plugin/neatlogs.ts`:
  *       export { NeatlogsOpencodePlugin as default } from 'neatlogs/opencode';
  *
- * Then set NEATLOGS_API_KEY in the environment. The plugin bootstraps neatlogs
- * tracing on load (it runs inside opencode's own process, so it initializes the
- * SDK itself rather than relying on a user `init()` call).
- *
- * Optional env:
+ * Env:
  *   NEATLOGS_API_KEY            required to export
+ *   NEATLOGS_ENDPOINT           backend base URL (default https://staging-cloud.neatlogs.com)
  *   NEATLOGS_WORKFLOW_NAME      logical grouping (default: "opencode")
  *   NEATLOGS_CAPTURE_SYSTEM_PROMPT=true  capture system prompt text (default off)
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
-import { init, flush, isDebugEnabled } from './init.js';
+import {
+  TraceShipper,
+  type OtlpSpan,
+  type OtlpKeyValue,
+  SpanStatusCode,
+  generateTraceId,
+  generateSpanId,
+  nowNanoString,
+  msToNanoString,
+  attrStr,
+  attrInt,
+  attrDouble,
+} from './opencode-trace-shipper.js';
 
-const TRACER_NAME = 'neatlogs.opencode';
+const DEFAULT_ENDPOINT = 'https://staging-cloud.neatlogs.com';
+
+/** A span being built incrementally — ended (and shipped) later. */
+interface OpenSpan {
+  spanId: Uint8Array;
+  parentSpanId?: Uint8Array;
+  name: string;
+  startNano: string;
+  attributes: OtlpKeyValue[];
+}
 
 interface SessionState {
-  /** TOOL spans keyed by opencode callID. */
-  toolSpans: Map<string, Span>;
-  /** Accumulated text per assistant messageID (built from part updates). */
-  messageText: Map<string, string>;
-  /** messageIDs we've already emitted an LLM span for (completion can fire twice). */
-  emitted: Set<string>;
-  /** Most recent user-message text, used as LLM input. */
-  lastUserText: string;
+  /** Per-session trace id — all spans in a session share it. */
+  traceId: Uint8Array;
+  /** The current turn's AGENT root span (created on chat.message, ended on idle). */
+  rootSpan?: OpenSpan;
+  /** Open TOOL spans keyed by callID → start time. */
+  toolStarts: Map<string, { spanId: Uint8Array; startNano: string; tool: string; args: any }>;
+  /** Accumulated assistant text per messageID (from text parts). */
+  outputParts: Map<string, string>;
+  /** Tool calls per assistant messageID (so a tool-only turn still has output). */
+  toolCalls: Map<string, Array<{ name: string; input: any; callID: string }>>;
+  /** assistant messageIDs already emitted (completion can fire repeatedly). */
+  processed: Set<string>;
+  /** Current user prompt (this turn's input). */
+  currentInput: string;
+  /** Captured system prompt (if enabled). */
+  systemPrompt?: string;
+  /** Latest assistant text — the AGENT root's output on close. */
+  lastAssistantText: string;
 }
 
-let _initialized = false;
-
-async function ensureInitialized(): Promise<void> {
-  if (_initialized) return;
-  _initialized = true;
-  try {
-    await init({
-      apiKey: process.env.NEATLOGS_API_KEY,
-      // The plugin bootstraps itself inside opencode's process — there is no user
-      // init() to pass an endpoint, so honor NEATLOGS_ENDPOINT from the env (e.g.
-      // a local backend). init() otherwise defaults to the hosted cloud.
-      ...(process.env.NEATLOGS_ENDPOINT
-        ? { endpoint: process.env.NEATLOGS_ENDPOINT }
-        : {}),
-      workflowName: process.env.NEATLOGS_WORKFLOW_NAME || 'opencode',
-      // opencode is long-running and event-driven; keep auto session off so each
-      // span's conversation id is the opencode session id we set explicitly.
-      autoSession: false,
-    });
-  } catch {
-    // If init fails (already initialized, missing key), tracing degrades to no-op.
-  }
-}
-
-/**
- * opencode Plugin factory. opencode calls this with its app context and uses the
- * returned hook object. Typed loosely to avoid a hard dependency on
- * `@opencode-ai/plugin`.
- */
 export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, any>> => {
-  await ensureInitialized();
+  const apiKey = (process.env.NEATLOGS_API_KEY ?? '').trim();
+  const endpoint = (process.env.NEATLOGS_ENDPOINT ?? DEFAULT_ENDPOINT).trim();
+  const workflowName = process.env.NEATLOGS_WORKFLOW_NAME || 'opencode';
+  const captureSystemPrompt =
+    String(process.env.NEATLOGS_CAPTURE_SYSTEM_PROMPT || '').toLowerCase() === 'true';
+  const debug = String(process.env.NEATLOGS_DEBUG || '').toLowerCase() === 'true';
 
+  const shipper = new TraceShipper({ apiKey, endpoint, workflowName, debug });
   const sessions = new Map<string, SessionState>();
-  const tracer = trace.getTracer(TRACER_NAME);
-  const captureSystemPrompt = String(process.env.NEATLOGS_CAPTURE_SYSTEM_PROMPT || '').toLowerCase() === 'true';
 
   function stateFor(sessionID: string): SessionState {
     let s = sessions.get(sessionID);
     if (!s) {
-      s = { toolSpans: new Map(), messageText: new Map(), emitted: new Set(), lastUserText: '' };
+      s = {
+        traceId: generateTraceId(),
+        toolStarts: new Map(),
+        outputParts: new Map(),
+        toolCalls: new Map(),
+        processed: new Set(),
+        currentInput: '',
+        lastAssistantText: '',
+      };
       sessions.set(sessionID, s);
     }
     return s;
   }
 
-  return {
-    /**
-     * Global event bus. opencode emits message + session lifecycle events here.
-     * We use it to emit an LLM span when an assistant message completes, and to
-     * track user-message text + assistant text from part updates.
-     */
-    event: async ({ event }: { event: any }) => {
-      try {
-        // handleEvent returns a flush promise on session-idle/deleted; await it
-        // so spans export before opencode's short-lived `run` process exits.
-        await handleEvent(tracer, sessions, stateFor, captureSystemPrompt, event);
-      } catch {
-        // never break opencode over tracing
-      }
-    },
+  /** Start the per-turn AGENT root span (idempotent within a turn). */
+  function startRoot(st: SessionState, sessionID: string): void {
+    if (st.rootSpan) return;
+    st.rootSpan = {
+      spanId: generateSpanId(),
+      name: 'opencode.session',
+      startNano: nowNanoString(),
+      attributes: [
+        { key: 'neatlogs.span.kind', value: { stringValue: 'AGENT' } },
+        { key: 'neatlogs.agent.framework', value: { stringValue: 'opencode' } },
+        { key: 'neatlogs.conversation.id', value: { stringValue: sessionID } },
+      ],
+    };
+  }
 
-    /** Fired before a tool runs: open a TOOL span keyed by callID. */
-    'tool.execute.before': async (input: any, output: any) => {
+  /** End + enqueue the AGENT root, send the completion marker, and flush. */
+  async function closeAndFlush(st: SessionState, sessionID: string): Promise<void> {
+    if (st.rootSpan) {
+      const attrs = st.rootSpan.attributes.slice();
+      setIO(attrs, 'AGENT', st.currentInput || undefined, st.lastAssistantText || undefined);
+      shipper.enqueue({
+        traceId: st.traceId,
+        spanId: st.rootSpan.spanId,
+        name: st.rootSpan.name,
+        kind: 1,
+        startTimeUnixNano: st.rootSpan.startNano,
+        endTimeUnixNano: nowNanoString(),
+        attributes: attrs,
+        status: { code: SpanStatusCode.OK },
+      });
+      // Completion marker — the backend only finalizes (simplifies → UI) a trace
+      // once it sees a `neatlogs.trace.complete` span. Parented to the root.
+      const m = nowNanoString();
+      shipper.enqueue({
+        traceId: st.traceId,
+        spanId: generateSpanId(),
+        parentSpanId: st.rootSpan.spanId,
+        name: 'neatlogs.trace.complete',
+        kind: 1,
+        startTimeUnixNano: m,
+        endTimeUnixNano: m,
+        attributes: [
+          { key: 'neatlogs.trace.complete', value: { boolValue: true } },
+          { key: 'neatlogs.internal', value: { boolValue: true } },
+          { key: 'neatlogs.span.kind', value: { stringValue: 'Neatlogs.INTERNAL' } },
+        ],
+      });
+      st.rootSpan = undefined;
+    }
+    await shipper.flush();
+    void sessionID;
+  }
+
+  return {
+    /** Fired when the user submits a prompt — open the turn's AGENT root. */
+    'chat.message': async (_input: any, output: any) => {
       try {
-        const sessionID = input?.sessionID ?? '';
-        const callID = input?.callID ?? input?.tool ?? '';
+        const sessionID = String(_input?.sessionID ?? output?.sessionID ?? '');
+        if (!sessionID) return;
         const st = stateFor(sessionID);
-        const span = tracer.startSpan(
-          `opencode.tool.${input?.tool ?? 'tool'}`,
-          {
-            attributes: {
-              'neatlogs.span.kind': 'TOOL',
-              'neatlogs.tool.name': String(input?.tool ?? ''),
-              ...(sessionID ? { 'neatlogs.conversation.id': String(sessionID) } : {}),
-              ...(output?.args !== undefined
-                ? { 'input.value': safeStringify(output.args) }
-                : {}),
-            },
-          },
-          otelContext.active(),
-        );
-        if (callID) st.toolSpans.set(String(callID), span);
+        const parts = output?.parts ?? [];
+        const text = Array.isArray(parts)
+          ? parts
+              .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
+              .map((p: any) => p.text)
+              .join('\n')
+          : '';
+        if (text) st.currentInput = text;
+        startRoot(st, sessionID);
       } catch {
         /* ignore */
       }
     },
 
-    /** Fired after a tool runs: close the matching TOOL span. */
-    'tool.execute.after': async (input: any, output: any) => {
+    /** Capture the system prompt (opt-in). */
+    'experimental.chat.system.transform': async (_input: any, output: any) => {
       try {
-        const sessionID = input?.sessionID ?? '';
-        const callID = String(input?.callID ?? input?.tool ?? '');
+        if (!captureSystemPrompt) return;
+        const sessionID = String(_input?.sessionID ?? '');
+        const parts = output?.system ?? output?.parts ?? output;
+        const joined = Array.isArray(parts) ? parts.map((p: any) => (typeof p === 'string' ? p : p?.text ?? '')).join('\n') : String(parts ?? '');
+        if (sessionID && joined) stateFor(sessionID).systemPrompt = joined;
+      } catch {
+        /* ignore */
+      }
+    },
+
+    /** Global event bus — message parts, assistant completions, session idle. */
+    event: async ({ event }: { event: any }) => {
+      try {
+        await handleEvent(shipper, sessions, stateFor, startRoot, closeAndFlush, event);
+      } catch {
+        // never break opencode over tracing
+      }
+    },
+
+    /** Tool start — record start time + args (span built atomically in `after`). */
+    'tool.execute.before': async (input: any, output: any) => {
+      try {
+        const sessionID = String(input?.sessionID ?? '');
+        if (!sessionID) return;
         const st = stateFor(sessionID);
-        const span = st.toolSpans.get(callID);
-        if (!span) return;
-        if (output?.title) span.setAttribute('neatlogs.tool.title', String(output.title));
-        const out = output?.output ?? output?.result;
+        startRoot(st, sessionID);
+        const callID = String(input?.callID ?? input?.tool ?? '');
+        st.toolStarts.set(callID, {
+          spanId: generateSpanId(),
+          startNano: nowNanoString(),
+          tool: String(input?.tool ?? 'tool'),
+          args: output?.args,
+        });
+      } catch {
+        /* ignore */
+      }
+    },
+
+    /** Tool end — enqueue the completed TOOL span (parented to the turn root). */
+    'tool.execute.after': async (input: any, result: any) => {
+      try {
+        const sessionID = String(input?.sessionID ?? '');
+        if (!sessionID) return;
+        const st = stateFor(sessionID);
+        const callID = String(input?.callID ?? input?.tool ?? '');
+        const start = st.toolStarts.get(callID);
+        if (!start) return;
+        st.toolStarts.delete(callID);
+
+        const attrs: OtlpKeyValue[] = [
+          { key: 'neatlogs.span.kind', value: { stringValue: 'TOOL' } },
+          { key: 'neatlogs.tool.name', value: { stringValue: start.tool } },
+          { key: 'neatlogs.conversation.id', value: { stringValue: sessionID } },
+        ];
+        if (start.args !== undefined) {
+          // The shipper bypasses the SDK attribute-processor, so emit the
+          // already-namespaced keys the backend consumer reads directly
+          // (neatlogs.tool.input / .output and the generic neatlogs.input.value),
+          // not the raw input.value/output.value the processor would map.
+          setIO(attrs, 'TOOL', safeStringify(start.args), undefined);
+          push(attrs, attrStr('neatlogs.tool.input', safeStringify(start.args)));
+        }
+        if (result?.title) push(attrs, attrStr('neatlogs.tool.title', String(result.title)));
+        const out = result?.output ?? result?.result;
         if (out !== undefined) {
-          span.setAttribute('output.value', (typeof out === 'string' ? out : safeStringify(out)));
+          const o = typeof out === 'string' ? out : safeStringify(out);
+          setIO(attrs, 'TOOL', undefined, o);
+          push(attrs, attrStr('neatlogs.tool.output', o));
         }
-        if (output?.metadata !== undefined) {
-          span.setAttribute('neatlogs.tool.metadata', safeStringify(output.metadata));
+        if (result?.metadata !== undefined) {
+          push(attrs, attrStr('neatlogs.tool.metadata', safeStringify(result.metadata)));
         }
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.end();
-        st.toolSpans.delete(callID);
+
+        shipper.enqueue({
+          traceId: st.traceId,
+          spanId: start.spanId,
+          parentSpanId: st.rootSpan?.spanId,
+          name: `opencode.tool.${start.tool}`,
+          kind: 1,
+          startTimeUnixNano: start.startNano,
+          endTimeUnixNano: nowNanoString(),
+          attributes: attrs,
+          status: { code: SpanStatusCode.OK },
+        });
       } catch {
         /* ignore */
       }
@@ -166,136 +285,183 @@ export default NeatlogsOpencodePlugin;
 // ---------------------------------------------------------------------------
 
 function handleEvent(
-  tracer: ReturnType<typeof trace.getTracer>,
+  shipper: TraceShipper,
   sessions: Map<string, SessionState>,
   stateFor: (sessionID: string) => SessionState,
-  captureSystemPrompt: boolean,
+  startRoot: (st: SessionState, sessionID: string) => void,
+  closeAndFlush: (st: SessionState, sessionID: string) => Promise<void>,
   event: any,
 ): Promise<unknown> | undefined {
   const type = event?.type;
   const props = event?.properties ?? {};
 
-  // Accumulate text emitted as message parts (text deltas / final text).
+  // Accumulate text + tool-call parts on an assistant message.
   if (type === 'message.part.updated' || type === 'message.part.completed') {
     const part = props.part ?? props;
     const messageID = part?.messageID ?? part?.message_id;
     const sessionID = part?.sessionID ?? props.sessionID;
-    if (part?.type === 'text' && typeof part?.text === 'string' && messageID && sessionID) {
-      const st = stateFor(String(sessionID));
-      st.messageText.set(String(messageID), part.text);
+    if (!messageID || !sessionID) return undefined;
+    const st = stateFor(String(sessionID));
+    if (part?.type === 'text' && typeof part?.text === 'string') {
+      st.outputParts.set(String(messageID), part.text);
+    } else if (part?.type === 'tool' && part?.tool) {
+      const list = st.toolCalls.get(String(messageID)) ?? [];
+      const callID = String(part.callID ?? part.tool);
+      const input = part?.state?.input ?? {};
+      const existing = list.find((t) => t.callID === callID);
+      if (existing) existing.input = input;
+      else list.push({ name: String(part.tool), input, callID });
+      st.toolCalls.set(String(messageID), list);
     }
-    return;
+    return undefined;
   }
 
+  // Assistant message completed → emit the LLM span, then flush this turn.
   if (type === 'message.updated' || type === 'message.completed') {
     const info = props.info ?? props.message ?? props;
     const sessionID = info?.sessionID ?? info?.session_id;
-    if (!sessionID) return;
+    if (!sessionID) return undefined;
+    if (info?.role !== 'assistant') return undefined;
+    const completed = info?.time?.completed ?? info?.completed;
+    const id = String(info?.id ?? '');
+    if (!completed || !id) return undefined;
     const st = stateFor(String(sessionID));
-
-    if (info?.role === 'user') {
-      const text = messageText(info) || st.messageText.get(String(info?.id)) || '';
-      if (text) st.lastUserText = text;
-      return;
-    }
-
-    if (info?.role === 'assistant') {
-      const completed = info?.time?.completed ?? info?.completed;
-      const id = String(info?.id ?? '');
-      if (!completed || st.emitted.has(id)) return; // wait for completion; emit once
-      st.emitted.add(id);
-      emitLlmSpan(tracer, st, captureSystemPrompt, info, String(sessionID));
-    }
-    return;
+    if (st.processed.has(id)) return undefined;
+    st.processed.add(id);
+    startRoot(st, String(sessionID));
+    emitLlmSpan(shipper, st, info, String(sessionID));
+    // Incremental persistence: ship this turn's spans now (don't wait for idle).
+    return shipper.flush().catch(() => undefined);
   }
 
+  // Session finished → end root, send completion marker, final flush.
   if (type === 'session.idle' || type === 'session.deleted') {
-    // Turn/session finished: close any dangling tool spans for this session.
     const sessionID = props.sessionID ?? props.info?.id;
     if (!sessionID) return undefined;
     const st = sessions.get(String(sessionID));
     if (!st) return undefined;
-    for (const ts of st.toolSpans.values()) {
-      try {
-        ts.end();
-      } catch {
-        /* ignore */
-      }
-    }
-    st.toolSpans.clear();
+    st.toolStarts.clear();
+    const p = closeAndFlush(st, String(sessionID));
     if (type === 'session.deleted') sessions.delete(String(sessionID));
-
-    // Flush so spans export before opencode exits. `opencode run` is a
-    // short-lived process that tears down as soon as the session goes idle —
-    // the batch span processor would otherwise be killed before its async
-    // export fires, dropping the whole trace. Returned so the event hook awaits.
-    return flush().catch(() => false);
+    return p;
   }
 
   return undefined;
 }
 
-function emitLlmSpan(
-  tracer: ReturnType<typeof trace.getTracer>,
-  st: SessionState,
-  captureSystemPrompt: boolean,
-  info: any,
-  sessionID: string,
-): void {
+function emitLlmSpan(shipper: TraceShipper, st: SessionState, info: any, sessionID: string): void {
   const model = info?.modelID ?? info?.model ?? '';
   const provider = info?.providerID ?? info?.provider ?? '';
 
-  const attrs: Record<string, any> = {
-    'neatlogs.span.kind': 'LLM',
-    'neatlogs.conversation.id': sessionID,
-  };
-  if (model) attrs['neatlogs.llm.model_name'] = String(model);
-  if (provider) attrs['neatlogs.llm.provider'] = String(provider);
+  const attrs: OtlpKeyValue[] = [
+    { key: 'neatlogs.span.kind', value: { stringValue: 'LLM' } },
+    { key: 'neatlogs.conversation.id', value: { stringValue: sessionID } },
+  ];
+  push(attrs, attrStr('neatlogs.llm.model_name', model ? String(model) : undefined));
+  push(attrs, attrStr('neatlogs.llm.provider', provider ? String(provider) : undefined));
 
-  if (captureSystemPrompt && info?.system) {
-    const sys = Array.isArray(info.system) ? info.system.join('\n') : String(info.system);
-    attrs['neatlogs.llm.input_messages.0.role'] = 'system';
-    attrs['neatlogs.llm.input_messages.0.content'] = sys;
-  }
-
-  let inIdx = captureSystemPrompt && info?.system ? 1 : 0;
-  if (st.lastUserText) {
-    attrs[`neatlogs.llm.input_messages.${inIdx}.role`] = 'user';
-    attrs[`neatlogs.llm.input_messages.${inIdx}.content`] = st.lastUserText;
+  let inIdx = 0;
+  if (st.systemPrompt) {
+    push(attrs, attrStr(`neatlogs.llm.input_messages.${inIdx}.role`, 'system'));
+    push(attrs, attrStr(`neatlogs.llm.input_messages.${inIdx}.content`, st.systemPrompt));
     inIdx++;
   }
-
-  const outText = messageText(info) || st.messageText.get(String(info?.id)) || '';
-  if (outText) {
-    attrs['neatlogs.llm.output_messages.0.role'] = 'assistant';
-    attrs['neatlogs.llm.output_messages.0.content'] = outText;
+  if (st.currentInput) {
+    push(attrs, attrStr(`neatlogs.llm.input_messages.${inIdx}.role`, 'user'));
+    push(attrs, attrStr(`neatlogs.llm.input_messages.${inIdx}.content`, st.currentInput));
+    setIO(attrs, 'LLM', st.currentInput, undefined);
   }
 
-  // Tokens: opencode message tokens { input, output, reasoning, cache: { read, write } }
+  const outText = st.outputParts.get(String(info?.id)) || messageText(info) || '';
+  const toolCalls = st.toolCalls.get(String(info?.id)) ?? [];
+
+  if (outText) {
+    push(attrs, attrStr('neatlogs.llm.output_messages.0.role', 'assistant'));
+    push(attrs, attrStr('neatlogs.llm.output_messages.0.content', outText));
+    setIO(attrs, 'LLM', undefined, outText);
+    st.lastAssistantText = outText;
+  }
+  // Tool-deciding turns often carry no text — render the tool call(s) as output.
+  if (toolCalls.length) {
+    toolCalls.forEach((tc, j) => {
+      push(attrs, attrStr(`neatlogs.llm.tool_calls.${j}.name`, tc.name));
+      push(attrs, attrStr(`neatlogs.llm.tool_calls.${j}.arguments`, safeStringify(tc.input ?? {})));
+    });
+    if (!outText) {
+      const rendered = toolCalls.map((tc) => `→ ${tc.name}(${safeStringify(tc.input ?? {})})`).join('\n');
+      push(attrs, attrStr('neatlogs.llm.output_messages.0.role', 'assistant'));
+      push(attrs, attrStr('neatlogs.llm.output_messages.0.content', rendered));
+      setIO(attrs, 'LLM', undefined, rendered);
+    }
+  }
+
+  // Tokens: opencode message tokens { input, output, reasoning, cache:{read,write} }
   const tokens = info?.tokens;
   if (tokens) {
-    if (tokens.input != null) attrs['neatlogs.llm.token_count.prompt'] = tokens.input;
-    if (tokens.output != null) attrs['neatlogs.llm.token_count.completion'] = tokens.output;
+    push(attrs, attrInt('neatlogs.llm.token_count.prompt', tokens.input));
+    push(attrs, attrInt('neatlogs.llm.token_count.completion', tokens.output));
     if (tokens.input != null && tokens.output != null) {
-      attrs['neatlogs.llm.token_count.total'] = tokens.input + tokens.output;
+      push(attrs, attrInt('neatlogs.llm.token_count.total', tokens.input + tokens.output));
     }
-    if (tokens.reasoning != null) attrs['neatlogs.llm.token_count.reasoning'] = tokens.reasoning;
-    if (tokens.cache?.read != null) attrs['neatlogs.llm.token_count.cache_read'] = tokens.cache.read;
-    if (tokens.cache?.write != null) attrs['neatlogs.llm.token_count.cache_write'] = tokens.cache.write;
+    push(attrs, attrInt('neatlogs.llm.token_count.reasoning', tokens.reasoning));
+    push(attrs, attrInt('neatlogs.llm.token_count.cache_read', tokens.cache?.read));
+    push(attrs, attrInt('neatlogs.llm.token_count.cache_write', tokens.cache?.write));
   }
-  if (info?.cost != null) attrs['neatlogs.llm.cost_usd'] = info.cost;
+  push(attrs, attrDouble('neatlogs.llm.cost_usd', info?.cost));
 
-  const span = tracer.startSpan(`opencode.llm.${model || 'model'}`, { attributes: attrs }, otelContext.active());
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
+  // Use opencode's real start time when available (else now).
+  const createdMs = info?.time?.created;
+  const startNano = typeof createdMs === 'number' ? msToNanoString(Math.floor(createdMs)) : nowNanoString();
 
-  // Reset accumulated text for the next turn.
-  if (info?.id) st.messageText.delete(String(info.id));
+  shipper.enqueue({
+    traceId: st.traceId,
+    spanId: generateSpanId(),
+    parentSpanId: st.rootSpan?.spanId,
+    name: `opencode.llm.${model || 'model'}`,
+    kind: 1,
+    startTimeUnixNano: startNano,
+    endTimeUnixNano: nowNanoString(),
+    attributes: attrs,
+    status: { code: SpanStatusCode.OK },
+  });
+
+  // Reset accumulated parts for the next turn.
+  if (info?.id) {
+    st.outputParts.delete(String(info.id));
+    st.toolCalls.delete(String(info.id));
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function push(arr: OtlpKeyValue[], kv: OtlpKeyValue | undefined): void {
+  if (kv) arr.push(kv);
+}
+
+/**
+ * Set generic input/output on a span using the ALREADY-NAMESPACED keys the
+ * backend consumer reads. The OTel-SDK wrappers rely on the attribute-processor
+ * to map raw `input.value` → `neatlogs.{kind}.input`; this plugin ships spans
+ * directly (no processor), so it must emit the namespaced keys itself:
+ *   neatlogs.input.value / neatlogs.output.value  (generic)
+ *   neatlogs.{kind}.input / neatlogs.{kind}.output (kind-specific)
+ * We also keep the raw input.value/output.value for any consumer that maps it.
+ */
+function setIO(arr: OtlpKeyValue[], kind: string, input?: string, output?: string): void {
+  const k = kind.toLowerCase();
+  if (input !== undefined) {
+    push(arr, attrStr('input.value', input));
+    push(arr, attrStr('neatlogs.input.value', input));
+    push(arr, attrStr(`neatlogs.${k}.input`, input));
+  }
+  if (output !== undefined) {
+    push(arr, attrStr('output.value', output));
+    push(arr, attrStr('neatlogs.output.value', output));
+    push(arr, attrStr(`neatlogs.${k}.output`, output));
+  }
+}
 
 /** Flatten an opencode message's parts/content to readable text. */
 function messageText(info: any): string {
@@ -317,10 +483,6 @@ function safeStringify(value: unknown): string {
   try {
     return JSON.stringify(value) ?? '';
   } catch {
-    return '';
+    return String(value);
   }
 }
-
-// Touch isDebugEnabled so the import is retained for parity with other modules
-// that gate verbose logging; opencode plugins stay silent unless debugging.
-void isDebugEnabled;
