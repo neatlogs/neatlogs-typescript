@@ -17,6 +17,7 @@
  */
 
 import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { getProviderTracer } from './core/auto-root.js';
 
 const TRACER_NAME = 'neatlogs.bedrock';
 const PROVIDER = 'bedrock';
@@ -34,7 +35,7 @@ export function traceTool<TArgs = any, TResult = any>(
   fn: (args: TArgs) => TResult | Promise<TResult>,
 ): (args: TArgs) => Promise<TResult> {
   return async function tracedTool(args: TArgs): Promise<TResult> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     return tracer.startActiveSpan(
       `tool.${name}`,
       {
@@ -107,7 +108,7 @@ function vendorFromModel(modelId: any): string {
 }
 
 function startSpan(name: string, modelId: any, isStream: boolean): Span {
-  return trace.getTracer(TRACER_NAME).startSpan(name, {
+  return getProviderTracer(TRACER_NAME).startSpan(name, {
     attributes: {
       'neatlogs.span.kind': 'LLM',
       'neatlogs.llm.provider': PROVIDER,
@@ -347,7 +348,7 @@ function tracedInvokeModel(
 
   let span: Span;
   if (isEmbedding) {
-    span = trace.getTracer(TRACER_NAME).startSpan('bedrock.invoke_model', {
+    span = getProviderTracer(TRACER_NAME).startSpan('bedrock.invoke_model', {
       attributes: {
         'neatlogs.span.kind': 'EMBEDDING',
         'neatlogs.llm.provider': PROVIDER,

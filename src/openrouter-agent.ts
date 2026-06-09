@@ -22,6 +22,7 @@
  */
 
 import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { getProviderTracer } from './core/auto-root.js';
 
 const TRACER_NAME = 'neatlogs.openrouter_agent';
 const PROVIDER = 'openrouter';
@@ -72,7 +73,7 @@ function tracedCallModel(original: (...args: any[]) => any) {
 }
 
 function startLlmSpan(opts: any): Span {
-  const tracer = trace.getTracer(TRACER_NAME);
+  const tracer = getProviderTracer(TRACER_NAME);
   const model = opts?.model ?? '';
 
   const span = tracer.startSpan('openrouter.call_model', {

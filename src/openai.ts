@@ -14,6 +14,7 @@
  */
 
 import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { getProviderTracer } from './core/auto-root.js';
 
 const TRACER_NAME = 'neatlogs.openai';
 
@@ -107,7 +108,7 @@ function isNamespace(path: string[]): boolean {
 
 function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
     const messages: any[] = opts?.messages ?? [];
     const isStream = opts?.stream === true;
@@ -183,7 +184,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
 
 function tracedResponsesCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
 
     const span = tracer.startSpan('openai.responses.create', {

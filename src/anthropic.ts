@@ -15,6 +15,7 @@
  */
 
 import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { getProviderTracer } from './core/auto-root.js';
 
 const TRACER_NAME = 'neatlogs.anthropic';
 
@@ -39,7 +40,7 @@ export function traceTool<TInput = any, TResult = any>(
   fn: (input: TInput) => TResult | Promise<TResult>,
 ): (input: TInput) => Promise<TResult> {
   return async function tracedTool(input: TInput): Promise<TResult> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     return tracer.startActiveSpan(
       `tool.${name}`,
       {
@@ -108,7 +109,7 @@ function isNamespace(path: string[]): boolean {
 
 function tracedMessagesCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
     const messages: any[] = opts?.messages ?? [];
     const isStream = opts?.stream === true;
@@ -152,7 +153,7 @@ function tracedMessagesCreate(original: (...args: any[]) => any) {
 
 function tracedMessagesStream(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
     const messages: any[] = opts?.messages ?? [];
 

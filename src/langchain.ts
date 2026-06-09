@@ -9,7 +9,8 @@
  * Works with LangChain, LangGraph, and Deep Agents (same callback interface).
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { trace, context as otelContext, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
+import { maybeOpenAutoRoot, endAutoRoot } from './core/auto-root.js';
 
 const TRACER_NAME = 'neatlogs.langchain';
 
@@ -32,10 +33,39 @@ export function langchainHandler(opts?: LangchainHandlerOptions): any {
 class NeatlogsCallbackHandler {
   name = 'neatlogs';
   private _spans: Map<string, Span> = new Map();
+  // Auto-root spans keyed by the run-id of the child that triggered them.
+  private _autoRoots: Map<string, Span> = new Map();
   private _workflowName: string | undefined;
 
   constructor(opts?: LangchainHandlerOptions) {
     this._workflowName = opts?.workflowName;
+  }
+
+  // --- Self-rooting ----------------------------------------------------------
+  //
+  // A LangChain run can begin with ANY callback. When it begins with a non-root
+  // kind (a bare `llm.invoke()` fires handleChatModelStart/handleLLMStart with no
+  // chain above it; a standalone tool/retriever similarly), the span we create is
+  // parentless and non-root -> the backend can't anchor the trace and it never
+  // renders. Open a WORKFLOW root transparently in that case so just adding the
+  // handler yields a complete trace. A top-level CHAIN is already root-eligible.
+  private _startCtx(parentRunId: string | undefined, runId: string, kind: string): Context {
+    const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
+    if (parentSpan) {
+      return trace.setSpan(otelContext.active(), parentSpan);
+    }
+    const tracer = trace.getTracer(TRACER_NAME);
+    const { root, ctx } = maybeOpenAutoRoot(tracer, kind, otelContext.active());
+    if (root) this._autoRoots.set(runId, root);
+    return ctx;
+  }
+
+  private _endAutoRoot(runId: string): void {
+    const root = this._autoRoots.get(runId);
+    if (root) {
+      endAutoRoot(root);
+      this._autoRoots.delete(runId);
+    }
   }
 
   // --- Chain/Graph callbacks ---
@@ -51,10 +81,7 @@ class NeatlogsCallbackHandler {
     const tracer = trace.getTracer(TRACER_NAME);
     const name = serialized?.name ?? serialized?.id?.at(-1) ?? 'chain';
 
-    const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
-    const parentCtx = parentSpan
-      ? trace.setSpan(otelContext.active(), parentSpan)
-      : otelContext.active();
+    const parentCtx = this._startCtx(parentRunId, runId, 'chain');
 
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'CHAIN',
@@ -79,6 +106,7 @@ class NeatlogsCallbackHandler {
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 
   async handleChainError(
@@ -92,6 +120,7 @@ class NeatlogsCallbackHandler {
     span.recordException(error);
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 
   // --- LLM callbacks ---
@@ -106,10 +135,7 @@ class NeatlogsCallbackHandler {
     const tracer = trace.getTracer(TRACER_NAME);
     const model = serialized?.kwargs?.model_name ?? serialized?.kwargs?.model ?? serialized?.name ?? '';
 
-    const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
-    const parentCtx = parentSpan
-      ? trace.setSpan(otelContext.active(), parentSpan)
-      : otelContext.active();
+    const parentCtx = this._startCtx(parentRunId, runId, 'llm');
 
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'LLM',
@@ -143,10 +169,7 @@ class NeatlogsCallbackHandler {
     const tracer = trace.getTracer(TRACER_NAME);
     const model = serialized?.kwargs?.model_name ?? serialized?.kwargs?.model ?? serialized?.name ?? '';
 
-    const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
-    const parentCtx = parentSpan
-      ? trace.setSpan(otelContext.active(), parentSpan)
-      : otelContext.active();
+    const parentCtx = this._startCtx(parentRunId, runId, 'llm');
 
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'LLM',
@@ -219,6 +242,7 @@ class NeatlogsCallbackHandler {
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 
   async handleLLMNewToken(
@@ -238,6 +262,7 @@ class NeatlogsCallbackHandler {
     span.recordException(error);
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 
   // --- Tool callbacks ---
@@ -262,10 +287,7 @@ class NeatlogsCallbackHandler {
       (Array.isArray(serialized?.id) ? serialized.id[serialized.id.length - 1] : undefined) ||
       'tool';
 
-    const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
-    const parentCtx = parentSpan
-      ? trace.setSpan(otelContext.active(), parentSpan)
-      : otelContext.active();
+    const parentCtx = this._startCtx(parentRunId, runId, 'tool');
 
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'TOOL',
@@ -289,6 +311,7 @@ class NeatlogsCallbackHandler {
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 
   async handleToolError(
@@ -302,6 +325,7 @@ class NeatlogsCallbackHandler {
     span.recordException(error);
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 
   // --- Retriever callbacks ---
@@ -315,10 +339,7 @@ class NeatlogsCallbackHandler {
     const tracer = trace.getTracer(TRACER_NAME);
     const name = serialized?.name ?? 'retriever';
 
-    const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
-    const parentCtx = parentSpan
-      ? trace.setSpan(otelContext.active(), parentSpan)
-      : otelContext.active();
+    const parentCtx = this._startCtx(parentRunId, runId, 'retriever');
 
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'RETRIEVER',
@@ -350,6 +371,7 @@ class NeatlogsCallbackHandler {
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 
   async handleRetrieverError(
@@ -363,6 +385,7 @@ class NeatlogsCallbackHandler {
     span.recordException(error);
     span.end();
     this._spans.delete(runId);
+    this._endAutoRoot(runId);
   }
 }
 

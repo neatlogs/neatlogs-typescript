@@ -56,6 +56,11 @@ async function main() {
 
   const client = wrapBedrock(new BedrockRuntimeClient({ region }));
 
+  // This run is ONE logical turn made of several spans (Converse -> traceTool ->
+  // ConverseStream), so a WORKFLOW root groups them into a single trace. A lone
+  // wrapped LLM call auto-roots on its own, but the traceTool TOOL span needs
+  // this WORKFLOW parent to attach to — so the explicit root is required here.
+  // (The wrapper detects the active WORKFLOW and does NOT add a second root.)
   const run = span({ kind: 'WORKFLOW', name: 'bedrock-demo' }, async () => {
     console.log('--- Converse ---');
     const res = await client.send(

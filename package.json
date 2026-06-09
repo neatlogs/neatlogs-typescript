@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

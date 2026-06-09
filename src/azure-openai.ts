@@ -18,6 +18,7 @@
  */
 
 import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { getProviderTracer } from './core/auto-root.js';
 
 const TRACER_NAME = 'neatlogs.azure_openai';
 const PROVIDER = 'azure';
@@ -40,7 +41,7 @@ export function traceTool<TArgs = any, TResult = any>(
   fn: (args: TArgs) => TResult | Promise<TResult>,
 ): (args: TArgs) => Promise<TResult> {
   return async function tracedTool(args: TArgs): Promise<TResult> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     return tracer.startActiveSpan(
       `tool.${name}`,
       {
@@ -105,7 +106,7 @@ function isNamespace(path: string[]): boolean {
 
 function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
     const messages: any[] = opts?.messages ?? [];
     const isStream = opts?.stream === true;
@@ -177,7 +178,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
 
 function tracedResponsesCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
 
     const span = tracer.startSpan('azure_openai.responses.create', {

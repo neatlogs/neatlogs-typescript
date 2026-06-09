@@ -21,6 +21,7 @@
  */
 
 import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { getProviderTracer } from './core/auto-root.js';
 
 const TRACER_NAME = 'neatlogs.vertex_ai';
 const PROVIDER = 'vertex_ai';
@@ -47,7 +48,7 @@ export function traceTool<TArgs = any, TResult = any>(
   fn: (args: TArgs) => TResult | Promise<TResult>,
 ): (args: TArgs) => Promise<TResult> {
   return async function tracedTool(args: TArgs): Promise<TResult> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     return tracer.startActiveSpan(
       `tool.${name}`,
       {
@@ -148,7 +149,7 @@ function tracedChatSend(
   rest: any[],
   isStream: boolean,
 ): any {
-  const tracer = trace.getTracer(TRACER_NAME);
+  const tracer = getProviderTracer(TRACER_NAME);
   const model = chat?.model ?? chat?.modelVersion ?? '';
   const span = tracer.startSpan('vertex_ai.chat.send_message', {
     attributes: {
@@ -186,7 +187,7 @@ function tracedChatSend(
 
 function tracedEmbedContent(original: (...a: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const span = tracer.startSpan('vertex_ai.models.embed_content', {
       attributes: {
         'neatlogs.span.kind': 'EMBEDDING',
@@ -221,7 +222,7 @@ function tracedEmbedContent(original: (...a: any[]) => any) {
 
 function tracedCountTokens(original: (...a: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const span = tracer.startSpan('vertex_ai.models.count_tokens', {
       attributes: {
         'neatlogs.span.kind': 'LLM',
@@ -255,7 +256,7 @@ function tracedCountTokens(original: (...a: any[]) => any) {
 
 function tracedGenerateContent(original: (...args: any[]) => any, isStream: boolean) {
   return function (opts: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
 
     const span = tracer.startSpan('vertex_ai.models.generate_content', {

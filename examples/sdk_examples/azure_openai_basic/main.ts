@@ -65,7 +65,11 @@ async function main() {
     }),
   );
 
-  // A WORKFLOW span groups the whole run; the LLM + TOOL spans nest under it.
+  // This run is ONE logical turn made of several spans (LLM -> traceTool ->
+  // LLM -> stream), so a WORKFLOW root groups them into a single trace. A lone
+  // wrapped LLM call auto-roots on its own, but the traceTool TOOL span needs
+  // this WORKFLOW parent to attach to — so the explicit root is required here.
+  // (The wrapper detects the active WORKFLOW and does NOT add a second root.)
   const run = span({ kind: 'WORKFLOW', name: 'azure-weather-chat' }, async () => {
     console.log('--- non-streaming chat.completions.create (with tool) ---');
     const first = await client.chat.completions.create({
