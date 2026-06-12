@@ -23,6 +23,7 @@ import {
 } from '@opentelemetry/api';
 import { PromptContext, UserPromptContext, PromptTemplate, UserPromptTemplate } from '../prompt/template.js';
 import { registerMask } from './mask.js';
+import { applyEndUserAttributes } from './end-user.js';
 
 import { getLogger } from './logger.js';
 import { safeJsonDumps, serializeObj } from '../decorators/base.js';
@@ -76,6 +77,8 @@ const KNOWN_OPTION_KEYS = new Set([
   'version',
   'mask',
   'attributes',
+  'endUserId',
+  'endUserMetadata',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -186,6 +189,8 @@ export async function trace<T>(
     userPromptVariables,
     version,
     mask,
+    endUserId,
+    endUserMetadata,
     attributes: explicitAttributes,
     ...extraOptions
   } = options;
@@ -281,6 +286,10 @@ export async function trace<T>(
     }
   }
 
+  // End-user belongs to the trace root only. This trace() call is a root when it
+  // creates a new root trace, or when it isn't nested in an already-active trace.
+  const isRootTrace = shouldCreateRootTrace || !isInActiveTrace;
+
   // ---------------------------------------------------------------------------
   // Create span and execute callback
   // ---------------------------------------------------------------------------
@@ -289,6 +298,9 @@ export async function trace<T>(
 
   const spanCallback = async (span: Span): Promise<T> => {
     _setSpanAttributes(span, kind, extraAttributes);
+
+    // End-user belongs to the trace root only; skipped on a non-root span.
+    applyEndUserAttributes(span, endUserId, endUserMetadata, isRootTrace);
 
     if (input !== undefined && input !== null) {
       span.setAttribute('input.value', safeJsonDumps(serializeObj(input)));

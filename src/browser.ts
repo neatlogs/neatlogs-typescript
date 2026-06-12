@@ -29,6 +29,10 @@
 
 const DEFAULT_ENDPOINT = "https://staging-cloud.neatlogs.com";
 
+// Canonical end-user attribute keys (inlined — this file stays dependency-free).
+const END_USER_ID_KEY = "neatlogs.end_user.id";
+const END_USER_METADATA_KEY = "neatlogs.end_user.metadata";
+
 // --- the simple trace shape the backend (/v1/trace) accepts --------------------
 // Mirrors the server-side SimpleSpan; kept local so this file has no imports.
 
@@ -77,6 +81,14 @@ export interface NeatlogsSpan {
   attributes?: Record<string, unknown>;
   children?: NeatlogsSpan[];
   logs?: NeatlogsLog[];
+  /**
+   * END-USER this trace belongs to — only meaningful on the ROOT of a trace
+   * (overrides the client default). One end-user per trace; the backend rolls it
+   * up to the trace and its session. Ignored on child spans.
+   */
+  endUser?: string;
+  /** Arbitrary end-user fields for the trace root (overrides the client default). */
+  endUserMetadata?: Record<string, unknown>;
 }
 
 /** The root of a trace = a span node (its `name` becomes the workflow name). */
@@ -101,6 +113,15 @@ export interface NeatlogsOptions {
   enabled?: boolean;
   /** Called on transport errors instead of throwing (default: console.warn). */
   onError?: (err: unknown) => void;
+  /**
+   * Default END-USER identity for every trace this client sends — the user of
+   * your app, not the operator. One end-user per trace; the backend rolls it up
+   * to the trace and its session. A per-call `endUser` (on trace()/trackAI())
+   * overrides this. Set it once after login, e.g. `new Neatlogs({ apiKey, endUser })`.
+   */
+  endUser?: string;
+  /** Default arbitrary end-user fields stored as JSON (e.g. { plan: 'pro' }). */
+  endUserMetadata?: Record<string, unknown>;
 }
 
 export interface TrackResult {
@@ -123,6 +144,10 @@ export interface TrackAIInput {
   attributes?: Record<string, unknown>;
   /** Override the inferred kind (defaults to LLM for trackAI). */
   kind?: NeatlogsKind | string;
+  /** END-USER for this trace (overrides the client default). One per trace. */
+  endUser?: string;
+  /** Arbitrary end-user fields for this trace (overrides the client default). */
+  endUserMetadata?: Record<string, unknown>;
 }
 
 export class Neatlogs {
@@ -131,6 +156,8 @@ export class Neatlogs {
   private readonly baseUrl: string;
   private readonly enabled: boolean;
   private readonly onError: (err: unknown) => void;
+  private readonly endUser?: string;
+  private readonly endUserMetadata?: Record<string, unknown>;
 
   constructor(opts: NeatlogsOptions) {
     if (!opts || !opts.apiKey) {
@@ -143,6 +170,8 @@ export class Neatlogs {
     const endpoint = opts.endpoint || DEFAULT_ENDPOINT;
     this.baseUrl = safeOrigin(endpoint) || DEFAULT_ENDPOINT;
     this.enabled = opts.enabled !== false;
+    this.endUser = opts.endUser;
+    this.endUserMetadata = opts.endUserMetadata;
     this.onError =
       opts.onError ||
       ((err) => {
@@ -186,9 +215,37 @@ export class Neatlogs {
     };
   }
 
+  /**
+   * Fold end-user identity onto the trace ROOT as canonical attributes, and
+   * strip the convenience `endUser`/`endUserMetadata` fields so they aren't sent
+   * as raw root fields. Per-call values win over the client defaults; explicit
+   * `attributes` win over both. One end-user per trace — only the root carries it.
+   */
+  private applyEndUser(body: NeatlogsTrace): NeatlogsTrace {
+    const { endUser, endUserMetadata, ...rest } = body as NeatlogsTrace & {
+      endUser?: string;
+      endUserMetadata?: Record<string, unknown>;
+    };
+    const id = endUser ?? this.endUser;
+    const meta = endUserMetadata ?? this.endUserMetadata;
+    if (id === undefined && meta === undefined) return rest;
+
+    const attributes: Record<string, unknown> = { ...(rest.attributes ?? {}) };
+    if (id !== undefined && attributes[END_USER_ID_KEY] === undefined) {
+      attributes[END_USER_ID_KEY] = String(id);
+    }
+    if (meta !== undefined && attributes[END_USER_METADATA_KEY] === undefined) {
+      attributes[END_USER_METADATA_KEY] =
+        typeof meta === "string" ? meta : JSON.stringify(meta);
+    }
+    return { ...rest, attributes };
+  }
+
   /** POST the trace JSON to the backend's /v1/trace endpoint. */
   private async post(body: NeatlogsTrace): Promise<TrackResult> {
     if (!this.enabled) return { ok: true };
+    // Fold end-user identity onto the root before anything else.
+    body = this.applyEndUser(body);
     // Inject the configured project name into the root (required for write keys;
     // ignored server-side for full project keys). A `project` already on the body wins.
     const payload =

@@ -39,8 +39,22 @@ export interface InitOptions {
   sessionId?: string;
   /** Auto-generate a session ID if none provided. Defaults to false. */
   autoSession?: boolean;
-  /** User identifier for the session. */
+  /**
+   * Operator identifier — whoever is RUNNING the SDK (a developer, a service
+   * account, a CI job). Attached to all spans as a resource attribute. This is
+   * NOT the end-user of your application.
+   */
   userId?: string;
+  /**
+   * Process-global default for the END-USER — the user of your application.
+   * Use this for single-user processes (CLI, per-user worker) and pure-`wrap()`
+   * setups, where it lands on the root span automatically. On a multi-tenant
+   * server set the end-user per request via `trace({ endUserId })` instead.
+   * One end-user per trace; the backend rolls it up to the trace and its session.
+   */
+  endUserId?: string;
+  /** Optional arbitrary end-user fields stored as JSON (e.g. { plan: 'pro' }). */
+  endUserMetadata?: Record<string, any>;
   /** Tags to attach to all spans. Must be string array. */
   tags?: string[];
   /** Custom metadata to attach to all spans. */
@@ -108,6 +122,16 @@ export interface SpanOptions {
   /** JSON schema describing the tool interface (for kind: MCP_TOOL). */
   toolJsonSchema?: Record<string, any>;
 
+  // End-user identity (one end-user per trace; usually set on the WORKFLOW root)
+  /**
+   * Identifier of the END-USER this trace belongs to — the user of your
+   * application, not the operator running the SDK. The backend rolls it up to
+   * the trace + session. Distinct from `init({ userId })`.
+   */
+  endUserId?: string;
+  /** Optional arbitrary end-user fields stored as JSON on the trace. */
+  endUserMetadata?: Record<string, any>;
+
   // Embedding-specific
   /** Embedding model name (for kind: EMBEDDING). */
   model?: string;
@@ -137,6 +161,14 @@ export interface TraceOptions {
   version?: string;
   /** Per-trace mask function. */
   mask?: MaskFunction;
+  /**
+   * Identifier of the END-USER this trace belongs to — the user of your
+   * application, not the operator running the SDK. One end-user per trace; the
+   * backend rolls it up to the trace + session. Distinct from `init({ userId })`.
+   */
+  endUserId?: string;
+  /** Optional arbitrary end-user fields stored as JSON on the trace. */
+  endUserMetadata?: Record<string, any>;
   /** Custom attributes to set on the span. */
   attributes?: Record<string, any>;
   /** Allow extra attributes via index signature. */

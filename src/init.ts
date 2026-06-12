@@ -28,6 +28,7 @@ import { NeatlogsExporter } from './core/exporter.js';
 import { NeatlogsLogExporter } from './core/log-exporter.js';
 import { _setOtelLogger } from './core/log.js';
 import { _setSessionConfig } from './core/context.js';
+import { END_USER_ID_KEY, END_USER_METADATA_KEY, normalizeEndUserMetadata } from './core/end-user.js';
 import { getLogger, enableDebugLogging } from './core/logger.js';
 import { InstrumentationManager } from './instrumentation/manager.js';
 import { PromptClient, setSharedClient } from './prompt/client.js';
@@ -176,6 +177,16 @@ export async function init(options: InitOptions = {}): Promise<void> {
   };
   if (sessionId) resourceAttrs['session.id'] = sessionId;
   if (options.userId) resourceAttrs['user.id'] = options.userId;
+  // End-user identity: process-global default (single-user processes & pure-wrap()
+  // setups). On a server this is normally set per-request via trace({ endUserId }),
+  // which takes precedence since span attributes override resource attributes.
+  if (options.endUserId) {
+    resourceAttrs[END_USER_ID_KEY] = String(options.endUserId);
+  }
+  if (options.endUserMetadata) {
+    const euMeta = normalizeEndUserMetadata(options.endUserMetadata);
+    if (euMeta) resourceAttrs[END_USER_METADATA_KEY] = euMeta;
+  }
 
   const tags = options.tags;
   if (tags !== undefined) {
