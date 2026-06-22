@@ -45,7 +45,7 @@ function applySpanDecorator<T extends (...args: any[]) => any>(
 async function main() {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
-    endpoint: process.env.NEATLOGS_ENDPOINT ?? 'https://staging-cloud.neatlogs.com',
+    endpoint: process.env.NEATLOGS_ENDPOINT ?? 'https://ingest.neatlogs.com',
     workflowName,
     tags: ['typescript-skill-run', 'span-decorator-smoke'],
     debug: true,

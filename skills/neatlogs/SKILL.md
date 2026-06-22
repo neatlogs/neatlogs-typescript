@@ -45,7 +45,7 @@ import { init, span, flush, shutdown } from 'neatlogs';
 
 await init({
   apiKey: process.env.NEATLOGS_API_KEY ?? '',
-  endpoint: process.env.NEATLOGS_ENDPOINT ?? 'https://staging-cloud.neatlogs.com',
+  endpoint: process.env.NEATLOGS_ENDPOINT ?? 'https://ingest.neatlogs.com',
   workflowName: 'my-app',
   instrumentations: ['openai'],
 });
@@ -110,7 +110,7 @@ await init(options);
 | `piiSpanTypes` | `string[]` | `undefined` | Override which span types have PII redaction |
 | `mask` | `MaskFunction` | `undefined` | Client-side mask function |
 | `metadata` | `Record<string, any>` | `undefined` | Custom metadata to attach to all spans |
-| `endpoint` | `string` | `'https://staging-cloud.neatlogs.com'` | Backend endpoint URL |
+| `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Backend endpoint URL |
 | `baseUrl` | `string` | `undefined` | Base URL for the Neatlogs API |
 
 ---

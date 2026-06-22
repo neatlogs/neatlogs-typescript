@@ -77,7 +77,7 @@ export interface InitOptions {
   pii?: 'redact' | 'hash' | false;
   /** SDK version override. */
   version?: string;
-  /** Backend endpoint URL. Defaults to https://staging-cloud.neatlogs.com */
+  /** Backend endpoint URL. Defaults to https://ingest.neatlogs.com */
   endpoint?: string;
   /** Maximum spans per export batch. Defaults to 100. */
   batchSize?: number;

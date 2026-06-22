@@ -32,11 +32,11 @@ describe("Neatlogs browser SDK — construction", () => {
     expect(() => new Neatlogs({})).toThrow(/apiKey/);
   });
 
-  it("defaults the endpoint to staging and posts to /v1/trace with bearer auth", async () => {
+  it("defaults the endpoint to ingest and posts to /v1/trace with bearer auth", async () => {
     const nl = new Neatlogs({ apiKey: "nl_test" });
     await nl.trackAI({ name: "chat", input: "hi", output: "yo" });
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe("https://staging-cloud.neatlogs.com/v1/trace");
+    expect(calls[0].url).toBe("https://ingest.neatlogs.com/v1/trace");
     expect(calls[0].init.method).toBe("POST");
     expect(calls[0].init.headers.Authorization).toBe("Bearer nl_test");
     expect(calls[0].init.headers["Content-Type"]).toBe("application/json");
