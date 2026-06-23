@@ -316,7 +316,7 @@ npm install
 npm run build
 npx tsc --noEmit --skipLibCheck --project examples/tsconfig.json
 
-export NEATLOGS_ENDPOINT="https://staging-cloud.neatlogs.com"
+export NEATLOGS_ENDPOINT="https://ingest.neatlogs.com"
 export NEATLOGS_WORKFLOW_PREFIX="local-oi-repro-$(date +%Y%m%d%H%M%S)-"
 # Set NEATLOGS_API_KEY and provider keys via local env/secrets; do not commit them.
 node scripts/run-original7-examples.mjs --timeout 300000
@@ -329,7 +329,7 @@ Then inspect `logs/<example>_processed_spans.jsonl` for `openinference.span.kind
 
 ## 6. Staging run artifacts
 
-Workflow names exported to `https://staging-cloud.neatlogs.com` during handoff validation (useful for screenshots and UI inspection):
+Workflow names exported to `https://ingest.neatlogs.com` during handoff validation (useful for screenshots and UI inspection):
 
 | Workflow name | Example / source | Observation |
 |---|---|---|

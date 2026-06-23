@@ -144,7 +144,7 @@ await init({
 | `captureLogs` | `boolean` | `false` | Capture log records via OTel LoggerProvider. |
 | `traceContent` | `boolean` | `true` | Capture input/output content on spans. |
 | `pii` | `'redact' &#124; 'hash' &#124; false` | — | PII detection mode. |
-| `endpoint` | `string` | `'https://staging-cloud.neatlogs.com/api/data/v4/batch'` | Backend endpoint URL. |
+| `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Backend endpoint URL. |
 | `batchSize` | `number` | `100` | Maximum spans per export batch. |
 | `flushInterval` | `number` | `5` | Seconds between batch flushes. |
 | `piiEnabled` | `boolean` | — | Override team-level PII redaction toggle. |

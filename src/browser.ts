@@ -27,7 +27,7 @@
  *   t.finish({ output: full, tokens: { prompt, completion } });
  */
 
-const DEFAULT_ENDPOINT = "https://staging-cloud.neatlogs.com";
+const DEFAULT_ENDPOINT = "https://ingest.neatlogs.com";
 
 // Canonical end-user attribute keys (inlined — this file stays dependency-free).
 const END_USER_ID_KEY = "neatlogs.end_user.id";

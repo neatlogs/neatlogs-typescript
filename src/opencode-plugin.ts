@@ -29,7 +29,7 @@
  *
  * Env:
  *   NEATLOGS_API_KEY            required to export
- *   NEATLOGS_ENDPOINT           backend base URL (default https://staging-cloud.neatlogs.com)
+ *   NEATLOGS_ENDPOINT           backend base URL (default https://ingest.neatlogs.com)
  *   NEATLOGS_WORKFLOW_NAME      logical grouping (default: "opencode")
  *   NEATLOGS_CAPTURE_SYSTEM_PROMPT=true  capture system prompt text (default off)
  */
@@ -48,7 +48,7 @@ import {
   attrDouble,
 } from './opencode-trace-shipper.js';
 
-const DEFAULT_ENDPOINT = 'https://staging-cloud.neatlogs.com';
+const DEFAULT_ENDPOINT = 'https://ingest.neatlogs.com';
 
 /** A span being built incrementally — ended (and shipped) later. */
 interface OpenSpan {

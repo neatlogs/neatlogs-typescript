@@ -299,7 +299,7 @@ import { Mastra } from '@mastra/core/mastra';
 
 await init({
   apiKey: '...',
-  endpoint: 'https://staging-cloud.neatlogs.com',
+  endpoint: 'https://ingest.neatlogs.com',
   workflowName: 'mastra-app',
   instrumentations: ['mastra'],
 });
