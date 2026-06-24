@@ -19,13 +19,11 @@ import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { MeterProvider } from '@opentelemetry/sdk-metrics';
-import { LoggerProvider, SimpleLogRecordProcessor, BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
+import { LoggerProvider, BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 
 import { NeatlogsSpanProcessor } from './core/span-processor.js';
 import { FilteringExporter } from './core/filtering-exporter.js';
-import { NeatlogsExporter } from './core/exporter.js';
-import { NeatlogsLogExporter } from './core/log-exporter.js';
 import { _setOtelLogger } from './core/log.js';
 import { _setSessionConfig } from './core/context.js';
 import { END_USER_ID_KEY, END_USER_METADATA_KEY, normalizeEndUserMetadata } from './core/end-user.js';
@@ -45,7 +43,6 @@ let _initialized = false;
 let _tracerProvider: NodeTracerProvider | null = null;
 let _meterProvider: MeterProvider | null = null;
 let _logProvider: LoggerProvider | null = null;
-let _logSpanExporter: NeatlogsExporter | null = null;
 let _spanProcessor: NeatlogsSpanProcessor | null = null;
 let _debugMode = false;
 
@@ -272,20 +269,7 @@ export async function init(options: InitOptions = {}): Promise<void> {
   // 15. Set up LoggerProvider (if captureLogs)
   const captureLogs = options.captureLogs ?? false;
   if (captureLogs) {
-    _logSpanExporter = new NeatlogsExporter({
-      baseUrl,
-      apiKey: resolvedKey,
-      batchSize: options.batchSize ?? 100,
-      flushIntervalMs: (options.flushInterval ?? 5) * 1000,
-      disableExport: disableExportResolved,
-    });
-
     _logProvider = new LoggerProvider({ resource });
-
-    // File-based log exporter (for NEATLOGS_LOG_LOGS env var)
-    _logProvider.addLogRecordProcessor(
-      new SimpleLogRecordProcessor(new NeatlogsLogExporter(_logSpanExporter)),
-    );
 
     // OTLP log export to /v1/logs (same pattern as Python SDK)
     if (!disableExportResolved) {
@@ -297,7 +281,10 @@ export async function init(options: InitOptions = {}): Promise<void> {
         headers: resolvedKey ? { 'x-api-key': resolvedKey } : undefined,
       });
       _logProvider.addLogRecordProcessor(
-        new BatchLogRecordProcessor(otlpLogExporter),
+        new BatchLogRecordProcessor(otlpLogExporter, {
+          maxExportBatchSize: options.batchSize ?? 100,
+          scheduledDelayMillis: (options.flushInterval ?? 5) * 1000,
+        }),
       );
       if (options.debug) {
         logger.debug(`OTLP log exporter configured: ${logsEndpoint}`);
@@ -387,11 +374,11 @@ export async function flush(): Promise<boolean> {
     }
   }
 
-  if (_logSpanExporter) {
+  if (_logProvider) {
     try {
-      logger.debug('Flushing log span exporter...');
-      await _logSpanExporter.flush();
-      logger.debug('Log span exporter flushed successfully');
+      logger.debug('Flushing log provider...');
+      await _logProvider.forceFlush();
+      logger.debug('Log provider flushed successfully');
     } catch (e) {
       logger.error(`Error flushing logs: ${e}`);
       success = false;
@@ -456,23 +443,11 @@ export async function shutdown(): Promise<boolean> {
     }
   }
 
-  if (_logSpanExporter) {
-    try {
-      logger.debug('Shutting down log span exporter...');
-      await _logSpanExporter.shutdown();
-      logger.debug('Log span exporter shut down successfully');
-    } catch (e) {
-      logger.error(`Error shutting down log span exporter: ${e}`);
-      success = false;
-    }
-  }
-
   // Reset all module-level state
   _initialized = false;
   _tracerProvider = null;
   _meterProvider = null;
   _logProvider = null;
-  _logSpanExporter = null;
   _spanProcessor = null;
   _debugMode = false;
 

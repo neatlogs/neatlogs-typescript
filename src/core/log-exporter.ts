@@ -1,5 +1,5 @@
 /**
- * NeatlogsLogExporter — bridges OTel LogRecord to NeatlogsExporter.
+ * NeatlogsLogExporter — legacy bridge from OTel LogRecord to NeatlogsExporter.
  *
  * Converts OTel log records into span-like dicts and forwards them
  * to the NeatlogsExporter for batch export.

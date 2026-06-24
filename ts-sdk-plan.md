@@ -12,9 +12,9 @@ neatlogs/version.py	29	src/version.ts	Read from package.json
 neatlogs/core/span_processor.py	466	src/core/span-processor.ts	NeatlogsSpanProcessor implements OTel SpanProcessor
 neatlogs/core/attribute_processor.py	1215	src/core/attribute-processor.ts	UnifiedAttributeProcessor — normalize raw OTel attrs
 neatlogs/core/context.py	247	src/core/context.ts	trace() context manager → async wrapper function
-neatlogs/core/exporter.py	404	src/core/exporter.ts	NeatlogsExporter for log spans (batch HTTP)
+neatlogs/core/exporter.py	404	src/core/exporter.ts	Legacy NeatlogsExporter for log spans (batch HTTP)
 neatlogs/core/log.py	220	src/core/log.ts	log() function + stdout capture
-neatlogs/core/log_exporter.py	153	src/core/log-exporter.ts	Bridges OTel LogRecords → NeatlogsExporter
+neatlogs/core/log_exporter.py	153	src/core/log-exporter.ts	Legacy bridge from OTel LogRecords to NeatlogsExporter
 neatlogs/core/logger.py	83	src/core/logger.ts	Internal SDK debug logger
 neatlogs/core/mask.py	68	src/core/mask.ts	PII mask registry + applyMask()
 neatlogs/core/llm_binder.py	128	src/core/llm-binder.ts	bindTemplates()
@@ -166,13 +166,13 @@ For other libraries with significant TypeScript usage but no OpenInference packa
 5. HTTP Auto-Instrumentation — Always-On (Same as Python)
 Same as the Python SDK, init() will always call instrumentHttp() internally, which patches fetch / undici for W3C traceparent context propagation. This ensures trace context flows across HTTP boundaries without the user needing to opt in.
 
-The SDK's own internal HTTP calls (PromptClient, NeatlogsExporter) will suppress OTel instrumentation on themselves (same as Python does with _SUPPRESS_INSTRUMENTATION_KEY), so they never generate spurious spans.
+The SDK's own internal HTTP calls (PromptClient and OTLP exporters) will suppress OTel instrumentation on themselves (same as Python does with _SUPPRESS_INSTRUMENTATION_KEY), so they never generate spurious spans.
 
 6. HTTP Client for Internal SDK Use
-Python uses requests. TypeScript will use the built-in fetch API (Node 18+) for the PromptClient and NeatlogsExporter. No external HTTP dependency.
+Python uses requests. TypeScript will use the built-in fetch API (Node 18+) for the PromptClient. No external HTTP dependency.
 
 7. Transport — OTLP
-Same as Python: @opentelemetry/exporter-trace-otlp-proto for span export via HTTP to {base_url}/v1/traces. The NeatlogsExporter (for log spans) uses the custom batch HTTP endpoint at /api/data/v4/batch.
+Same as Python: @opentelemetry/exporter-trace-otlp-proto for span export via HTTP to {base_url}/v1/traces. Captured logs use @opentelemetry/exporter-logs-otlp-proto over HTTP/protobuf to {base_url}/v1/logs.
 
 Project Structure
 neatlogs-typescript/
@@ -192,9 +192,9 @@ neatlogs-typescript/
 │   │   ├── span-processor.ts   # NeatlogsSpanProcessor
 │   │   ├── attribute-processor.ts  # UnifiedAttributeProcessor
 │   │   ├── context.ts          # trace() wrapper
-│   │   ├── exporter.ts         # NeatlogsExporter (batch HTTP for logs)
+│   │   ├── exporter.ts         # legacy NeatlogsExporter (batch HTTP for logs)
 │   │   ├── log.ts              # log() function
-│   │   ├── log-exporter.ts     # OTel LogRecord → NeatlogsExporter bridge
+│   │   ├── log-exporter.ts     # legacy OTel LogRecord → NeatlogsExporter bridge
 │   │   ├── logger.ts           # Internal debug logger
 │   │   ├── mask.ts             # PII mask registry
 │   │   ├── llm-binder.ts       # bindTemplates()
@@ -471,11 +471,11 @@ Route each line through OTel logger
 Restore original on exit
 src/core/log-exporter.ts — (mirrors core/log_exporter.py):
 
-NeatlogsLogExporter — bridges OTel LogRecord → NeatlogsExporter
-Converts log records to span-like dicts for the batch endpoint
+NeatlogsLogExporter — legacy bridge for OTel LogRecord → NeatlogsExporter
+Do not wire this into init() for normal captureLogs export; captured logs should use OTLP /v1/logs.
 src/core/exporter.ts — (mirrors core/exporter.py):
 
-NeatlogsExporter — batch HTTP exporter for log spans:
+NeatlogsExporter — legacy batch HTTP exporter for log spans:
 Buffers spans, flushes on interval or batch size
 Posts to /api/data/v4/batch
 Headers: x-api-key
@@ -527,7 +527,7 @@ Create TracerProvider with expanded span limits (10,000 attrs)
 Add NeatlogsSpanProcessor (pre-processing + file logging)
 Add BatchSpanProcessor + OTLPSpanExporter (transport to {baseUrl}/v1/traces)
 Set up MeterProvider
-If captureLogs: set up LoggerProvider + NeatlogsLogExporter + NeatlogsExporter
+If captureLogs: set up LoggerProvider + OTLPLogExporter + BatchLogRecordProcessor to {baseUrl}/v1/logs
 Create InstrumentationManager, call instrumentHttp() (always-on, same as Python), then instrument(instrumentations)
 Register process.on('beforeExit', shutdown) handler
 Set _initialized = true

@@ -1,5 +1,5 @@
 /**
- * NeatlogsExporter — batch HTTP exporter for log spans.
+ * NeatlogsExporter — legacy batch HTTP exporter for log spans.
  *
  * Buffers span-like dicts and flushes them in batches to the
  * Neatlogs API at /api/data/v4/batch.

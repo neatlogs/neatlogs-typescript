@@ -144,7 +144,7 @@ await init({
 | `captureLogs` | `boolean` | `false` | Capture log records via OTel LoggerProvider. |
 | `traceContent` | `boolean` | `true` | Capture input/output content on spans. |
 | `pii` | `'redact' &#124; 'hash' &#124; false` | — | PII detection mode. |
-| `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Backend endpoint URL. |
+| `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Base ingest endpoint. The SDK sends traces to `/v1/traces` and logs to `/v1/logs`. |
 | `batchSize` | `number` | `100` | Maximum spans per export batch. |
 | `flushInterval` | `number` | `5` | Seconds between batch flushes. |
 | `piiEnabled` | `boolean` | — | Override team-level PII redaction toggle. |
@@ -281,7 +281,7 @@ log('Retrieved {count} documents in {ms}ms', { count: 5, ms: 120 });
 log('Classification result', { category: 'technical', level: 'debug' });
 ```
 
-Requires `captureLogs: true` in `init()`. Log records are emitted as OTel `LogRecord`s associated with the active span.
+Requires `captureLogs: true` in `init()`. Log records are emitted as OTel `LogRecord`s associated with the active span and exported to the OTLP logs endpoint at `/v1/logs`.
 
 The special `level` key sets the log severity (`'info'`, `'debug'`, `'warn'`, `'error'`). All other keys are template variables and are also recorded as `log.{key}` attributes.
 
