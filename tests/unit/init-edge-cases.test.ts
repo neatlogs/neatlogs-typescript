@@ -92,14 +92,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
   })),
 }));
 
-vi.mock('../../src/core/exporter.js', () => ({
-  NeatlogsExporter: vi.fn().mockImplementation(() => ({
-    export: vi.fn(),
-    flush: vi.fn().mockResolvedValue(undefined),
-    shutdown: vi.fn().mockResolvedValue(undefined),
-  })),
-}));
-
 vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
 }));

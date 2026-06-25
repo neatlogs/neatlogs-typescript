@@ -87,14 +87,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
   })),
 }));
 
-vi.mock('../../src/core/exporter.js', () => ({
-  NeatlogsExporter: vi.fn().mockImplementation(() => ({
-    export: vi.fn(),
-    flush: vi.fn().mockResolvedValue(undefined),
-    shutdown: vi.fn().mockResolvedValue(undefined),
-  })),
-}));
-
 vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
 }));
@@ -242,14 +234,12 @@ describe('init()', () => {
       SimpleLogRecordProcessor,
     } = await import('@opentelemetry/sdk-logs');
     const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
-    const { NeatlogsExporter } = await import('../../src/core/exporter.js');
     const { _setOtelLogger } = await import('../../src/core/log.js');
 
     (LoggerProvider as any).mockClear();
     (BatchLogRecordProcessor as any).mockClear();
     (SimpleLogRecordProcessor as any).mockClear();
     (OTLPLogExporter as any).mockClear();
-    (NeatlogsExporter as any).mockClear();
     (_setOtelLogger as any).mockClear();
 
     await init({ apiKey: 'test-key', disableExport: false, captureLogs: true });
@@ -261,7 +251,6 @@ describe('init()', () => {
     });
     expect(BatchLogRecordProcessor).toHaveBeenCalledTimes(1);
     expect(SimpleLogRecordProcessor).not.toHaveBeenCalled();
-    expect(NeatlogsExporter).not.toHaveBeenCalled();
     expect(_setOtelLogger).toHaveBeenCalledTimes(1);
   });
 
@@ -272,14 +261,12 @@ describe('init()', () => {
       SimpleLogRecordProcessor,
     } = await import('@opentelemetry/sdk-logs');
     const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
-    const { NeatlogsExporter } = await import('../../src/core/exporter.js');
     const { _setOtelLogger } = await import('../../src/core/log.js');
 
     (LoggerProvider as any).mockClear();
     (BatchLogRecordProcessor as any).mockClear();
     (SimpleLogRecordProcessor as any).mockClear();
     (OTLPLogExporter as any).mockClear();
-    (NeatlogsExporter as any).mockClear();
     (_setOtelLogger as any).mockClear();
 
     await init({ apiKey: 'test-key', disableExport: true, captureLogs: true });
@@ -288,7 +275,6 @@ describe('init()', () => {
     expect(OTLPLogExporter).not.toHaveBeenCalled();
     expect(BatchLogRecordProcessor).not.toHaveBeenCalled();
     expect(SimpleLogRecordProcessor).not.toHaveBeenCalled();
-    expect(NeatlogsExporter).not.toHaveBeenCalled();
     expect(_setOtelLogger).toHaveBeenCalledTimes(1);
   });
 });
