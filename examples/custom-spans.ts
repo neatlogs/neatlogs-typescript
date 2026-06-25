@@ -3,13 +3,15 @@
  * EMBEDDING, and GUARDRAIL.
  *
  * Run:
- *   NEATLOGS_API_KEY=... npx tsx examples/custom-spans.ts
+ *   NEATLOGS_API_KEY=... NEATLOGS_ENDPOINT=https://ingest.neatlogs.com npx tsx examples/custom-spans.ts
  */
-import { init, span, trace, log, shutdown } from 'neatlogs';
+import { init, span, trace, log, flush, shutdown } from 'neatlogs';
 
 async function main() {
   await init({
     apiKey: process.env.NEATLOGS_API_KEY,
+    endpoint: process.env.NEATLOGS_ENDPOINT ?? 'https://ingest.neatlogs.com',
+    workflowName: `custom-spans-${Date.now()}`,
     captureLogs: true,
   });
 
@@ -70,6 +72,7 @@ async function main() {
   const result = await pipeline();
   console.log('Pipeline result:', result);
 
+  await flush();
   await shutdown();
 }
 

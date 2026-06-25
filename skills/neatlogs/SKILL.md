@@ -103,14 +103,14 @@ await init(options);
 | `batchSize` | `number` | `100` | Max spans per batch |
 | `debug` | `boolean` | `false` | Enable verbose logging |
 | `disableExport` | `boolean` | `false` | Disable span export to backend |
-| `captureLogs` | `boolean` | `false` | Capture `log()` calls as LOG spans |
+| `captureLogs` | `boolean` | `false` | Capture `log()` calls as OTel log records exported to `/v1/logs` |
 | `traceContent` | `boolean` | `true` | Whether to capture input/output content |
 | `pii` | `'redact' \| 'hash' \| false` | `undefined` | PII detection setting |
 | `piiEnabled` | `boolean` | `undefined` | Override team-level server-side PII redaction |
 | `piiSpanTypes` | `string[]` | `undefined` | Override which span types have PII redaction |
 | `mask` | `MaskFunction` | `undefined` | Client-side mask function |
 | `metadata` | `Record<string, any>` | `undefined` | Custom metadata to attach to all spans |
-| `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Backend endpoint URL |
+| `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Base ingest endpoint. Traces export to `/v1/traces`; logs export to `/v1/logs` when `captureLogs` is enabled |
 | `baseUrl` | `string` | `undefined` | Base URL for the Neatlogs API |
 
 ---

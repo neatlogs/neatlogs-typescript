@@ -24,6 +24,10 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
   OTLPTraceExporter: vi.fn().mockImplementation(() => ({})),
 }));
 
+vi.mock('@opentelemetry/exporter-logs-otlp-proto', () => ({
+  OTLPLogExporter: vi.fn().mockImplementation(() => ({})),
+}));
+
 vi.mock('@opentelemetry/resources', () => ({
   Resource: vi.fn().mockImplementation((attrs: any) => ({ attributes: attrs })),
 }));
@@ -69,6 +73,7 @@ vi.mock('@opentelemetry/sdk-logs', () => {
       shutdown: shutdownFn,
     })),
     SimpleLogRecordProcessor: vi.fn().mockImplementation(() => ({})),
+    BatchLogRecordProcessor: vi.fn().mockImplementation(() => ({})),
   };
 });
 
@@ -80,18 +85,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
     forceFlush: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
   })),
-}));
-
-vi.mock('../../src/core/exporter.js', () => ({
-  NeatlogsExporter: vi.fn().mockImplementation(() => ({
-    export: vi.fn(),
-    flush: vi.fn().mockResolvedValue(undefined),
-    shutdown: vi.fn().mockResolvedValue(undefined),
-  })),
-}));
-
-vi.mock('../../src/core/log-exporter.js', () => ({
-  NeatlogsLogExporter: vi.fn().mockImplementation(() => ({})),
 }));
 
 vi.mock('../../src/core/log.js', () => ({
@@ -234,19 +227,54 @@ describe('init()', () => {
     expect(BatchSpanProcessor).toHaveBeenCalledTimes(1);
   });
 
-  it('sets up log provider when captureLogs: true', async () => {
-    const { LoggerProvider } = await import('@opentelemetry/sdk-logs');
-    const { NeatlogsExporter } = await import('../../src/core/exporter.js');
+  it('sets up OTLP log export when captureLogs: true', async () => {
+    const {
+      LoggerProvider,
+      BatchLogRecordProcessor,
+      SimpleLogRecordProcessor,
+    } = await import('@opentelemetry/sdk-logs');
+    const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
     const { _setOtelLogger } = await import('../../src/core/log.js');
 
     (LoggerProvider as any).mockClear();
-    (NeatlogsExporter as any).mockClear();
+    (BatchLogRecordProcessor as any).mockClear();
+    (SimpleLogRecordProcessor as any).mockClear();
+    (OTLPLogExporter as any).mockClear();
+    (_setOtelLogger as any).mockClear();
+
+    await init({ apiKey: 'test-key', disableExport: false, captureLogs: true });
+
+    expect(LoggerProvider).toHaveBeenCalledTimes(1);
+    expect(OTLPLogExporter).toHaveBeenCalledWith({
+      url: 'https://ingest.neatlogs.com/v1/logs',
+      headers: { 'x-api-key': 'test-key' },
+    });
+    expect(BatchLogRecordProcessor).toHaveBeenCalledTimes(1);
+    expect(SimpleLogRecordProcessor).not.toHaveBeenCalled();
+    expect(_setOtelLogger).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the log provider local when captureLogs is enabled but export is disabled', async () => {
+    const {
+      LoggerProvider,
+      BatchLogRecordProcessor,
+      SimpleLogRecordProcessor,
+    } = await import('@opentelemetry/sdk-logs');
+    const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
+    const { _setOtelLogger } = await import('../../src/core/log.js');
+
+    (LoggerProvider as any).mockClear();
+    (BatchLogRecordProcessor as any).mockClear();
+    (SimpleLogRecordProcessor as any).mockClear();
+    (OTLPLogExporter as any).mockClear();
     (_setOtelLogger as any).mockClear();
 
     await init({ apiKey: 'test-key', disableExport: true, captureLogs: true });
 
     expect(LoggerProvider).toHaveBeenCalledTimes(1);
-    expect(NeatlogsExporter).toHaveBeenCalledTimes(1);
+    expect(OTLPLogExporter).not.toHaveBeenCalled();
+    expect(BatchLogRecordProcessor).not.toHaveBeenCalled();
+    expect(SimpleLogRecordProcessor).not.toHaveBeenCalled();
     expect(_setOtelLogger).toHaveBeenCalledTimes(1);
   });
 });
@@ -260,6 +288,19 @@ describe('flush()', () => {
     await init({ apiKey: 'test-key', disableExport: true });
     const result = await flush();
     expect(result).toBe(true);
+  });
+
+  it('flushes the log provider when captureLogs is enabled', async () => {
+    const { LoggerProvider } = await import('@opentelemetry/sdk-logs');
+    (LoggerProvider as any).mockClear();
+
+    await init({ apiKey: 'test-key', disableExport: true, captureLogs: true });
+
+    const loggerProvider = (LoggerProvider as any).mock.results[0].value;
+    const result = await flush();
+
+    expect(result).toBe(true);
+    expect(loggerProvider.forceFlush).toHaveBeenCalledTimes(1);
   });
 
   it('returns true when no providers exist (before init)', async () => {

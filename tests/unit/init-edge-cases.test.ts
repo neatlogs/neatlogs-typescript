@@ -30,6 +30,10 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
   OTLPTraceExporter: vi.fn().mockImplementation(() => ({})),
 }));
 
+vi.mock('@opentelemetry/exporter-logs-otlp-proto', () => ({
+  OTLPLogExporter: vi.fn().mockImplementation(() => ({})),
+}));
+
 vi.mock('@opentelemetry/resources', () => ({
   Resource: vi.fn().mockImplementation((attrs: any) => ({ attributes: attrs })),
 }));
@@ -75,6 +79,7 @@ vi.mock('@opentelemetry/sdk-logs', () => {
       shutdown: shutdownFn,
     })),
     SimpleLogRecordProcessor: vi.fn().mockImplementation(() => ({})),
+    BatchLogRecordProcessor: vi.fn().mockImplementation(() => ({})),
   };
 });
 
@@ -85,18 +90,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
     forceFlush: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
   })),
-}));
-
-vi.mock('../../src/core/exporter.js', () => ({
-  NeatlogsExporter: vi.fn().mockImplementation(() => ({
-    export: vi.fn(),
-    flush: vi.fn().mockResolvedValue(undefined),
-    shutdown: vi.fn().mockResolvedValue(undefined),
-  })),
-}));
-
-vi.mock('../../src/core/log-exporter.js', () => ({
-  NeatlogsLogExporter: vi.fn().mockImplementation(() => ({})),
 }));
 
 vi.mock('../../src/core/log.js', () => ({
@@ -218,6 +211,32 @@ describe('init() edge cases', () => {
     const options = (BatchSpanProcessor as any).mock.calls[0][1];
     expect(options.maxExportBatchSize).toBe(200);
     expect(options.scheduledDelayMillis).toBe(10_000);
+  });
+
+  it('with custom endpoint routes captured logs to normalized /v1/logs', async () => {
+    const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
+    const { BatchLogRecordProcessor } = await import('@opentelemetry/sdk-logs');
+
+    (OTLPLogExporter as any).mockClear();
+    (BatchLogRecordProcessor as any).mockClear();
+
+    await init({
+      apiKey: 'test-key',
+      disableExport: false,
+      captureLogs: true,
+      endpoint: 'https://custom.neatlogs.com/api/data/v4/batch',
+      batchSize: 25,
+      flushInterval: 3,
+    });
+
+    expect(OTLPLogExporter).toHaveBeenCalledWith({
+      url: 'https://custom.neatlogs.com/v1/logs',
+      headers: { 'x-api-key': 'test-key' },
+    });
+    expect(BatchLogRecordProcessor).toHaveBeenCalledTimes(1);
+    const options = (BatchLogRecordProcessor as any).mock.calls[0][1];
+    expect(options.maxExportBatchSize).toBe(25);
+    expect(options.scheduledDelayMillis).toBe(3000);
   });
 
   it('with NEATLOGS_DISABLE_EXPORT="1" disables export', async () => {
