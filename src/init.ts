@@ -8,7 +8,6 @@
  * `flush()` and `shutdown()` handle graceful cleanup.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 
 import { trace, metrics } from '@opentelemetry/api';
@@ -26,7 +25,6 @@ import { NeatlogsSpanProcessor } from './core/span-processor.js';
 import { FilteringExporter } from './core/filtering-exporter.js';
 import { _setOtelLogger } from './core/log.js';
 import { _setSessionConfig } from './core/context.js';
-import { END_USER_ID_KEY, END_USER_METADATA_KEY, normalizeEndUserMetadata } from './core/end-user.js';
 import { getLogger, enableDebugLogging } from './core/logger.js';
 import { InstrumentationManager } from './instrumentation/manager.js';
 import { PromptClient, setSharedClient } from './prompt/client.js';
@@ -75,13 +73,6 @@ function _resolveWorkflowName(workflowName?: string): string {
   }
 
   return 'neatlogs-app';
-}
-
-/**
- * Generate a short random hex string.
- */
-function _randomHex(bytes: number): string {
-  return randomBytes(bytes).toString('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -137,24 +128,16 @@ export async function init(options: InitOptions = {}): Promise<void> {
   // 5. Resolve workflow name
   const resolvedWorkflowName = _resolveWorkflowName(options.workflowName);
 
-  // 6. Resolve session ID
-  let sessionId: string | undefined = options.sessionId;
-  if (!sessionId && options.autoSession) {
-    sessionId = `session_${Date.now()}_${_randomHex(4)}`;
-    if (options.debug) {
-      logger.debug(`Auto-generated session_id: ${sessionId}`);
-    }
-  }
-
-  // 7. Parse base URL from endpoint
+  // 6. Parse base URL from endpoint
   const endpoint =
     options.endpoint ??
     'https://ingest.neatlogs.com';
   const baseUrl = new URL(endpoint).origin;
 
-  // 8. Set session config
+  // 7. Set session config. Session & end-user identity are PER-REQUEST (set via
+  // trace()/span() or identify()), never on init() — only the operator userId
+  // and workflow/transport config live here.
   _setSessionConfig({
-    sessionId,
     userId: options.userId,
     workflowName: resolvedWorkflowName,
     _apiKey: resolvedKey,
@@ -172,18 +155,9 @@ export async function init(options: InitOptions = {}): Promise<void> {
     'service.version': __version__,
     'neatlogs.workflow_name': resolvedWorkflowName,
   };
-  if (sessionId) resourceAttrs['session.id'] = sessionId;
+  // Operator identity only — whoever RUNS the SDK. Session & end-user identity
+  // are per-request (trace()/span()/identify()), never resource attributes.
   if (options.userId) resourceAttrs['user.id'] = options.userId;
-  // End-user identity: process-global default (single-user processes & pure-wrap()
-  // setups). On a server this is normally set per-request via trace({ endUserId }),
-  // which takes precedence since span attributes override resource attributes.
-  if (options.endUserId) {
-    resourceAttrs[END_USER_ID_KEY] = String(options.endUserId);
-  }
-  if (options.endUserMetadata) {
-    const euMeta = normalizeEndUserMetadata(options.endUserMetadata);
-    if (euMeta) resourceAttrs[END_USER_METADATA_KEY] = euMeta;
-  }
 
   const tags = options.tags;
   if (tags !== undefined) {
@@ -332,7 +306,6 @@ export async function init(options: InitOptions = {}): Promise<void> {
     logger.info('Neatlogs SDK initialized successfully');
     logger.info(`Endpoint: ${endpoint}`);
     logger.info(`Workflow: ${resolvedWorkflowName}`);
-    logger.info(`Session: ${sessionId ?? '(none)'}`);
     logger.info(`User: ${options.userId ?? '(none)'}`);
     logger.info(`Tags: ${tags ?? []}`);
     logger.info(`Instrumentations: ${manager.instrumented.join(', ') || '(none)'}`);

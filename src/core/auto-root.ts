@@ -31,6 +31,8 @@ import {
 } from '@opentelemetry/api';
 
 import { getSessionConfig } from './context.js';
+import { applySessionAttributes } from './session.js';
+import { applyEndUserAttributes } from './end-user.js';
 
 // A parentless span of one of these kinds already satisfies the backend's
 // root requirement, so it must NOT be wrapped in another root.
@@ -49,6 +51,17 @@ function resolveRootWorkflowName(): string {
     /* ignore */
   }
   return 'workflow';
+}
+
+/**
+ * Stamp request-scoped identify() identity onto a freshly-created auto-root.
+ * The auto-root IS the trace root, and wrapper-only code has no user-controlled
+ * root to put trace()/span() args on, so identity comes purely from the
+ * identify() context (passed undefined per-call values fall back to it).
+ */
+function stampAutoRootIdentity(root: Span): void {
+  applySessionAttributes(root, undefined, true);
+  applyEndUserAttributes(root, undefined, undefined, true);
 }
 
 /**
@@ -117,6 +130,7 @@ export function maybeOpenAutoRoot(
     { attributes: { 'neatlogs.span.kind': 'workflow', 'neatlogs.auto_root': true } },
     baseCtx,
   );
+  stampAutoRootIdentity(root);
   return { root, ctx: otelTrace.setSpan(baseCtx, root) };
 }
 
@@ -156,6 +170,7 @@ class AutoRootTracer implements Tracer {
       { attributes: { 'neatlogs.span.kind': 'workflow', 'neatlogs.auto_root': true } },
       ctx,
     );
+    stampAutoRootIdentity(root);
     const childCtx = otelTrace.setSpan(ctx, root);
     const child = this._tracer.startSpan(name, options, childCtx);
     return wrapSpanWithRoot(child, root);

@@ -29,6 +29,9 @@ export { span, Span } from './decorators/index.js';
 export { trace } from './core/context.js';
 export { log } from './core/log.js';
 
+// Request-scoped session & end-user identity (per-request, not process-global).
+export { identify } from './core/identity.js';
+
 // Prompt management
 export { PromptTemplate, UserPromptTemplate } from './prompt/template.js';
 export {

@@ -313,18 +313,6 @@ describe('init() edge cases', () => {
     expect(config._apiKey).toBe('trimmed-key');
   });
 
-  it('with sessionId and no autoSession uses explicit sessionId', async () => {
-    await init({
-      apiKey: 'test-key',
-      disableExport: true,
-      sessionId: 'explicit-session',
-      autoSession: false,
-    });
-
-    const config = getSessionConfig();
-    expect(config.sessionId).toBe('explicit-session');
-  });
-
   it('includes service.version in resource attributes', async () => {
     const { Resource } = await import('@opentelemetry/resources');
     (Resource as any).mockClear();
@@ -350,21 +338,7 @@ describe('init() edge cases', () => {
     expect(resourceCall['neatlogs.workflow_name']).toBe('my-flow');
   });
 
-  it('includes session.id in resource attributes when sessionId provided', async () => {
-    const { Resource } = await import('@opentelemetry/resources');
-    (Resource as any).mockClear();
-
-    await init({
-      apiKey: 'test-key',
-      disableExport: true,
-      sessionId: 'res-session',
-    });
-
-    const resourceCall = (Resource as any).mock.calls[0][0];
-    expect(resourceCall['session.id']).toBe('res-session');
-  });
-
-  it('does not include session.id when no sessionId', async () => {
+  it('never includes session.id in resource attributes (per-request only)', async () => {
     const { Resource } = await import('@opentelemetry/resources');
     (Resource as any).mockClear();
 
@@ -469,19 +443,19 @@ describe('shutdown() edge cases', () => {
     await init({
       apiKey: 'key-1',
       disableExport: true,
-      sessionId: 'session-first',
+      workflowName: 'wf-first',
     });
 
     await shutdown();
-    expect(getSessionConfig().sessionId).toBeUndefined();
+    expect(getSessionConfig().workflowName).toBeUndefined();
 
     await init({
       apiKey: 'key-2',
       disableExport: true,
-      sessionId: 'session-second',
+      workflowName: 'wf-second',
     });
 
-    expect(getSessionConfig().sessionId).toBe('session-second');
+    expect(getSessionConfig().workflowName).toBe('wf-second');
     await shutdown();
   });
 });
