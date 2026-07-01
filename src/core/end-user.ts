@@ -25,6 +25,7 @@
 
 import { trace as otelTrace, context as otelContext, type Span } from '@opentelemetry/api';
 import { getLogger } from './logger.js';
+import { currentEndUserId, currentEndUserMetadata } from './identity.js';
 
 const logger = getLogger();
 
@@ -64,18 +65,24 @@ export function applyEndUserAttributes(
   endUserMetadata?: string | Record<string, any> | null,
   isRoot = true,
 ): void {
-  if (!endUserId && !endUserMetadata) return;
+  // Resolution at the root (per field): explicit per-call arg wins, else the
+  // identify() context (request-scoped). Non-root spans never carry identity.
+  const resolvedId = isRoot ? (endUserId ?? currentEndUserId()) : endUserId;
+  const resolvedMeta = isRoot
+    ? (endUserMetadata ?? currentEndUserMetadata())
+    : endUserMetadata;
+  if (!resolvedId && !resolvedMeta) return;
   if (!isRoot) {
     logger.debug(
       '[end_user] Ignoring endUserId/endUserMetadata on a non-root span — ' +
-        'declare it on the trace root (top-level trace()/span()) or init().',
+        'declare it on the trace root (top-level trace()/span()) or identify().',
     );
     return;
   }
-  if (endUserId) {
-    span.setAttribute(END_USER_ID_KEY, String(endUserId));
+  if (resolvedId) {
+    span.setAttribute(END_USER_ID_KEY, String(resolvedId));
   }
-  const metaJson = normalizeEndUserMetadata(endUserMetadata);
+  const metaJson = normalizeEndUserMetadata(resolvedMeta);
   if (metaJson) {
     span.setAttribute(END_USER_METADATA_KEY, metaJson);
   }

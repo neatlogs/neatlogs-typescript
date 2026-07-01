@@ -147,17 +147,10 @@ describe('init()', () => {
     expect(BatchSpanProcessor).not.toHaveBeenCalled();
   });
 
-  it('with autoSession generates session ID', async () => {
-    await init({ apiKey: 'test-key', disableExport: true, autoSession: true });
+  it('does not put session identity on the session config (per-request only)', async () => {
+    await init({ apiKey: 'test-key', disableExport: true });
     const config = getSessionConfig();
-    expect(config.sessionId).toBeDefined();
-    expect(config.sessionId).toMatch(/^session_\d+_[a-f0-9]+$/);
-  });
-
-  it('with explicit sessionId uses that ID', async () => {
-    await init({ apiKey: 'test-key', disableExport: true, sessionId: 'my-session-123' });
-    const config = getSessionConfig();
-    expect(config.sessionId).toBe('my-session-123');
+    expect(config.sessionId).toBeUndefined();
   });
 
   it('with invalid tags throws', async () => {
@@ -339,15 +332,16 @@ describe('shutdown()', () => {
     await init({
       apiKey: 'test-key',
       disableExport: true,
-      sessionId: 'session-1',
+      userId: 'user-1',
       workflowName: 'wf',
     });
     const before = getSessionConfig();
-    expect(before.sessionId).toBe('session-1');
+    expect(before.userId).toBe('user-1');
+    expect(before.workflowName).toBe('wf');
 
     await shutdown();
     const after = getSessionConfig();
-    expect(after.sessionId).toBeUndefined();
+    expect(after.userId).toBeUndefined();
     expect(after.workflowName).toBeUndefined();
   });
 });
@@ -361,13 +355,11 @@ describe('getSessionConfig()', () => {
     await init({
       apiKey: 'test-key',
       disableExport: true,
-      sessionId: 'sess-42',
       userId: 'user-7',
       workflowName: 'test-wf',
     });
 
     const config = getSessionConfig();
-    expect(config.sessionId).toBe('sess-42');
     expect(config.userId).toBe('user-7');
     expect(config.workflowName).toBe('test-wf');
     expect(config._apiKey).toBe('test-key');
@@ -377,14 +369,14 @@ describe('getSessionConfig()', () => {
     await init({
       apiKey: 'test-key',
       disableExport: true,
-      sessionId: 'sess-100',
+      userId: 'user-100',
     });
 
     const config1 = getSessionConfig();
-    config1.sessionId = 'hacked';
+    config1.userId = 'hacked';
 
     const config2 = getSessionConfig();
-    expect(config2.sessionId).toBe('sess-100');
+    expect(config2.userId).toBe('user-100');
   });
 });
 

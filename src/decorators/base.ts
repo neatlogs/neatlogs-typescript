@@ -7,6 +7,7 @@ import { trace, SpanStatusCode, type Span as OtelSpan } from '@opentelemetry/api
 import { getLogger } from '../core/logger.js';
 import { registerMask } from '../core/mask.js';
 import { applyEndUserAttributes, isRootSpan } from '../core/end-user.js';
+import { applySessionAttributes } from '../core/session.js';
 import type { SpanOptions, MaskFunction } from '../types.js';
 
 const logger = getLogger();
@@ -96,7 +97,8 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         // Set common attributes
         setCommonSpanAttrs(span, opts);
 
-        // End-user identity (root span only; skipped on a non-root child).
+        // Session/end-user identity (root span only; skipped on a non-root child).
+        applySessionAttributes(span, opts.sessionId, isRoot);
         applyEndUserAttributes(span, opts.endUserId, opts.endUserMetadata, isRoot);
 
         // Capture input

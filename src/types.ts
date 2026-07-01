@@ -35,26 +35,16 @@ export interface InitOptions {
   baseUrl?: string;
   /** Name of the workflow being traced. Defaults to process.argv[1]. */
   workflowName?: string;
-  /** Explicit session ID for grouping traces. */
-  sessionId?: string;
-  /** Auto-generate a session ID if none provided. Defaults to false. */
-  autoSession?: boolean;
   /**
    * Operator identifier — whoever is RUNNING the SDK (a developer, a service
    * account, a CI job). Attached to all spans as a resource attribute. This is
    * NOT the end-user of your application.
+   *
+   * Session and end-user identity are PER-REQUEST, not process-global, so they
+   * are never set here. Declare them at the trace root via `trace()`/`span()`
+   * options, or for pure-`wrap()` code via the request-scoped `identify()`.
    */
   userId?: string;
-  /**
-   * Process-global default for the END-USER — the user of your application.
-   * Use this for single-user processes (CLI, per-user worker) and pure-`wrap()`
-   * setups, where it lands on the root span automatically. On a multi-tenant
-   * server set the end-user per request via `trace({ endUserId })` instead.
-   * One end-user per trace; the backend rolls it up to the trace and its session.
-   */
-  endUserId?: string;
-  /** Optional arbitrary end-user fields stored as JSON (e.g. { plan: 'pro' }). */
-  endUserMetadata?: Record<string, any>;
   /** Tags to attach to all spans. Must be string array. */
   tags?: string[];
   /** Custom metadata to attach to all spans. */
@@ -121,6 +111,13 @@ export interface SpanOptions {
   parameters?: Record<string, any>;
   /** JSON schema describing the tool interface (for kind: MCP_TOOL). */
   toolJsonSchema?: Record<string, any>;
+
+  /**
+   * Session this trace belongs to — groups the traces of a multi-turn
+   * conversation (one turn = one trace). Usually set on the WORKFLOW root. The
+   * backend groups traces by it; when absent it falls back to the trace id.
+   */
+  sessionId?: string;
 
   // End-user identity (one end-user per trace; usually set on the WORKFLOW root)
   /**
@@ -194,7 +191,6 @@ export interface CachedPrompt {
  * Session configuration stored after init().
  */
 export interface SessionConfig {
-  sessionId?: string;
   userId?: string;
   workflowName: string;
   tags: string[];

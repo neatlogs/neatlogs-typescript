@@ -24,6 +24,8 @@ import {
 import { PromptContext, UserPromptContext, PromptTemplate, UserPromptTemplate } from '../prompt/template.js';
 import { registerMask } from './mask.js';
 import { applyEndUserAttributes } from './end-user.js';
+import { applySessionAttributes } from './session.js';
+import { currentSessionId } from './identity.js';
 
 import { getLogger } from './logger.js';
 import { safeJsonDumps, serializeObj } from '../decorators/base.js';
@@ -77,6 +79,7 @@ const KNOWN_OPTION_KEYS = new Set([
   'version',
   'mask',
   'attributes',
+  'sessionId',
   'endUserId',
   'endUserMetadata',
 ]);
@@ -151,8 +154,9 @@ export function _finalizePromptCapture(
  * and executes the provided callback within the span.
  *
  * **Session-Aware Trace Creation:**
- * - If `session_id` is set in init() AND no active parent span exists,
- *   this creates a NEW root trace (for multi-turn conversations).
+ * - If a session id is resolved (per-call `sessionId` or the request-scoped
+ *   `identify()` context) AND no active parent span exists, this creates a NEW
+ *   root trace (for multi-turn conversations).
  * - Otherwise, creates a normal child span within the existing trace.
  *
  * @param options - Trace configuration options
@@ -189,14 +193,16 @@ export async function trace<T>(
     userPromptVariables,
     version,
     mask,
+    sessionId: sessionIdOption,
     endUserId,
     endUserMetadata,
     attributes: explicitAttributes,
     ...extraOptions
   } = options;
 
-  const sessionConfig = getSessionConfig();
-  const sessionId = sessionConfig.sessionId;
+  // Per-call sessionId wins, else the request-scoped identify() context.
+  // Session identity is NOT process-global — init() never sets it.
+  const sessionId = sessionIdOption ?? currentSessionId();
 
   // Determine whether we are inside an existing active trace
   const currentSpan = otelTrace.getSpan(otelContext.active());
@@ -299,7 +305,8 @@ export async function trace<T>(
   const spanCallback = async (span: Span): Promise<T> => {
     _setSpanAttributes(span, kind, extraAttributes);
 
-    // End-user belongs to the trace root only; skipped on a non-root span.
+    // Session/end-user belong to the trace root only; skipped on a non-root span.
+    applySessionAttributes(span, sessionId, isRootTrace);
     applyEndUserAttributes(span, endUserId, endUserMetadata, isRootTrace);
 
     if (input !== undefined && input !== null) {
