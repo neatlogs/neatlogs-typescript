@@ -29,9 +29,10 @@
 
 const DEFAULT_ENDPOINT = "https://ingest.neatlogs.com";
 
-// Canonical end-user attribute keys (inlined — this file stays dependency-free).
+// Canonical identity attribute keys (inlined — this file stays dependency-free).
 const END_USER_ID_KEY = "neatlogs.end_user.id";
 const END_USER_METADATA_KEY = "neatlogs.end_user.metadata";
+const SESSION_ID_KEY = "neatlogs.session.id";
 
 // --- the simple trace shape the backend (/v1/trace) accepts --------------------
 // Mirrors the server-side SimpleSpan; kept local so this file has no imports.
@@ -89,6 +90,14 @@ export interface NeatlogsSpan {
   endUser?: string;
   /** Arbitrary end-user fields for the trace root (overrides the client default). */
   endUserMetadata?: Record<string, unknown>;
+  /**
+   * SESSION this trace belongs to — the conversation/thread grouping many turns.
+   * Only meaningful on the ROOT of a trace (overrides the client default). Every
+   * trace sharing a `session` is grouped into one session in the dashboard; a new
+   * trace per turn, all with the same `session`, forms a multi-turn conversation.
+   * Ignored on child spans.
+   */
+  session?: string;
 }
 
 /** The root of a trace = a span node (its `name` becomes the workflow name). */
@@ -122,6 +131,12 @@ export interface NeatlogsOptions {
   endUser?: string;
   /** Default arbitrary end-user fields stored as JSON (e.g. { plan: 'pro' }). */
   endUserMetadata?: Record<string, unknown>;
+  /**
+   * Default SESSION for every trace this client sends — the conversation/thread
+   * these traces belong to. A per-call `session` (on trace()/trackAI()) overrides
+   * this. Set it once per conversation, e.g. `new Neatlogs({ apiKey, session: convId })`.
+   */
+  session?: string;
 }
 
 export interface TrackResult {
@@ -148,6 +163,8 @@ export interface TrackAIInput {
   endUser?: string;
   /** Arbitrary end-user fields for this trace (overrides the client default). */
   endUserMetadata?: Record<string, unknown>;
+  /** SESSION this trace belongs to (overrides the client default). */
+  session?: string;
 }
 
 export class Neatlogs {
@@ -158,6 +175,7 @@ export class Neatlogs {
   private readonly onError: (err: unknown) => void;
   private readonly endUser?: string;
   private readonly endUserMetadata?: Record<string, unknown>;
+  private readonly session?: string;
 
   constructor(opts: NeatlogsOptions) {
     if (!opts || !opts.apiKey) {
@@ -172,6 +190,7 @@ export class Neatlogs {
     this.enabled = opts.enabled !== false;
     this.endUser = opts.endUser;
     this.endUserMetadata = opts.endUserMetadata;
+    this.session = opts.session;
     this.onError =
       opts.onError ||
       ((err) => {
@@ -216,19 +235,24 @@ export class Neatlogs {
   }
 
   /**
-   * Fold end-user identity onto the trace ROOT as canonical attributes, and
-   * strip the convenience `endUser`/`endUserMetadata` fields so they aren't sent
-   * as raw root fields. Per-call values win over the client defaults; explicit
-   * `attributes` win over both. One end-user per trace — only the root carries it.
+   * Fold identity (end-user + session) onto the trace ROOT as canonical
+   * attributes, and strip the convenience `endUser`/`endUserMetadata`/`session`
+   * fields so they aren't sent as raw root fields. Per-call values win over the
+   * client defaults; explicit `attributes` win over both. Only the root carries
+   * identity — one end-user per trace, one session per trace.
    */
-  private applyEndUser(body: NeatlogsTrace): NeatlogsTrace {
-    const { endUser, endUserMetadata, ...rest } = body as NeatlogsTrace & {
+  private applyIdentity(body: NeatlogsTrace): NeatlogsTrace {
+    const { endUser, endUserMetadata, session, ...rest } = body as NeatlogsTrace & {
       endUser?: string;
       endUserMetadata?: Record<string, unknown>;
+      session?: string;
     };
     const id = endUser ?? this.endUser;
     const meta = endUserMetadata ?? this.endUserMetadata;
-    if (id === undefined && meta === undefined) return rest;
+    const sessionId = session ?? this.session;
+    if (id === undefined && meta === undefined && sessionId === undefined) {
+      return rest;
+    }
 
     const attributes: Record<string, unknown> = { ...(rest.attributes ?? {}) };
     if (id !== undefined && attributes[END_USER_ID_KEY] === undefined) {
@@ -238,14 +262,17 @@ export class Neatlogs {
       attributes[END_USER_METADATA_KEY] =
         typeof meta === "string" ? meta : JSON.stringify(meta);
     }
+    if (sessionId !== undefined && attributes[SESSION_ID_KEY] === undefined) {
+      attributes[SESSION_ID_KEY] = String(sessionId);
+    }
     return { ...rest, attributes };
   }
 
   /** POST the trace JSON to the backend's /v1/trace endpoint. */
   private async post(body: NeatlogsTrace): Promise<TrackResult> {
     if (!this.enabled) return { ok: true };
-    // Fold end-user identity onto the root before anything else.
-    body = this.applyEndUser(body);
+    // Fold identity (end-user + session) onto the root before anything else.
+    body = this.applyIdentity(body);
     // Inject the configured project name into the root (required for write keys;
     // ignored server-side for full project keys). A `project` already on the body wins.
     const payload =
