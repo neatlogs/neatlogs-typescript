@@ -180,3 +180,76 @@ describe('init() no longer carries session identity', () => {
     void a; void b; void c;
   });
 });
+
+/**
+ * Span-processor fallback: identify() reaches ANY root span, including framework
+ * roots (openai-agents/strands/pi-agent) that open their own root without
+ * stamping identity. NeatlogsSpanProcessor.onStart fills it in as a fallback;
+ * explicit trace()/span() values still override, child spans are skipped.
+ */
+describe('span-processor identity fallback (framework roots)', () => {
+  let fwProvider: NodeTracerProvider;
+  let fwExporter: InMemorySpanExporter;
+
+  beforeAll(async () => {
+    const { NeatlogsSpanProcessor } = await import('../../src/core/span-processor.js');
+    fwExporter = new InMemorySpanExporter();
+    fwProvider = new NodeTracerProvider();
+    fwProvider.addSpanProcessor(new NeatlogsSpanProcessor());
+    fwProvider.addSpanProcessor(new SimpleSpanProcessor(fwExporter));
+  });
+
+  afterAll(async () => {
+    await fwProvider.shutdown();
+  });
+
+  beforeEach(() => {
+    fwExporter.reset();
+    _setSessionConfig({});
+  });
+
+  it('stamps identify() onto a bare framework root', async () => {
+    const { trace: otTrace } = await import('@opentelemetry/api');
+    const tracer = fwProvider.getTracer('test');
+    await identify({ sessionId: 'conv_fw', endUserId: 'u_fw' }, async () => {
+      // Framework-style own root: a plain WORKFLOW root, no explicit stamp.
+      tracer
+        .startSpan('openai_agents.trace', {
+          attributes: { 'openinference.span.kind': 'WORKFLOW' },
+        })
+        .end();
+    });
+    void otTrace;
+    const root = fwExporter
+      .getFinishedSpans()
+      .find((s) => s.name === 'openai_agents.trace');
+    expect(root?.attributes[SESSION_ID_KEY]).toBe('conv_fw');
+    expect(root?.attributes[END_USER_ID_KEY]).toBe('u_fw');
+  });
+
+  it('does not stamp identity on child spans', async () => {
+    const { trace: otTrace, context: otCtx } = await import('@opentelemetry/api');
+    const tracer = fwProvider.getTracer('test');
+    await identify({ sessionId: 'conv_fw' }, async () => {
+      const root = tracer.startSpan('root2', {
+        attributes: { 'openinference.span.kind': 'WORKFLOW' },
+      });
+      const ctx = otTrace.setSpan(otCtx.active(), root);
+      tracer
+        .startSpan('child', { attributes: { 'openinference.span.kind': 'LLM' } }, ctx)
+        .end();
+      root.end();
+    });
+    const child = fwExporter.getFinishedSpans().find((s) => s.name === 'child');
+    expect(child?.attributes[SESSION_ID_KEY]).toBeUndefined();
+  });
+
+  it('no-ops without an active identify()', async () => {
+    const tracer = fwProvider.getTracer('test');
+    tracer
+      .startSpan('bare', { attributes: { 'openinference.span.kind': 'WORKFLOW' } })
+      .end();
+    const root = fwExporter.getFinishedSpans().find((s) => s.name === 'bare');
+    expect(root?.attributes[SESSION_ID_KEY]).toBeUndefined();
+  });
+});

@@ -26,6 +26,8 @@ import { UnifiedAttributeProcessor } from './attribute-processor.js';
 import type { SpanDict } from './attribute-processor.js';
 import { applyMask } from './mask.js';
 import { getLogger } from './logger.js';
+import { applySessionAttributes } from './session.js';
+import { applyEndUserAttributes } from './end-user.js';
 import { PromptContext, UserPromptContext } from '../prompt/template.js';
 import {
   PROMPT_VARIABLES_KEY,
@@ -295,6 +297,17 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   onStart(span: SdkSpan, parentContext: Context): void {
     const startTime = performance.now();
     try {
+      // Stamp request-scoped identity (identify()) onto ANY root span as a
+      // fallback. trace()/span() set it explicitly (overriding this); direct
+      // wrappers' auto-roots stamp it themselves. This catch-all is what lets
+      // identify() reach FRAMEWORK roots (openai-agents/strands/pi-agent) that
+      // open their own root without stamping identity. No-ops when identify() is
+      // inactive; child spans are skipped.
+      if (!span.parentSpanId) {
+        applySessionAttributes(span, undefined, true);
+        applyEndUserAttributes(span, undefined, undefined, true);
+      }
+
       const attrs = (span as any).attributes ?? {};
       const spanKind = attrs['openinference.span.kind'] as string | undefined;
       const spanName: string =
