@@ -61,6 +61,7 @@ export { wrapOpenAI, traceTool as traceToolOpenAI } from './openai.js';
 export { wrapAnthropic, traceTool as traceToolAnthropic } from './anthropic.js';
 export { wrapAzureOpenAI, traceTool as traceToolAzureOpenAI } from './azure-openai.js';
 export { wrapVertexAI, wrapVertexAIChat, traceTool as traceToolVertexAI } from './vertex-ai.js';
+export { wrapGoogleGenAI, wrapGoogleGenAIChat, traceTool as traceToolGoogleGenAI } from './google-genai.js';
 export { wrapBedrock, traceTool as traceToolBedrock } from './bedrock.js';
 
 // Agent framework integrations

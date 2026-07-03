@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -64,6 +64,16 @@
       "require": {
         "types": "./dist/vertex-ai.d.ts",
         "default": "./dist/vertex-ai.cjs"
+      }
+    },
+    "./google-genai": {
+      "import": {
+        "types": "./dist/google-genai.d.ts",
+        "default": "./dist/google-genai.mjs"
+      },
+      "require": {
+        "types": "./dist/google-genai.d.ts",
+        "default": "./dist/google-genai.cjs"
       }
     },
     "./bedrock": {
@@ -190,6 +200,7 @@
     "example:reasoning": "tsx examples/reasoning_model_workflow/main.ts",
     "example:azure-openai": "tsx examples/sdk_examples/azure_openai_basic/main.ts",
     "example:vertex-ai": "tsx examples/sdk_examples/vertex_ai_basic/main.ts",
+    "example:google-genai": "tsx examples/sdk_examples/google_genai_basic/main.ts",
     "example:bedrock": "tsx examples/sdk_examples/bedrock_basic/main.ts",
     "example:openrouter": "tsx examples/sdk_examples/openrouter_agent_basic/main.ts",
     "test:examples:original7": "node scripts/run-original7-examples.mjs",
