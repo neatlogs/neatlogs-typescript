@@ -89,6 +89,25 @@ function setOutputValue(span: Span, result: unknown): void {
   }
 }
 
+// Extract output from a streamText/streamObject `onFinish` event. The event
+// extends StepResult, so `text` (streamText) / `object` (streamObject) sit at
+// the top level alongside `finishReason` — but the event also carries `steps`,
+// `usage`, etc., so we pull only the meaningful fields instead of stringifying
+// the whole envelope.
+function setStreamOutputValue(span: Span, event: unknown): void {
+  if (!event || typeof event !== 'object') return;
+  const e = event as Record<string, unknown>;
+  if (typeof e.text === 'string' && e.text) {
+    span.setAttribute('output.value', e.text);
+  } else if ('object' in e && e.object !== undefined) {
+    const stringified = safeStringify(e.object);
+    if (stringified) span.setAttribute('output.value', stringified);
+  }
+  if (e.finishReason) {
+    span.setAttribute('gen_ai.finish_reason', String(e.finishReason));
+  }
+}
+
 // -- Wrapping ----------------------------------------------------------------
 
 type WrappedFunctionName = 'generateText' | 'streamText' | 'generateObject' | 'streamObject' | 'embed' | 'embedMany' | 'rerank';
@@ -121,7 +140,7 @@ export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
     if (typeof original !== 'function') continue;
 
     if (name === 'streamText' || name === 'streamObject') {
-      wrapped[name] = createSyncWrapper(name, original as (opts: any) => unknown);
+      wrapped[name] = createStreamWrapper(name, original as (opts: any) => unknown);
     } else {
       wrapped[name] = createAsyncWrapper(name, original as (opts: any) => Promise<unknown>);
     }
@@ -183,23 +202,56 @@ function createAsyncWrapper(
   };
 }
 
-function createSyncWrapper(
+// streamText/streamObject return synchronously while the model keeps producing
+// tokens for seconds afterwards. Ending the span in a `finally` (as a plain sync
+// wrapper would) closes it in ~2ms with no output — the output only exists once
+// the stream finishes. Instead we keep the span open and end it from the AI SDK's
+// `onFinish` callback, where the final text/object is available. Any user-provided
+// `onFinish` is preserved and invoked first.
+function createStreamWrapper(
   name: WrappedFunctionName,
   original: (opts: any) => unknown,
 ): (opts: any) => unknown {
-  return function wrappedSyncFn(opts: any): unknown {
+  return function wrappedStreamFn(opts: any): unknown {
     const tracer = trace.getTracer(TRACER_NAME);
     return tracer.startActiveSpan(`ai.${name}`, { attributes: { 'openinference.span.kind': rootSpanKind(name) } }, getParentContext(), (span) => {
+      let spanEnded = false;
+      const endOnce = () => {
+        if (spanEnded) return;
+        spanEnded = true;
+        span.end();
+      };
       try {
         setInputValue(span, opts);
         const merged = mergeTelemetry(opts);
-        const result = original(merged);
-        return result;
+        const userOnFinish = opts?.onFinish;
+        const userOnError = opts?.onError;
+        const wrappedOpts = {
+          ...merged,
+          onFinish: async (event: any) => {
+            try {
+              setStreamOutputValue(span, event);
+            } finally {
+              endOnce();
+            }
+            if (typeof userOnFinish === 'function') {
+              return userOnFinish(event);
+            }
+          },
+          onError: (event: any) => {
+            recordSpanError(span, (event && event.error) ?? event);
+            endOnce();
+            if (typeof userOnError === 'function') {
+              return userOnError(event);
+            }
+          },
+        };
+        return original(wrappedOpts);
       } catch (err) {
+        // Synchronous throw (e.g. bad arguments) — the stream never started.
         recordSpanError(span, err);
+        endOnce();
         throw err;
-      } finally {
-        span.end();
       }
     });
   };
