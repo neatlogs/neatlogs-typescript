@@ -25,6 +25,10 @@ import {
 } from '../../src/core/context.js';
 import { PromptTemplate, UserPromptTemplate, PromptContext, UserPromptContext } from '../../src/prompt/template.js';
 import { _clearMaskRegistry } from '../../src/core/mask.js';
+import {
+  _setNeatlogsProvider,
+  withNeatlogsSpan,
+} from '../../src/core/provider.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -37,10 +41,11 @@ beforeAll(() => {
   exporter = new InMemorySpanExporter();
   provider = new NodeTracerProvider();
   provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
-  provider.register();
+  _setNeatlogsProvider(provider);
 });
 
 afterAll(async () => {
+  _setNeatlogsProvider(null);
   await provider.shutdown();
 });
 
@@ -119,8 +124,9 @@ describe('trace()', () => {
   });
 
   it('should create a child span within an existing trace', async () => {
-    const tracer = otelTrace.getTracer('test');
-    await tracer.startActiveSpan('parent', async (parentSpan) => {
+    const tracer = provider.getTracer('test');
+    const parentSpan = tracer.startSpan('parent');
+    await withNeatlogsSpan(parentSpan, async () => {
       await trace({ name: 'child-span' }, async () => {});
       parentSpan.end();
     });
@@ -151,9 +157,9 @@ describe('trace()', () => {
   it('should create root trace even when inside parent span if sessionId is set', async () => {
     // When session_id is set and there IS an active parent, it creates a child span (not root)
     _setSessionConfig({ sessionId: 'session-456' });
-    const tracer = otelTrace.getTracer('test');
-
-    await tracer.startActiveSpan('outer', async (outerSpan) => {
+    const tracer = provider.getTracer('test');
+    const outerSpan = tracer.startSpan('outer');
+    await withNeatlogsSpan(outerSpan, async () => {
       await trace({ name: 'session-child' }, async () => {});
       outerSpan.end();
     });
@@ -411,7 +417,7 @@ describe('trace()', () => {
 
 describe('_setSpanAttributes', () => {
   it('should set neatlogs.internal and openinference.span.kind', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('helper-test', async (span) => {
       _setSpanAttributes(span, 'AGENT', {});
       span.end();
@@ -424,7 +430,7 @@ describe('_setSpanAttributes', () => {
   });
 
   it('should default kind to CHAIN', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('default-kind', async (span) => {
       _setSpanAttributes(span, undefined, {});
       span.end();
@@ -436,7 +442,7 @@ describe('_setSpanAttributes', () => {
   });
 
   it('should set extra attributes', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('extra-test', async (span) => {
       _setSpanAttributes(span, undefined, {
         'my.attr': 'hello',
@@ -458,7 +464,7 @@ describe('_setSpanAttributes', () => {
 
 describe('_finalizePromptCapture', () => {
   it('should capture PromptContext variables', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('finalize-prompt', async (span) => {
       PromptContext.set('Hello {{name}}', { name: 'world' });
       _finalizePromptCapture(span, true, false);
@@ -474,7 +480,7 @@ describe('_finalizePromptCapture', () => {
   });
 
   it('should capture UserPromptContext variables', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('finalize-user', async (span) => {
       UserPromptContext.set('Q: {{q}}', { q: 'test' });
       _finalizePromptCapture(span, false, true);
@@ -490,7 +496,7 @@ describe('_finalizePromptCapture', () => {
   });
 
   it('should not set attributes when isPromptTemplateObj is false', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('no-finalize', async (span) => {
       PromptContext.set('Hello {{name}}', { name: 'world' });
       _finalizePromptCapture(span, false, false);

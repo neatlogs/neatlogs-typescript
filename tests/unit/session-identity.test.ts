@@ -20,6 +20,7 @@ import {
   currentEndUserId,
   currentEndUserMetadata,
 } from '../../src/core/identity.js';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
@@ -28,10 +29,11 @@ beforeAll(() => {
   exporter = new InMemorySpanExporter();
   provider = new NodeTracerProvider();
   provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
-  provider.register();
+  _setNeatlogsProvider(provider);
 });
 
 afterAll(async () => {
+  _setNeatlogsProvider(null);
   await provider.shutdown();
 });
 

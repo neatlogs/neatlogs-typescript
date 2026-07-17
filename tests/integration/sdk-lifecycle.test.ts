@@ -2,12 +2,8 @@
  * Integration tests for the full SDK lifecycle:
  * span() / trace() → span shapes, error handling, nesting, kind validation
  *
- * Uses a single shared NodeTracerProvider registered once for the suite
- * (provider.register() cannot be called repeatedly — shutdown() prevents
- * re-registration). The exporter is reset between tests.
- *
- * NOTE: span() and trace() use otelTrace.getTracer() (global), so the
- * provider must be the active global provider when they execute.
+ * Uses a single private NodeTracerProvider for the suite. The exporter is reset
+ * between tests.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
@@ -16,6 +12,7 @@ import { NeatlogsSpanProcessor } from '../../src/core/span-processor.js';
 import { span } from '../../src/decorators/orchestration.js';
 import { trace, _setSessionConfig } from '../../src/core/context.js';
 import { SpanStatusCode } from '@opentelemetry/api';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 let exporter: InMemorySpanExporter;
 let provider: NodeTracerProvider;
@@ -25,10 +22,11 @@ beforeAll(() => {
   provider = new NodeTracerProvider();
   provider.addSpanProcessor(new NeatlogsSpanProcessor({ debug: false }));
   provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
-  provider.register(); // register ONCE for the entire suite
+  _setNeatlogsProvider(provider);
 });
 
 afterAll(async () => {
+  _setNeatlogsProvider(null);
   await provider.shutdown();
 });
 

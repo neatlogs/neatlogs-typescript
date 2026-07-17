@@ -100,8 +100,12 @@ vi.mock('../../src/instrumentation/manager.js', () => ({
   InstrumentationManager: vi.fn().mockImplementation(() => ({
     instrumentHttp: vi.fn().mockResolvedValue(undefined),
     instrument: vi.fn().mockResolvedValue(undefined),
+    disable: vi.fn(),
     instrumented: [],
   })),
+  // Pre-flight isolation gate init() calls before touching module state. Mocked
+  // to a no-op so these tests exercise the instrument() call path directly.
+  assertInstrumentationsIsolationSafe: vi.fn(),
 }));
 
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';

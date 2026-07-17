@@ -11,19 +11,29 @@ import { wrapVertexAI } from '../../src/vertex-ai.js';
 import { wrapBedrock, traceTool as traceToolBedrock } from '../../src/bedrock.js';
 import { wrapClaudeAgentSDK } from '../../src/claude-agent-sdk.js';
 import { wrapOpenRouterAgent } from '../../src/openrouter-agent.js';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
 
+let prevAutoRoot: string | undefined;
+
 beforeAll(() => {
+  // Attribute-mapping tests on bare wrappers. Auto-root would add a WORKFLOW
+  // parent span; disable it so span counts reflect the wrapper alone.
+  prevAutoRoot = process.env.NEATLOGS_AUTO_ROOT;
+  process.env.NEATLOGS_AUTO_ROOT = 'false';
   exporter = new InMemorySpanExporter();
   provider = new NodeTracerProvider();
   provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
-  provider.register();
+  _setNeatlogsProvider(provider);
 });
 
 afterAll(async () => {
+  _setNeatlogsProvider(null);
   await provider.shutdown();
+  if (prevAutoRoot === undefined) delete process.env.NEATLOGS_AUTO_ROOT;
+  else process.env.NEATLOGS_AUTO_ROOT = prevAutoRoot;
 });
 
 beforeEach(() => {

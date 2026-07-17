@@ -8,6 +8,7 @@ import {
 } from '../../src/decorators/base.js';
 import { span, Span, retrieverPostprocessor } from '../../src/decorators/orchestration.js';
 import type { SpanOptions } from '../../src/types.js';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 // ─── Mock OpenTelemetry ────────────────────────────────────────────────────────
 
@@ -24,19 +25,47 @@ function createMockSpan() {
 let mockSpan = createMockSpan();
 
 vi.mock('@opentelemetry/api', () => {
+  const rootContext = {
+    getValue: () => undefined,
+    setValue: () => rootContext,
+    deleteValue: () => rootContext,
+  };
+  const tracer = {
+    startSpan: (_name: string) => mockSpan,
+    startActiveSpan: (name: string, fn: (span: any) => any) => fn(mockSpan),
+  };
   return {
     trace: {
-      getTracer: () => ({
-        startActiveSpan: (name: string, fn: (span: any) => any) => {
-          return fn(mockSpan);
-        },
-      }),
+      // Shared mode resolves the tracer via the global provider.
+      getTracerProvider: () => ({ getTracer: () => tracer }),
+      getTracer: () => tracer,
+      // isRootSpan() reads the active span; no active span → decorated fn is root.
+      getSpan: () => undefined,
+      setSpan: (ctx: any, _span: any) => ctx,
     },
+    context: {
+      active: () => rootContext,
+      with: (_ctx: any, fn: () => any) => fn(),
+    },
+    ROOT_CONTEXT: rootContext,
     SpanStatusCode: {
       OK: 1,
       ERROR: 2,
     },
   };
+});
+
+beforeEach(() => {
+  _setNeatlogsProvider({
+    getTracer: () => ({
+      startSpan: () => mockSpan,
+      startActiveSpan: (_name: string, fn: (span: any) => any) => fn(mockSpan),
+    }),
+  } as any);
+});
+
+afterEach(() => {
+  _setNeatlogsProvider(null);
 });
 
 // ─── safeJsonDumps ─────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@
 
 import type { TracerProvider } from '@opentelemetry/api';
 import { getLogger } from '../core/logger.js';
-import { getLibraryInfo } from './registry.js';
+import { getLibraryInfo, type LibraryInfo } from './registry.js';
 
 const logger = getLogger();
 
@@ -20,9 +20,50 @@ export interface InstrumentationManagerOptions {
   debug?: boolean;
 }
 
+/**
+ * Build the rejection message for a manager-loaded instrumentor
+ * that isn't isolation-safe. Names the explicit, fully-isolated wrapper when the
+ * registry knows one.
+ */
+function isolationRejectionMessage(lib: string, info: LibraryInfo): string {
+  const alt = info.explicitWrapper
+    ? `Use ${info.explicitWrapper} for isolated tracing`
+    : `Use an explicit Neatlogs wrapper for isolated tracing if one exists`;
+  return (
+    `The "${lib}" auto-instrumentation uses the global OpenTelemetry context ` +
+    `and cannot guarantee isolation from other tracing SDKs (Datadog, etc.).\n\n` +
+    `${alt}. Neatlogs does not support shared global-context instrumentation.`
+  );
+}
+
+/**
+ * Throw if any requested library's auto-instrumentor would drive the global OTel
+ * context under isolation. A PURE function of the registry + the requested set —
+ * it touches no provider or module state — so `init()` can call it BEFORE creating
+ * or installing the private provider, keeping initialization atomic: a rejected
+ * `init()` leaves no abandoned provider or half-set state behind. The manager's
+ * own instance gate delegates here too (for direct manager users).
+ */
+export function assertInstrumentationsIsolationSafe(libraries: string[]): void {
+  for (const lib of libraries) {
+    const info = getLibraryInfo(lib);
+    // Only reject libs that actually LOAD an instrumentor (openinference or
+    // neatlogs package set). A registry entry with both null is a no-op kept only
+    // for scope detection/tagging — it patches nothing, so nothing can leak
+    // through the global context. Unknown libs (info undefined) likewise can't leak.
+    const loadsInstrumentor = !!(info && (info.openinference || info.neatlogs));
+    if (info && loadsInstrumentor && !info.isolationSafe) {
+      throw new Error(isolationRejectionMessage(lib, info));
+    }
+  }
+}
+
 export class InstrumentationManager {
   private provider: TracerProvider;
   private _instrumented: string[] = [];
+  // Retained so shutdown() can disable them (unpatch the target module) — else a
+  // stale instrumentor stays bound to the shut-down provider across reinit.
+  private _instances: Array<{ lib: string; instance: any }> = [];
 
   constructor(options: InstrumentationManagerOptions) {
     this.provider = options.provider;
@@ -36,8 +77,16 @@ export class InstrumentationManager {
   /**
    * Instrument the specified libraries.
    * Priority: neatlogs custom > OpenInference > skip
+   *
+   * This first rejects (throws) any requested library whose
+   * registry entry is not `isolationSafe`: those instrumentors create/activate
+   * spans on the global OTel context, which a private provider cannot isolate in
+   * either direction. Failing here (before patching anything) keeps the isolation
+   * guarantee strict rather than best-effort.
    */
   async instrument(libraries: string[]): Promise<void> {
+    assertInstrumentationsIsolationSafe(libraries);
+
     for (const lib of libraries) {
       const info = getLibraryInfo(lib);
       if (!info) {
@@ -67,6 +116,7 @@ export class InstrumentationManager {
             const instrumentor = new (InstrumentorClass as new () => any)();
             if (typeof instrumentor.instrument === 'function') {
               instrumentor.instrument({ tracerProvider: this.provider });
+              this._instances.push({ lib, instance: instrumentor });
               this._instrumented.push(lib);
               logger.debug(
                 `Instrumented '${lib}' via neatlogs custom instrumentor`,
@@ -88,6 +138,7 @@ export class InstrumentationManager {
                   );
                 }
               }
+              this._instances.push({ lib, instance: instrumentor });
               this._instrumented.push(lib);
               logger.debug(
                 `Instrumented '${lib}' via neatlogs OTel instrumentor`,
@@ -124,6 +175,7 @@ export class InstrumentationManager {
             // Pattern 1: instrument({ tracerProvider })
             if (typeof instrumentor.instrument === 'function') {
               instrumentor.instrument({ tracerProvider: this.provider });
+              this._instances.push({ lib, instance: instrumentor });
               this._instrumented.push(lib);
               logger.debug(`Instrumented '${lib}' via OpenInference`);
               continue;
@@ -136,6 +188,7 @@ export class InstrumentationManager {
                 try {
                   const targetMod = await import(info.npm_package);
                   instrumentor.manuallyInstrument(targetMod);
+                  this._instances.push({ lib, instance: instrumentor });
                   this._instrumented.push(lib);
                   logger.debug(`Instrumented '${lib}' via OpenInference (manual patch)`);
                   continue;
@@ -147,6 +200,7 @@ export class InstrumentationManager {
               }
               // No npm_package or import failed — still mark as instrumented
               // since setTracerProvider was called (Node module hooks may still fire for CJS)
+              this._instances.push({ lib, instance: instrumentor });
               this._instrumented.push(lib);
               logger.debug(`Instrumented '${lib}' via OpenInference (tracer set, awaiting module hook)`);
               continue;
@@ -184,5 +238,27 @@ export class InstrumentationManager {
     if (this._instrumented.length > 0) {
       logger.info(`Instrumented: ${this._instrumented.join(', ')}`);
     }
+  }
+
+  /**
+   * Disable every instrumentor this manager installed, unpatching the target
+   * modules so they stop emitting spans against the (now shut-down) provider.
+   * Called from shutdown() so a subsequent init() rebinds cleanly instead of
+   * leaving a stale instrumentor pointed at a dead provider.
+   */
+  disable(): void {
+    for (const { lib, instance } of this._instances) {
+      try {
+        if (typeof instance.disable === 'function') {
+          instance.disable();
+        } else if (typeof instance.uninstrument === 'function') {
+          instance.uninstrument();
+        }
+      } catch (e) {
+        logger.debug(`Failed to disable instrumentor for '${lib}': ${e}`);
+      }
+    }
+    this._instances = [];
+    this._instrumented = [];
   }
 }

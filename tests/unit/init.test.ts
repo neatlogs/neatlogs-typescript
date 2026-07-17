@@ -95,8 +95,11 @@ vi.mock('../../src/instrumentation/manager.js', () => ({
   InstrumentationManager: vi.fn().mockImplementation(() => ({
     instrumentHttp: vi.fn().mockResolvedValue(undefined),
     instrument: vi.fn().mockResolvedValue(undefined),
+    disable: vi.fn(),
     instrumented: [],
   })),
+  // Pre-flight isolation gate init() calls before touching module state.
+  assertInstrumentationsIsolationSafe: vi.fn(),
 }));
 
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';
@@ -117,6 +120,25 @@ describe('init()', () => {
     await init({ apiKey: 'test-key', disableExport: true });
     // Calling init again should be a no-op (no error)
     await init({ apiKey: 'test-key', disableExport: true });
+  });
+
+  it('does not register its tracer or meter globally', async () => {
+    const { NodeTracerProvider } = await import('@opentelemetry/sdk-trace-node');
+    const { metrics } = await import('@opentelemetry/api');
+    const previousProvider = (NodeTracerProvider as any).mock.results.at(-1)?.value;
+    previousProvider?.register.mockClear();
+    (NodeTracerProvider as any).mockClear();
+    (metrics.setGlobalMeterProvider as any).mockClear();
+
+    await init({
+      apiKey: 'test-key',
+      disableExport: true,
+      registerShutdownHandlers: false,
+    });
+
+    const provider = (NodeTracerProvider as any).mock.results[0].value;
+    expect(provider.register).not.toHaveBeenCalled();
+    expect(metrics.setGlobalMeterProvider).not.toHaveBeenCalled();
   });
 
   it('with no API key disables export', async () => {
@@ -244,6 +266,9 @@ describe('init()', () => {
     });
     expect(BatchLogRecordProcessor).toHaveBeenCalledTimes(1);
     expect(SimpleLogRecordProcessor).not.toHaveBeenCalled();
+    expect((LoggerProvider as any).mock.calls[0][0].processors).toEqual([
+      (BatchLogRecordProcessor as any).mock.results[0].value,
+    ]);
     expect(_setOtelLogger).toHaveBeenCalledTimes(1);
   });
 
@@ -268,6 +293,7 @@ describe('init()', () => {
     expect(OTLPLogExporter).not.toHaveBeenCalled();
     expect(BatchLogRecordProcessor).not.toHaveBeenCalled();
     expect(SimpleLogRecordProcessor).not.toHaveBeenCalled();
+    expect((LoggerProvider as any).mock.calls[0][0].processors).toEqual([]);
     expect(_setOtelLogger).toHaveBeenCalledTimes(1);
   });
 });

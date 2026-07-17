@@ -31,6 +31,10 @@ export { log } from './core/log.js';
 
 // Request-scoped session & end-user identity (per-request, not process-global).
 export { identify } from './core/identity.js';
+export {
+  injectTraceContext,
+  type TraceContextCarrier,
+} from './core/propagation.js';
 
 // Prompt management
 export { PromptTemplate, UserPromptTemplate } from './prompt/template.js';

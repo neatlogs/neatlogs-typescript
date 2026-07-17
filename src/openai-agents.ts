@@ -9,7 +9,8 @@
  * Creates spans: WORKFLOW (traces), AGENT (agent runs), LLM (generations), TOOL (function calls).
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.openai_agents';
 
@@ -31,7 +32,7 @@ class NeatlogsTraceProcessor {
 
   // The @openai/agents SDK passes a Trace object: { traceId, name, groupId, metadata }.
   onTraceStart(traceData: any): void {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     const attrs: Record<string, any> = { 'neatlogs.span.kind': 'WORKFLOW' };
 
     const workflowName = traceData?.name ?? traceData?.workflow_name;
@@ -40,7 +41,7 @@ class NeatlogsTraceProcessor {
     const traceId = traceData?.traceId ?? traceData?.trace_id;
     if (traceId) attrs['neatlogs.agent.trace_id'] = String(traceId);
 
-    const span = tracer.startSpan('openai_agents.trace', { attributes: attrs }, otelContext.active());
+    const span = tracer.startSpan('openai_agents.trace', { attributes: attrs }, getNeatlogsBaseContext());
     const key = String(traceId ?? `trace_${Date.now()}`);
     this._spans.set(key, span);
     this._startTimes.set(key, Date.now());
@@ -65,17 +66,18 @@ class NeatlogsTraceProcessor {
   // The SDK passes a Span object: { type, spanId, traceId, parentId?, spanData: {...} }.
   // The meaningful payload (type, name, input, output, usage, ...) lives in `spanData`.
   onSpanStart(span: any): void {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     const data = span?.spanData ?? span ?? {};
     const spanType = data?.type ?? data?.span_type ?? span?.type ?? '';
     const spanId = String(span?.spanId ?? span?.span_id ?? data?.span_id ?? `span_${Date.now()}`);
 
-    // Parent context: nest under the trace span (or a parent span) so the tree forms.
+    // Parent context: nest under the trace span (or a parent span) so the tree
+    // forms. Base is ROOT_CONTEXT in isolated mode so a foreign provider's
+    // active span can never leak in as our ancestor.
+    const base = getNeatlogsBaseContext();
     const parentKey = String(span?.parentId ?? span?.traceId ?? span?.trace_id ?? '');
     const parentSpan = this._spans.get(parentKey);
-    const parentCtx = parentSpan
-      ? trace.setSpan(otelContext.active(), parentSpan)
-      : otelContext.active();
+    const parentCtx = parentSpan ? trace.setSpan(base, parentSpan) : base;
 
     let otelSpan: Span;
 

@@ -9,8 +9,9 @@
  * Works with LangChain, LangGraph, and Deep Agents (same callback interface).
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
+import { trace, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
 import { maybeOpenAutoRoot, endAutoRoot } from './core/auto-root.js';
+import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.langchain';
 
@@ -50,12 +51,16 @@ class NeatlogsCallbackHandler {
   // renders. Open a WORKFLOW root transparently in that case so just adding the
   // handler yields a complete trace. A top-level CHAIN is already root-eligible.
   private _startCtx(parentRunId: string | undefined, runId: string, kind: string): Context {
+    // Base context is ROOT_CONTEXT in isolated mode so a foreign provider's
+    // active span can never leak in as our ancestor; parent linkage comes
+    // solely from our own run-id → span map.
+    const base = getNeatlogsBaseContext();
     const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
     if (parentSpan) {
-      return trace.setSpan(otelContext.active(), parentSpan);
+      return trace.setSpan(base, parentSpan);
     }
-    const tracer = trace.getTracer(TRACER_NAME);
-    const { root, ctx } = maybeOpenAutoRoot(tracer, kind, otelContext.active());
+    const tracer = getNeatlogsTracer(TRACER_NAME);
+    const { root, ctx } = maybeOpenAutoRoot(tracer, kind, base);
     if (root) this._autoRoots.set(runId, root);
     return ctx;
   }
@@ -78,7 +83,7 @@ class NeatlogsCallbackHandler {
     tags?: string[],
     metadata?: Record<string, any>,
   ): Promise<void> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     const name = serialized?.name ?? serialized?.id?.at(-1) ?? 'chain';
 
     const parentCtx = this._startCtx(parentRunId, runId, 'chain');
@@ -132,7 +137,7 @@ class NeatlogsCallbackHandler {
     parentRunId?: string,
     extraParams?: Record<string, any>,
   ): Promise<void> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     const model = serialized?.kwargs?.model_name ?? serialized?.kwargs?.model ?? serialized?.name ?? '';
 
     const parentCtx = this._startCtx(parentRunId, runId, 'llm');
@@ -166,7 +171,7 @@ class NeatlogsCallbackHandler {
     parentRunId?: string,
     extraParams?: Record<string, any>,
   ): Promise<void> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     const model = serialized?.kwargs?.model_name ?? serialized?.kwargs?.model ?? serialized?.name ?? '';
 
     const parentCtx = this._startCtx(parentRunId, runId, 'llm');
@@ -277,7 +282,7 @@ class NeatlogsCallbackHandler {
     runName?: string,
     toolCallId?: string,
   ): Promise<void> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     // LangChain 1.x: serialized.name is absent and serialized.id is the class
     // name (e.g. "DynamicStructuredTool"); the real tool name arrives as `runName`.
     // Prefer serialized.name (older LC), then runName, then the class id, then 'tool'.
@@ -336,7 +341,7 @@ class NeatlogsCallbackHandler {
     runId: string,
     parentRunId?: string,
   ): Promise<void> {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     const name = serialized?.name ?? 'retriever';
 
     const parentCtx = this._startCtx(parentRunId, runId, 'retriever');

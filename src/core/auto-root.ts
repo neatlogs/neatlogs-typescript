@@ -23,7 +23,6 @@
 
 import {
   trace as otelTrace,
-  context as otelContext,
   type Tracer,
   type Span,
   type Context,
@@ -33,6 +32,11 @@ import {
 import { getSessionConfig } from './context.js';
 import { applySessionAttributes } from './session.js';
 import { applyEndUserAttributes } from './end-user.js';
+import {
+  getNeatlogsTracer,
+  getNeatlogsParentContext,
+  getActiveNeatlogsSpan,
+} from './provider.js';
 
 // A parentless span of one of these kinds already satisfies the backend's
 // root requirement, so it must NOT be wrapped in another root.
@@ -117,7 +121,8 @@ export function maybeOpenAutoRoot(
   baseCtx: Context,
 ): { root: Span | undefined; ctx: Context } {
   const k = String(kind ?? '').toLowerCase();
-  const existing = otelTrace.getSpan(baseCtx);
+  // A foreign provider's span must never count as our parent.
+  const existing = getActiveNeatlogsSpan();
   if (
     !autoRootEnabled() ||
     ROOT_KINDS.has(k) ||
@@ -154,15 +159,16 @@ class AutoRootTracer implements Tracer {
       ] ?? '',
     ).toLowerCase();
 
-    const ctx = context ?? otelContext.active();
-    const parent = otelTrace.getSpan(ctx);
+    // Parent from our private context, never the foreign global.
+    const ctx = context ?? getNeatlogsParentContext();
+    const parent = getActiveNeatlogsSpan();
     const needsRoot =
       autoRootEnabled() &&
       !ROOT_KINDS.has(kind) &&
       !(parent !== undefined && parent.isRecording());
 
     if (!needsRoot) {
-      return this._tracer.startSpan(name, options, context);
+      return this._tracer.startSpan(name, options, ctx);
     }
 
     const root = this._tracer.startSpan(
@@ -191,5 +197,6 @@ class AutoRootTracer implements Tracer {
  * `trace()` wrapper. Do NOT use for framework wrappers.
  */
 export function getProviderTracer(name: string): Tracer {
-  return new AutoRootTracer(otelTrace.getTracer(name));
+  // Resolve from the private provider.
+  return new AutoRootTracer(getNeatlogsTracer(name));
 }

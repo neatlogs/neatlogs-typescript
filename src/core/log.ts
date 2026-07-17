@@ -5,8 +5,11 @@
  * emitting OTel LogRecords that are associated with the active span.
  */
 
-import { context, trace } from '@opentelemetry/api';
 import { getLogger } from './logger.js';
+import {
+  getActiveNeatlogsSpan,
+  getNeatlogsActiveContext,
+} from './provider.js';
 
 const logger = getLogger();
 
@@ -53,8 +56,11 @@ export function log(
 
   // Emit OTel LogRecord if logger is available
   if (_otelLogger) {
-    const activeSpan = trace.getSpan(context.active());
-    const spanContext = activeSpan?.spanContext();
+    // Correlate to the active NEATLOGS span, not the global active span: in
+    // isolated mode the latter is the foreign co-tenant's (Datadog/Braintrust)
+    // span, which would either mis-correlate the log or attach a foreign context.
+    const activeSpan = getActiveNeatlogsSpan();
+    const activeContext = activeSpan ? getNeatlogsActiveContext() : undefined;
 
     const attributes: Record<string, any> = {
       'log.template': msgTemplate,
@@ -70,7 +76,10 @@ export function log(
       _otelLogger.emit({
         body: rendered,
         attributes,
-        ...(spanContext ? { spanContext } : {}),
+        // The OTel Logs API accepts a Context, not a raw SpanContext. Passing
+        // `spanContext` is silently ignored by sdk-logs, producing a log with
+        // no trace id that the Neatlogs ingest route correctly discards.
+        ...(activeContext ? { context: activeContext } : {}),
       });
     } catch (err) {
       logger.warn(`Failed to emit log record: ${err}`);
@@ -90,8 +99,10 @@ export async function captureStdout<T>(fn: () => T | Promise<T>): Promise<T> {
   }
 
   const originalLog = console.log;
-  const activeSpan = trace.getSpan(context.active());
-  const spanContext = activeSpan?.spanContext();
+  // Correlate to the active Neatlogs span (not the global active span) — same
+  // reasoning as log(): in isolated mode the global span is a co-tenant's.
+  const activeSpan = getActiveNeatlogsSpan();
+  const activeContext = activeSpan ? getNeatlogsActiveContext() : undefined;
 
   console.log = (...args: any[]) => {
     // Still output to console
@@ -106,7 +117,7 @@ export async function captureStdout<T>(fn: () => T | Promise<T>): Promise<T> {
           'log.source': 'stdout',
           'log.level': 'info',
         },
-        ...(spanContext ? { spanContext } : {}),
+        ...(activeContext ? { context: activeContext } : {}),
       });
     } catch {
       // Ignore errors in log capture

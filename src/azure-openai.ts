@@ -17,8 +17,13 @@
  *   - client.responses.create()        — Responses API
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import {
+  getNeatlogsTracer,
+  getNeatlogsParentContext,
+  withNeatlogsSpan,
+} from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.azure_openai';
 const PROVIDER = 'azure';
@@ -41,8 +46,8 @@ export function traceTool<TArgs = any, TResult = any>(
   fn: (args: TArgs) => TResult | Promise<TResult>,
 ): (args: TArgs) => Promise<TResult> {
   return async function tracedTool(args: TArgs): Promise<TResult> {
-    const tracer = getProviderTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    const tracer = getNeatlogsTracer(TRACER_NAME);
+    const span = tracer.startSpan(
       `tool.${name}`,
       {
         attributes: {
@@ -51,21 +56,21 @@ export function traceTool<TArgs = any, TResult = any>(
           'input.value': safeStringify(args),
         },
       },
-      otelContext.active(),
-      async (span) => {
-        try {
-          const result = await fn(args);
-          span.setAttribute('output.value', safeStringify(result));
-          span.setStatus({ code: SpanStatusCode.OK });
-          return result;
-        } catch (err) {
-          recordError(span, err);
-          throw err;
-        } finally {
-          span.end();
-        }
-      },
+      getNeatlogsParentContext(),
     );
+    return withNeatlogsSpan(span, async () => {
+      try {
+        const result = await fn(args);
+        span.setAttribute('output.value', safeStringify(result));
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        recordError(span, err);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   };
 }
 
@@ -119,7 +124,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
         'neatlogs.llm.model_name': model,
         'neatlogs.llm.is_streaming': isStream,
       },
-    }, otelContext.active());
+    }, getNeatlogsParentContext());
 
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
@@ -153,8 +158,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
       }
     }
 
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const promise = otelContext.with(ctx, () => original(opts, ...rest));
+    const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
       (response: any) => {
@@ -189,10 +193,9 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         'neatlogs.llm.model_name': model,
         'input.value': safeStringify(opts?.input ?? ''),
       },
-    }, otelContext.active());
+    }, getNeatlogsParentContext());
 
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const promise = otelContext.with(ctx, () => original(opts, ...rest));
+    const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
       (response: any) => {

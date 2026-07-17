@@ -26,7 +26,15 @@
  *   - root Mastra (getAgent + getWorkflow)  → proxy that wraps what it returns
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import {
+  SpanStatusCode,
+  type Span,
+} from '@opentelemetry/api';
+import {
+  getNeatlogsParentContext,
+  getNeatlogsTracer,
+  withNeatlogsSpan,
+} from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.mastra';
 const PATCH_FLAG = '_neatlogs_patched';
@@ -74,7 +82,14 @@ export function wrapMastra<T extends object>(entity: T): T {
  */
 export function wrapMastraRerank<F extends (...args: any[]) => any>(rerankFn: F): F {
   return (async function tracedRerank(...args: any[]) {
-    return withSpan('mastra.rerank', { 'neatlogs.span.kind': 'RERANKER' }, (span) => {
+    return withSpan('mastra.rerank', {
+      'neatlogs.span.kind': 'RERANKER',
+      'input.value': safeStringify({
+        documents: args?.[0],
+        query: args?.[1],
+        options: args?.[3],
+      }),
+    }, (span) => {
       // rerank(results, query, model, options)
       const results = args?.[0];
       const query = args?.[1];
@@ -87,7 +102,7 @@ export function wrapMastraRerank<F extends (...args: any[]) => any>(rerankFn: F)
       if (options?.topK != null) span.setAttribute('neatlogs.reranker.top_k', options.topK);
       return Promise.resolve(rerankFn(...args)).then((result) => {
         span.setAttribute('neatlogs.reranker.output_documents', safeStringify(result));
-        span.setAttribute('output.value', safeStringify(result));
+        span.setAttribute('output.value', toOutputValue(result));
         return result;
       });
     });
@@ -150,6 +165,7 @@ function patchAgentMethod(agent: any, method: 'generate' | 'stream', streaming: 
     // Ensure LLM + TOOL child hooks are present (idempotent).
     installAgentLlmHook(agent);
     installAgentToolHooks(agent);
+    patchDynamicToolsets(opts?.toolsets);
 
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'AGENT',
@@ -166,12 +182,15 @@ function patchAgentMethod(agent: any, method: 'generate' | 'stream', streaming: 
       // stream() returns immediately; the model only runs when the caller drains
       // the stream. Keep the AGENT span open + active across the whole stream so
       // doStream (LLM) children nest, and finalize when the output completes.
-      const tracer = trace.getTracer(TRACER_NAME);
-      const span = tracer.startSpan(`mastra.agent.${agentName}`, { attributes: attrs }, otelContext.active());
-      const ctx = trace.setSpan(otelContext.active(), span);
+      const tracer = getNeatlogsTracer(TRACER_NAME);
+      const span = tracer.startSpan(
+        `mastra.agent.${agentName}`,
+        { attributes: attrs },
+        getNeatlogsParentContext(),
+      );
       try {
-        const result = await otelContext.with(ctx, () => orig(input, opts));
-        return wrapStreamingOutput(result, span, ctx);
+        const result = await withNeatlogsSpan(span, () => orig(input, opts));
+        return wrapStreamingOutput(result, span);
       } catch (err) {
         recordError(span, err);
         span.end();
@@ -185,6 +204,17 @@ function patchAgentMethod(agent: any, method: 'generate' | 'stream', streaming: 
       return result;
     });
   };
+}
+
+/** Patch per-call Mastra toolsets (for example dynamically loaded MCP tools). */
+function patchDynamicToolsets(toolsets: any): void {
+  if (!toolsets || typeof toolsets !== 'object') return;
+  for (const [toolsetName, tools] of Object.entries<any>(toolsets)) {
+    if (!tools || typeof tools !== 'object') continue;
+    for (const [key, tool] of Object.entries<any>(tools)) {
+      patchToolExecute(tool, `${toolsetName}.${key}`);
+    }
+  }
 }
 
 /**
@@ -232,11 +262,13 @@ function patchModelInPlace(model: any): void {
       if (promptInput !== undefined) attrs['input.value'] = safeStringify(promptInput);
       captureInvocationParams(attrs, callOpts);
 
-      return withActiveSpan(`mastra.llm.${modelId || 'model'}.${fn}`, attrs, async (span) => {
+      const spanName = `mastra.llm.${modelId || 'model'}.${fn}`;
+      if (isStream) {
+        return traceStreamingModelCall(spanName, attrs, callOpts, orig);
+      }
+      return withActiveSpan(spanName, attrs, async (span) => {
         const result = await orig(callOpts);
-        if (!isStream) finalizeModelResult(span, result);
-        // Streaming doGenerate-style results serialize lazily; record what we can.
-        else if (result?.usage) recordUsage(span, result.usage);
+        finalizeModelResult(span, result);
         return result;
       });
     };
@@ -245,7 +277,6 @@ function patchModelInPlace(model: any): void {
 
 /** Patch each tool's execute() so tool calls become TOOL child spans. */
 function installAgentToolHooks(agent: any): void {
-  if (agent.__neatlogs_tool_hook) return;
   let tools: Record<string, any> | undefined;
   try {
     tools = typeof agent.listTools === 'function' ? agent.listTools() : undefined;
@@ -253,8 +284,11 @@ function installAgentToolHooks(agent: any): void {
     tools = undefined;
   }
   if (!tools || typeof tools !== 'object') return;
-  agent.__neatlogs_tool_hook = true;
 
+  // Resolve and scan on every agent invocation. Workspace/skill tools can be
+  // materialized lazily or change per request; patchToolExecute itself is
+  // idempotent, so rescanning catches new tools without double-wrapping old
+  // ones.
   for (const [key, tool] of Object.entries<any>(tools)) {
     patchToolExecute(tool, key);
   }
@@ -276,7 +310,7 @@ function patchToolExecute(tool: any, key: string): void {
 
     return withActiveSpan(`mastra.tool.${toolName}`, attrs, async (span) => {
       const result = await orig(params, options);
-      span.setAttribute('output.value', safeStringify(result));
+      span.setAttribute('output.value', toOutputValue(result));
       return result;
     });
   };
@@ -308,16 +342,17 @@ function patchRunMethod(run: any, method: 'start' | 'resume', workflowName: stri
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'WORKFLOW',
       'neatlogs.workflow.name': workflowName,
+      'input.value': safeStringify(startOpts ?? {}),
     };
-    if (startOpts?.inputData !== undefined) {
-      attrs['input.value'] = safeStringify(startOpts.inputData);
-    }
+    if (startOpts?.inputData !== undefined) attrs['input.value'] = safeStringify(startOpts.inputData);
 
     return withActiveSpan(`mastra.workflow.${workflowName}`, attrs, async (span) => {
       const result = await orig(startOpts);
       if (result?.status) span.setAttribute('neatlogs.metadata', safeStringify({ status: result.status }));
       if (result?.result !== undefined) {
         span.setAttribute('output.value', safeStringify(result.result));
+      } else {
+        span.setAttribute('output.value', toOutputValue(result));
       }
       return result;
     });
@@ -353,7 +388,7 @@ function patchVectorOp(vector: any, op: string, kind: 'RETRIEVER' | 'VECTOR_STOR
     if (kind === 'RETRIEVER' && params?.topK != null) attrs['neatlogs.retriever.top_k'] = params.topK;
     return withActiveSpan(`mastra.vector.${op}`, attrs, async (span) => {
       const result = await orig(params);
-      span.setAttribute('output.value', safeStringify(result));
+      span.setAttribute('output.value', toOutputValue(result));
       return result;
     });
   };
@@ -377,11 +412,26 @@ function patchMemory(memory: any): void {
       };
       return withActiveSpan(`mastra.memory.${op}`, attrs, async (span) => {
         const result = await orig(...args);
-        span.setAttribute('output.value', safeStringify(result));
+        span.setAttribute('output.value', summarizeMemoryOutput(op, args?.[0], result));
         return result;
       });
     };
   }
+}
+
+function summarizeMemoryOutput(op: string, input: any, result: unknown): string {
+  if (result !== undefined) return toOutputValue(result);
+
+  const summary: Record<string, unknown> = { completed: true };
+  if (op === 'saveMessages') {
+    summary.messageCount = Array.isArray(input?.messages) ? input.messages.length : 0;
+  } else if (op === 'deleteMessages') {
+    const ids = input?.messageIds ?? input?.ids;
+    if (Array.isArray(ids)) summary.requestedCount = ids.length;
+  } else if (op === 'recall') {
+    summary.resultCount = 0;
+  }
+  return safeStringify(summary);
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +445,12 @@ function patchDocument(doc: any): void {
     const attrs: Record<string, any> = {
       'neatlogs.span.kind': 'CHAIN',
       'neatlogs.db.operation': 'chunk',
+      'input.value': safeStringify(args),
     };
     return withActiveSpan('mastra.document.chunk', attrs, async (span) => {
       const result = await orig(...args);
       if (Array.isArray(result)) span.setAttribute('neatlogs.db.documents_count', result.length);
+      span.setAttribute('output.value', toOutputValue(result));
       return result;
     });
   };
@@ -446,8 +498,9 @@ function wrapRootMastra(mastra: any): any {
  *      and end the span exactly once.
  * Falls back to legacy async-iterable / thenable shapes for older Mastra.
  */
-function wrapStreamingOutput(output: any, span: Span, ctx: ReturnType<typeof otelContext.active>): any {
+function wrapStreamingOutput(output: any, span: Span): any {
   if (!output) {
+    span.setAttribute('output.value', toOutputValue(output));
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     return output;
@@ -474,6 +527,11 @@ function wrapStreamingOutput(output: any, span: Span, ctx: ReturnType<typeof ote
         if (typeof text === 'string' && text) {
           span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
           span.setAttribute('neatlogs.llm.output_messages.0.content', text);
+          span.setAttribute('output.value', text);
+        } else {
+          span.setAttribute('output.value', safeStringify({
+            finishReason: finishReason ?? 'completed',
+          }));
         }
         if (usage) recordUsage(span, usage);
         if (finishReason) span.setAttribute('neatlogs.llm.stop_reason', normalizeFinishReason(finishReason));
@@ -487,7 +545,7 @@ function wrapStreamingOutput(output: any, span: Span, ctx: ReturnType<typeof ote
     void finalize();
 
     // Re-establish span context around stream getters so doStream children nest.
-    return rebindStreamContext(output, ctx);
+    return rebindStreamContext(output, span);
   }
 
   // Legacy async-iterable
@@ -500,8 +558,12 @@ function wrapStreamingOutput(output: any, span: Span, ctx: ReturnType<typeof ote
       const iterator = origIterator();
       const finish = () => {
         if (textParts.length) {
+          const text = textParts.join('');
           span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          span.setAttribute('neatlogs.llm.output_messages.0.content', textParts.join(''));
+          span.setAttribute('neatlogs.llm.output_messages.0.content', text);
+          span.setAttribute('output.value', text);
+        } else {
+          span.setAttribute('output.value', safeStringify({ streamCompleted: true }));
         }
         endOnce();
       };
@@ -546,18 +608,41 @@ function wrapStreamingOutput(output: any, span: Span, ctx: ReturnType<typeof ote
  * stream runs inside the AGENT span's context (lets the model's doStream child
  * span attach to the right parent). Returns a proxy; non-stream props pass through.
  */
-function rebindStreamContext(output: any, ctx: ReturnType<typeof otelContext.active>): any {
+function rebindStreamContext(output: any, span: Span): any {
   const STREAM_PROPS = new Set(['textStream', 'fullStream', 'objectStream', 'elementStream']);
   return new Proxy(output, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
       if (typeof prop === 'string' && STREAM_PROPS.has(prop) && value && value[Symbol.asyncIterator]) {
-        const origIterator = value[Symbol.asyncIterator].bind(value);
-        return {
-          [Symbol.asyncIterator]() {
-            return otelContext.with(ctx, () => origIterator());
+        return new Proxy(value, {
+          get(stream, streamProp, streamReceiver) {
+            if (streamProp === Symbol.asyncIterator) {
+              return () => wrapBoundIterator(stream[Symbol.asyncIterator](), span);
+            }
+            const streamValue = Reflect.get(stream, streamProp, streamReceiver);
+            if (streamProp === 'getReader' && typeof streamValue === 'function') {
+              return (...args: any[]) => {
+                const reader: any = Reflect.apply(streamValue, stream, args);
+                return new Proxy(reader, {
+                  get(readerTarget, readerProp, readerReceiver) {
+                    const readerValue = Reflect.get(readerTarget, readerProp, readerReceiver);
+                    if (typeof readerValue !== 'function') return readerValue;
+                    if (readerProp === 'read' || readerProp === 'cancel') {
+                      return (...readerArgs: any[]) =>
+                        withNeatlogsSpan(span, () =>
+                          Reflect.apply(readerValue, readerTarget, readerArgs),
+                        );
+                    }
+                    return readerValue.bind(readerTarget);
+                  },
+                });
+              };
+            }
+            return typeof streamValue === 'function'
+              ? streamValue.bind(stream)
+              : streamValue;
           },
-        };
+        });
       }
       if (typeof value === 'function') return value.bind(target);
       return value;
@@ -565,16 +650,36 @@ function rebindStreamContext(output: any, ctx: ReturnType<typeof otelContext.act
   });
 }
 
+function wrapBoundIterator(iterator: any, span: Span): any {
+  return {
+    next: (...args: any[]) =>
+      withNeatlogsSpan(span, () => iterator.next(...args)),
+    return: iterator.return
+      ? (...args: any[]) =>
+          withNeatlogsSpan(span, () => iterator.return(...args))
+      : undefined,
+    throw: iterator.throw
+      ? (...args: any[]) =>
+          withNeatlogsSpan(span, () => iterator.throw(...args))
+      : undefined,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Result finalization
 // ---------------------------------------------------------------------------
 
 function finalizeAgentResult(span: Span, result: any): void {
-  if (!result) return;
+  if (result === undefined) {
+    span.setAttribute('output.value', toOutputValue(result));
+    return;
+  }
 
   if (result.text) {
+    const text = String(result.text);
     span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', String(result.text));
+    span.setAttribute('neatlogs.llm.output_messages.0.content', text);
+    span.setAttribute('output.value', text);
   }
 
   if (Array.isArray(result.toolCalls)) {
@@ -583,20 +688,30 @@ function finalizeAgentResult(span: Span, result: any): void {
       const p = tc.payload ?? tc;
       setToolCall(span, i, p.toolName ?? p.name, p.args ?? p.arguments, p.toolCallId ?? p.id);
     }
+    if (!result.text) {
+      span.setAttribute('output.value', safeStringify({ toolCalls: result.toolCalls }));
+    }
   }
 
   if (result.usage) recordUsage(span, result.usage);
   if (result.finishReason) span.setAttribute('neatlogs.llm.stop_reason', normalizeFinishReason(result.finishReason));
   if (result.model) span.setAttribute('neatlogs.llm.model_name', result.model);
+  if (!result.text && !Array.isArray(result.toolCalls)) {
+    span.setAttribute('output.value', safeStringify(result));
+  }
 }
 
 function finalizeModelResult(span: Span, result: any): void {
-  if (!result) return;
+  if (result === undefined) {
+    span.setAttribute('output.value', toOutputValue(result));
+    return;
+  }
   // AI SDK v5 doGenerate result: { content[], finishReason, usage, ... }.
   // `content` is an array of typed parts (text / tool-call); `text` may be absent.
   if (typeof result.text === 'string' && result.text) {
     span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
     span.setAttribute('neatlogs.llm.output_messages.0.content', result.text);
+    span.setAttribute('output.value', result.text);
   } else if (Array.isArray(result.content)) {
     const text = result.content
       .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
@@ -613,9 +728,164 @@ function finalizeModelResult(span: Span, result: any): void {
       setToolCall(span, i, tc.toolName, tc.input ?? tc.args, tc.toolCallId);
     }
     span.setAttribute('output.value', safeStringify(result.content));
+  } else {
+    span.setAttribute('output.value', safeStringify(result));
   }
   if (result.usage) recordUsage(span, result.usage);
   span.setAttribute('neatlogs.llm.stop_reason', normalizeFinishReason(result.finishReason));
+}
+
+// ---------------------------------------------------------------------------
+// Provider-model stream wrapping
+// ---------------------------------------------------------------------------
+
+interface ModelStreamCapture {
+  textParts: string[];
+  toolCalls: any[];
+  finishReason?: unknown;
+  usage?: unknown;
+}
+
+/**
+ * AI SDK model `doStream()` returns a lazy stream container. The provider call
+ * has only started when the container is returned; output, usage, and the real
+ * duration arrive while `result.stream` is consumed. Keep the LLM span open
+ * across that consumption and replace only the stream property.
+ */
+async function traceStreamingModelCall(
+  spanName: string,
+  attrs: Record<string, any>,
+  callOpts: any,
+  orig: (options: any) => any,
+): Promise<any> {
+  const tracer = getNeatlogsTracer(TRACER_NAME);
+  const span = tracer.startSpan(
+    spanName,
+    { attributes: attrs },
+    getNeatlogsParentContext(),
+  );
+  try {
+    const result = await withNeatlogsSpan(span, () => orig(callOpts));
+    return wrapModelStreamingResult(result, span);
+  } catch (err) {
+    recordError(span, err);
+    span.end();
+    throw err;
+  }
+}
+
+function wrapModelStreamingResult(result: any, span: Span): any {
+  const stream = result?.stream;
+  if (!stream || typeof stream.getReader !== 'function') {
+    if (result?.usage) recordUsage(span, result.usage);
+    span.setAttribute('output.value', safeStringify(result ?? { streamCompleted: true }));
+    span.setStatus({ code: SpanStatusCode.OK });
+    span.end();
+    return result;
+  }
+
+  const capture: ModelStreamCapture = { textParts: [], toolCalls: [] };
+  let ended = false;
+  const endOnce = (err?: unknown) => {
+    if (ended) return;
+    ended = true;
+    if (err) {
+      recordError(span, err);
+    } else {
+      finalizeModelStreamSpan(span, capture);
+      span.setStatus({ code: SpanStatusCode.OK });
+    }
+    span.end();
+  };
+
+  const sourceReader = stream.getReader();
+  const wrappedStream = new ReadableStream({
+    async pull(controller) {
+      try {
+        const next = await withNeatlogsSpan(span, () => sourceReader.read());
+        if (next.done) {
+          endOnce();
+          controller.close();
+          return;
+        }
+        captureModelStreamPart(span, capture, next.value);
+        controller.enqueue(next.value);
+      } catch (err) {
+        endOnce(err);
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      try {
+        await withNeatlogsSpan(span, () => sourceReader.cancel(reason));
+        endOnce();
+      } catch (err) {
+        endOnce(err);
+        throw err;
+      }
+    },
+  });
+
+  return new Proxy(result, {
+    get(target, prop, receiver) {
+      if (prop === 'stream') return wrappedStream;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+function captureModelStreamPart(
+  span: Span,
+  capture: ModelStreamCapture,
+  part: any,
+): void {
+  const type = part?.type;
+  if (type === 'text-delta') {
+    const text = part.delta ?? part.text ?? part.payload?.text;
+    if (typeof text === 'string' && text) capture.textParts.push(text);
+  }
+  if (type === 'tool-call') {
+    const index = capture.toolCalls.length;
+    const toolCall = {
+      id: part.toolCallId ?? part.id,
+      name: part.toolName ?? part.name,
+      arguments: part.input ?? part.args ?? part.arguments,
+    };
+    capture.toolCalls.push(toolCall);
+    setToolCall(span, index, toolCall.name, toolCall.arguments, toolCall.id);
+  }
+  if (type === 'finish') {
+    capture.finishReason = part.finishReason;
+    capture.usage = part.usage;
+  }
+  if (part?.usage) capture.usage = part.usage;
+  if (part?.finishReason !== undefined) capture.finishReason = part.finishReason;
+}
+
+function finalizeModelStreamSpan(span: Span, capture: ModelStreamCapture): void {
+  const text = capture.textParts.join('');
+  if (text) {
+    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
+    span.setAttribute('neatlogs.llm.output_messages.0.content', text);
+  }
+  if (capture.usage) recordUsage(span, capture.usage);
+  if (capture.finishReason !== undefined) {
+    span.setAttribute(
+      'neatlogs.llm.stop_reason',
+      normalizeFinishReason(capture.finishReason),
+    );
+  }
+
+  if (text && capture.toolCalls.length === 0) {
+    span.setAttribute('output.value', text);
+    return;
+  }
+  span.setAttribute('output.value', safeStringify({
+    ...(text ? { text } : {}),
+    ...(capture.toolCalls.length ? { toolCalls: capture.toolCalls } : {}),
+    finishReason: capture.finishReason ?? 'completed',
+  }));
 }
 
 function normalizeFinishReason(fr: any): string {
@@ -712,10 +982,13 @@ function recordUsage(span: Span, usage: any): void {
  * inside `fn` (model calls, tool executions, workflow steps) nest under it.
  */
 function withActiveSpan<T>(name: string, attrs: Record<string, any>, fn: (span: Span) => Promise<T>): Promise<T> {
-  const tracer = trace.getTracer(TRACER_NAME);
-  const span = tracer.startSpan(name, { attributes: attrs }, otelContext.active());
-  const ctx = trace.setSpan(otelContext.active(), span);
-  return otelContext.with(ctx, async () => {
+  const tracer = getNeatlogsTracer(TRACER_NAME);
+  const span = tracer.startSpan(
+    name,
+    { attributes: attrs },
+    getNeatlogsParentContext(),
+  );
+  return withNeatlogsSpan(span, async () => {
     try {
       const result = await fn(span);
       span.setStatus({ code: SpanStatusCode.OK });
@@ -733,10 +1006,15 @@ function withActiveSpan<T>(name: string, attrs: Record<string, any>, fn: (span: 
 
 /** Like withActiveSpan but for non-async-context-sensitive leaf operations. */
 function withSpan<T>(name: string, attrs: Record<string, any>, fn: (span: Span) => Promise<T> | T): Promise<T> {
-  const tracer = trace.getTracer(TRACER_NAME);
-  const span = tracer.startSpan(name, { attributes: attrs }, otelContext.active());
-  return Promise.resolve()
-    .then(() => fn(span))
+  const tracer = getNeatlogsTracer(TRACER_NAME);
+  const span = tracer.startSpan(
+    name,
+    { attributes: attrs },
+    getNeatlogsParentContext(),
+  );
+  return Promise.resolve(
+    withNeatlogsSpan(span, () => fn(span)),
+  )
     .then((result) => {
       span.setStatus({ code: SpanStatusCode.OK });
       span.end();
@@ -773,14 +1051,29 @@ function toInputValue(input: any): string {
 
 function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
+  if (value === undefined) {
+    return JSON.stringify({ value_type: 'undefined' });
+  }
   try {
     return JSON.stringify(value) ?? '';
   } catch {
-    return '';
+    return JSON.stringify({
+      serialization_error: 'circular_or_unsupported_value',
+      value_type: typeof value,
+    });
   }
 }
 
+function toOutputValue(value: unknown): string {
+  return safeStringify(value === undefined ? { completed: true } : value);
+}
+
 function recordError(span: Span, err: unknown): void {
+  span.setAttribute('output.value', safeStringify({
+    error: err instanceof Error
+      ? { name: err.name, message: err.message }
+      : { message: String(err) },
+  }));
   if (err instanceof Error) {
     span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
     span.recordException(err);

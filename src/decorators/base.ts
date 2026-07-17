@@ -3,11 +3,16 @@
  * Provides the low-level wrapping logic used by span() and Span().
  */
 
-import { trace, SpanStatusCode, type Span as OtelSpan } from '@opentelemetry/api';
+import { ROOT_CONTEXT, SpanStatusCode, type Span as OtelSpan } from '@opentelemetry/api';
 import { getLogger } from '../core/logger.js';
 import { registerMask } from '../core/mask.js';
 import { applyEndUserAttributes, isRootSpan } from '../core/end-user.js';
 import { applySessionAttributes } from '../core/session.js';
+import {
+  getNeatlogsTracer,
+  getNeatlogsParentContext,
+  withNeatlogsSpan,
+} from '../core/provider.js';
 import type { SpanOptions, MaskFunction } from '../types.js';
 
 const logger = getLogger();
@@ -82,17 +87,24 @@ export function decorateSpan<TArgs extends any[], TReturn>(
   opts: DecorateSpanOptions,
   fn: (...args: TArgs) => TReturn,
 ): (...args: TArgs) => TReturn extends Promise<any> ? TReturn : Promise<Awaited<TReturn>> {
-  const tracer = trace.getTracer(TRACER_NAME);
   const spanName = opts.spanName ?? opts.name ?? (fn.name || 'anonymous');
   const captureInput = opts.captureInput !== false;
   const captureOutput = opts.captureOutput !== false;
   const doCapture = shouldCaptureContent();
 
   const wrapped = (...args: TArgs): any => {
+    // Resolve the tracer at CALL time, not definition time: a decorator applied
+    // before init() would otherwise capture the no-op global provider forever
+    // and emit zero spans once the private provider is configured.
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     // End-user belongs to the trace root only. Capture root status BEFORE the
     // span is created (once it's active, it would be the "current" span).
     const isRoot = isRootSpan();
-    return tracer.startActiveSpan(spanName, (span: OtelSpan) => {
+    // Parent from our private span store; a root decorated function anchors a
+    // fresh trace under ROOT_CONTEXT.
+    const parentContext = isRoot ? ROOT_CONTEXT : getNeatlogsParentContext();
+    const span = tracer.startSpan(spanName, {}, parentContext);
+    return withNeatlogsSpan(span, () => {
       try {
         // Set common attributes
         setCommonSpanAttrs(span, opts);

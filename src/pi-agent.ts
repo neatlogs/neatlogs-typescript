@@ -25,11 +25,11 @@
 
 import {
   trace,
-  context as otelContext,
   SpanStatusCode,
   type Span,
   type Context,
 } from '@opentelemetry/api';
+import { getNeatlogsTracer, getNeatlogsParentContext } from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.pi-agent';
 const PATCH_FLAG = '_neatlogs_patched';
@@ -87,7 +87,7 @@ export function piAgentHooks<T extends object>(agent: T): T {
   if (typeof a.subscribe !== 'function') return agent; // not a Pi Agent — leave alone
 
   const state: PerAgentState = { toolSpans: new Map(), inputMessages: [] };
-  const tracer = trace.getTracer(TRACER_NAME);
+  const tracer = getNeatlogsTracer(TRACER_NAME);
 
   a.subscribe((event: PiAgentEvent) => {
     try {
@@ -109,13 +109,14 @@ function handleEvent(
   switch (event.type) {
     case 'agent_start': {
       // Open the AGENT (run) span as the active span so children nest under it.
+      const base = getNeatlogsParentContext();
       const span = tracer.startSpan(
         'pi_agent.run',
         { attributes: { 'neatlogs.span.kind': 'AGENT' } },
-        otelContext.active(),
+        base,
       );
       state.agentSpan = span;
-      state.agentCtx = trace.setSpan(otelContext.active(), span);
+      state.agentCtx = trace.setSpan(base, span);
       state.inputMessages = [];
       break;
     }
@@ -139,7 +140,7 @@ function handleEvent(
     }
 
     case 'tool_execution_start': {
-      const parent = state.agentCtx ?? otelContext.active();
+      const parent = state.agentCtx ?? getNeatlogsParentContext();
       const span = tracer.startSpan(
         `pi_agent.tool.${event.toolName ?? 'tool'}`,
         {
@@ -256,7 +257,7 @@ function emitLlmSpan(
     if (usage.cacheWrite) attrs['neatlogs.llm.token_count.cache_write'] = usage.cacheWrite;
   }
 
-  const parent = state.agentCtx ?? otelContext.active();
+  const parent = state.agentCtx ?? getNeatlogsParentContext();
   const span = tracer.startSpan(
     `pi_agent.llm.${msg.model || 'model'}`,
     { attributes: attrs },

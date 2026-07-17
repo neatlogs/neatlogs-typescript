@@ -27,6 +27,7 @@ import {
   SimpleSpanProcessor,
   InMemorySpanExporter,
 } from '@opentelemetry/sdk-trace-base';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 // ---------------------------------------------------------------------------
 // Shared OTel test infrastructure
@@ -39,10 +40,11 @@ beforeAll(() => {
   exporter = new InMemorySpanExporter();
   provider = new NodeTracerProvider();
   provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
-  provider.register();
+  _setNeatlogsProvider(provider);
 });
 
 afterAll(async () => {
+  _setNeatlogsProvider(null);
   await provider.shutdown();
 });
 

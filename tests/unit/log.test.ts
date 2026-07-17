@@ -3,6 +3,7 @@ import { log, captureStdout, _setOtelLogger } from '../../src/core/log.js';
 
 // Mock @opentelemetry/api
 vi.mock('@opentelemetry/api', () => {
+  const mockContext = { private: 'neatlogs-context' };
   const mockSpanContext = {
     traceId: 'trace-123',
     spanId: 'span-456',
@@ -12,8 +13,9 @@ vi.mock('@opentelemetry/api', () => {
     spanContext: () => mockSpanContext,
   };
   return {
+    ROOT_CONTEXT: {},
     context: {
-      active: () => ({}),
+      active: () => mockContext,
     },
     trace: {
       getSpan: () => mockSpan,
@@ -81,15 +83,12 @@ describe('log()', () => {
     expect(call.body).toBe('Hello {name}');
   });
 
-  it('should include spanContext when active span exists', () => {
+  it('should include the private Neatlogs context when an active span exists', () => {
     log('test');
 
     const call = mockOtelLogger.emit.mock.calls[0][0];
-    expect(call.spanContext).toEqual({
-      traceId: 'trace-123',
-      spanId: 'span-456',
-      traceFlags: 1,
-    });
+    expect(call.context).toBeDefined();
+    expect(call.spanContext).toBeUndefined();
   });
 
   it('should not emit when otelLogger is not set', () => {

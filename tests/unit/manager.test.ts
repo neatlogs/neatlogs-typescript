@@ -83,25 +83,17 @@ describe('InstrumentationManager', () => {
       expect(mgr.instrumented).toEqual([]);
     });
 
-    it('should instrument openai via OpenInference when packages are installed', async () => {
-      // openai has openinference set and both @arizeai/openinference-instrumentation-openai
-      // and the openai package are real dependencies, so it instruments successfully.
-      vi.spyOn(console, 'debug').mockImplementation(() => {});
-      vi.spyOn(console, 'info').mockImplementation(() => {});
+    it('should reject OpenInference OpenAI auto-instrumentation', async () => {
       const mgr = new InstrumentationManager({ provider });
-      await mgr.instrument(['openai']);
-      // Should not crash and openai should be instrumented via OpenInference
-      expect(mgr.instrumented).toContain('openai');
+      await expect(mgr.instrument(['openai'])).rejects.toThrow(/wrapOpenAI/);
+      expect(mgr.instrumented).toEqual([]);
     });
 
-    it('should handle google_genai with no neatlogs custom instrumentor', async () => {
-      // google_genai has neatlogs set to null (external package)
-      vi.spyOn(console, 'debug').mockImplementation(() => {});
-      vi.spyOn(console, 'info').mockImplementation(() => {});
-      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    it('should reject google_genai auto-instrumentation and name its wrapper', async () => {
       const mgr = new InstrumentationManager({ provider });
-      await mgr.instrument(['google_genai']);
-      // Should not throw, but won't instrument since no package is available in test env
+      await expect(mgr.instrument(['google_genai'])).rejects.toThrow(
+        /wrapGoogleGenAI/,
+      );
     });
 
     it('should handle multiple libraries gracefully', async () => {
@@ -109,9 +101,9 @@ describe('InstrumentationManager', () => {
       vi.spyOn(console, 'info').mockImplementation(() => {});
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       const mgr = new InstrumentationManager({ provider });
-      await mgr.instrument(['openai', 'cohere', 'nonexistent']);
-      // None should be instrumented in test env since packages aren't available
-      // But it should not throw
+      await expect(
+        mgr.instrument(['openai', 'cohere', 'nonexistent']),
+      ).rejects.toThrow(/openai/);
     });
 
     it('should not log instrumented message when nothing instrumented', async () => {
@@ -132,5 +124,56 @@ describe('InstrumentationManager', () => {
       await mgr.instrument([]);
       expect(mgr.instrumented).toEqual([]);
     });
+  });
+
+  describe('private-provider safety gate', () => {
+    it('rejects a library whose auto-instrumentor drives the global context', async () => {
+      const mgr = new InstrumentationManager({ provider });
+      await expect(mgr.instrument(['openai'])).rejects.toThrow(
+        /cannot guarantee isolation/,
+      );
+      // Names the explicit wrapper and makes clear there is no shared mode.
+      await expect(mgr.instrument(['openai'])).rejects.toThrow(/wrapOpenAI/);
+      await expect(mgr.instrument(['openai'])).rejects.toThrow(
+        /does not support shared global-context instrumentation/,
+      );
+    });
+
+    it('rejects BEFORE instrumenting any library in the batch', async () => {
+      const mgr = new InstrumentationManager({ provider });
+      // cohere (no-op) is fine but anthropic (loads OpenInference) is not — the
+      // whole batch must be rejected up front so nothing gets partially patched.
+      await expect(
+        mgr.instrument(['cohere', 'anthropic']),
+      ).rejects.toThrow(/anthropic/);
+      expect(mgr.instrumented).toEqual([]);
+    });
+
+    it('does NOT reject a known library with no instrumentor (no-op entry)', async () => {
+      // cohere has both openinference and neatlogs null — it patches nothing, so
+      // nothing can leak; the gate must let it through (it simply skips).
+      vi.spyOn(console, 'debug').mockImplementation(() => {});
+      vi.spyOn(console, 'info').mockImplementation(() => {});
+      const mgr = new InstrumentationManager({ provider });
+      await expect(mgr.instrument(['cohere'])).resolves.toBeUndefined();
+      expect(mgr.instrumented).toEqual([]);
+    });
+
+    it('does NOT reject an unknown library (nothing to instrument)', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const mgr = new InstrumentationManager({ provider });
+      await expect(
+        mgr.instrument(['totally_unknown_lib']),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('disable() lifecycle', () => {
+    it('is a no-op when nothing was instrumented and clears state', () => {
+      const mgr = new InstrumentationManager({ provider });
+      expect(() => mgr.disable()).not.toThrow();
+      expect(mgr.instrumented).toEqual([]);
+    });
+
   });
 });

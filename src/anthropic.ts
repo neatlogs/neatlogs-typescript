@@ -14,8 +14,13 @@
  * Handles thinking blocks, tool_use blocks, and cache tokens.
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import {
+  getNeatlogsTracer,
+  getNeatlogsParentContext,
+  withNeatlogsSpan,
+} from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.anthropic';
 
@@ -40,8 +45,8 @@ export function traceTool<TInput = any, TResult = any>(
   fn: (input: TInput) => TResult | Promise<TResult>,
 ): (input: TInput) => Promise<TResult> {
   return async function tracedTool(input: TInput): Promise<TResult> {
-    const tracer = getProviderTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    const tracer = getNeatlogsTracer(TRACER_NAME);
+    const span = tracer.startSpan(
       `tool.${name}`,
       {
         attributes: {
@@ -50,21 +55,21 @@ export function traceTool<TInput = any, TResult = any>(
           'input.value': safeStringify(input),
         },
       },
-      otelContext.active(),
-      async (span) => {
-        try {
-          const result = await fn(input);
-          span.setAttribute('output.value', safeStringify(result));
-          span.setStatus({ code: SpanStatusCode.OK });
-          return result;
-        } catch (err) {
-          recordError(span, err);
-          throw err;
-        } finally {
-          span.end();
-        }
-      },
+      getNeatlogsParentContext(),
     );
+    return withNeatlogsSpan(span, async () => {
+      try {
+        const result = await fn(input);
+        span.setAttribute('output.value', safeStringify(result));
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        recordError(span, err);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   };
 }
 
@@ -122,14 +127,13 @@ function tracedMessagesCreate(original: (...args: any[]) => any) {
         'neatlogs.llm.model_name': model,
         'neatlogs.llm.is_streaming': isStream,
       },
-    }, otelContext.active());
+    }, getNeatlogsParentContext());
 
     setInputMessages(span, opts?.system, messages);
     setTools(span, opts?.tools);
     setInvocationParams(span, opts);
 
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const promise = otelContext.with(ctx, () => original(opts, ...rest));
+    const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
       (response: any) => {
@@ -165,14 +169,13 @@ function tracedMessagesStream(original: (...args: any[]) => any) {
         'neatlogs.llm.model_name': model,
         'neatlogs.llm.is_streaming': true,
       },
-    }, otelContext.active());
+    }, getNeatlogsParentContext());
 
     setInputMessages(span, opts?.system, messages);
     setTools(span, opts?.tools);
     setInvocationParams(span, opts);
 
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const messageStream = otelContext.with(ctx, () => original(opts, ...rest));
+    const messageStream = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return wrapMessageStream(messageStream, span);
   };

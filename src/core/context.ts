@@ -30,6 +30,13 @@ import { currentSessionId } from './identity.js';
 import { getLogger } from './logger.js';
 import { safeJsonDumps, serializeObj } from '../decorators/base.js';
 import type { TraceOptions, MaskFunction } from '../types.js';
+import {
+  getActiveNeatlogsSpan,
+  getNeatlogsActiveContext,
+  getNeatlogsParentContext,
+  getNeatlogsTracer,
+  withNeatlogsSpan,
+} from './provider.js';
 
 const logger = getLogger();
 
@@ -205,7 +212,7 @@ export async function trace<T>(
   const sessionId = sessionIdOption ?? currentSessionId();
 
   // Determine whether we are inside an existing active trace
-  const currentSpan = otelTrace.getSpan(otelContext.active());
+  const currentSpan = getActiveNeatlogsSpan();
   const isInActiveTrace = currentSpan !== undefined && currentSpan.isRecording();
   const shouldCreateRootTrace = !!sessionId && !isInActiveTrace;
 
@@ -255,7 +262,11 @@ export async function trace<T>(
   // Build OTel context with prompt values
   // ---------------------------------------------------------------------------
 
-  let ctx = otelContext.active();
+  // Start from the Neatlogs active context (private store in isolated mode), NOT
+  // otelContext.active() — the latter is the foreign co-tenant's context, whose
+  // active span must never become our parent. Prompt values threaded here then
+  // propagate to descendant LLM spans through the private store.
+  let ctx = getNeatlogsActiveContext();
 
   const variablesJson = promptVariables ? JSON.stringify(promptVariables) : undefined;
   const userVariablesJson = userPromptVariables ? JSON.stringify(userPromptVariables) : undefined;
@@ -300,7 +311,7 @@ export async function trace<T>(
   // Create span and execute callback
   // ---------------------------------------------------------------------------
 
-  const tracer = otelTrace.getTracer('neatlogs.trace');
+  const tracer = getNeatlogsTracer('neatlogs.trace');
 
   const spanCallback = async (span: Span): Promise<T> => {
     _setSpanAttributes(span, kind, extraAttributes);
@@ -354,11 +365,21 @@ export async function trace<T>(
     }
   };
 
+  const parentContext = shouldCreateRootTrace
+    ? ROOT_CONTEXT
+    : getNeatlogsParentContext(ctx);
+  // Seed the span kind at CREATION, not just in the callback: the span processor
+  // classifies LLM spans in onStart() (which fires from startSpan, before the
+  // callback runs). Without this, a trace({ kind: 'LLM', promptTemplate }) span
+  // isn't recognized as LLM in time and its prompt-template attributes are dropped.
+  const startAttributes = kind ? { 'openinference.span.kind': kind } : undefined;
+  const span = tracer.startSpan(name, startAttributes ? { attributes: startAttributes } : {}, parentContext);
+
   if (shouldCreateRootTrace) {
     logger.debug(`[trace] Creating NEW root trace '${name}' (sessionId=${sessionId})`);
-    return tracer.startActiveSpan(name, {}, ROOT_CONTEXT, spanCallback);
   } else {
     logger.debug(`[trace] Creating child span '${name}'`);
-    return tracer.startActiveSpan(name, {}, ctx, spanCallback);
   }
+
+  return withNeatlogsSpan(span, () => spanCallback(span), ctx);
 }

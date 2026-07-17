@@ -21,8 +21,12 @@
  *   const result = trackedCallModel(openrouter, { model, messages });
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import {
+  getNeatlogsParentContext,
+  withNeatlogsSpan,
+} from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.openrouter_agent';
 const PROVIDER = 'openrouter';
@@ -53,8 +57,7 @@ export function wrapOpenRouterAgent<T extends object>(client: T): T {
 export function wrapCallModel<F extends (...args: any[]) => any>(callModel: F): F {
   return function (this: any, clientArg: any, opts: any, ...rest: any[]): any {
     const span = startLlmSpan(opts);
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const result = otelContext.with(ctx, () => callModel.call(this, clientArg, opts, ...rest));
+    const result = withNeatlogsSpan(span, () => callModel.call(this, clientArg, opts, ...rest));
     return instrumentModelResult(result, span);
   } as unknown as F;
 }
@@ -66,8 +69,7 @@ export function wrapCallModel<F extends (...args: any[]) => any>(callModel: F): 
 function tracedCallModel(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
     const span = startLlmSpan(opts);
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const result = otelContext.with(ctx, () => original(opts, ...rest));
+    const result = withNeatlogsSpan(span, () => original(opts, ...rest));
     return instrumentModelResult(result, span);
   };
 }
@@ -83,7 +85,7 @@ function startLlmSpan(opts: any): Span {
       'neatlogs.llm.system': PROVIDER,
       'neatlogs.llm.model_name': model,
     },
-  }, otelContext.active());
+  }, getNeatlogsParentContext());
 
   // The @openrouter/agent callModel input is `input` — either a string prompt or
   // a messages array (it also accepts `messages`/`instructions` in some shapes).

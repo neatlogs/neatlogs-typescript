@@ -11,7 +11,8 @@
  *   const { streamText, generateText } = wrapAISDK(ai);
  */
 
-import { trace, context as otelContext, ROOT_CONTEXT, SpanStatusCode, type Span, type Tracer } from '@opentelemetry/api';
+import { SpanStatusCode, type Span, type Tracer } from '@opentelemetry/api';
+import { getNeatlogsTracer, getNeatlogsParentContext, isolateTracer, withNeatlogsSpan } from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.ai-sdk';
 
@@ -37,7 +38,11 @@ export function createAITelemetry(
     isEnabled: true,
     recordInputs: true,
     recordOutputs: true,
-    tracer: trace.getTracer(TRACER_NAME),
+    // Hand the AI SDK an isolation-aware tracer: it calls startActiveSpan()
+    // internally, which would otherwise parent its native spans from the foreign
+    // global context AND push them onto it (so a co-tenant's next span inherits
+    // ours). The facade routes both through the private Neatlogs context.
+    tracer: isolateTracer(getNeatlogsTracer(TRACER_NAME)),
     metadata: { ...userMeta, neatlogsWrapped: true },
   };
 }
@@ -76,6 +81,17 @@ function setOutputValue(span: Span, result: unknown): void {
       const text = String(r.text ?? '');
       if (text) {
         span.setAttribute('output.value', text);
+      }
+      if (r.finishReason) {
+        span.setAttribute('gen_ai.finish_reason', String(r.finishReason));
+      }
+      return;
+    }
+    // GenerateObjectResult — the structured object is the output, not `text`.
+    // Without this the envelope (object+usage+response+…) gets stringified whole.
+    if ('object' in r && 'finishReason' in r) {
+      if (r.object !== undefined) {
+        span.setAttribute('output.value', safeStringify(r.object));
       }
       if (r.finishReason) {
         span.setAttribute('gen_ai.finish_reason', String(r.finishReason));
@@ -156,14 +172,9 @@ function rootSpanKind(name: WrappedFunctionName): string {
 
 
 function getParentContext() {
-  const activeSpan = trace.getActiveSpan();
-  if (activeSpan) {
-    const instrScope = (activeSpan as any).instrumentationLibrary?.name ?? '';
-    if (instrScope === 'next.js') {
-      return ROOT_CONTEXT;
-    }
-  }
-  return otelContext.active();
+  // Our parent comes solely from the private span store; a
+  // foreign provider's active span must never become our ancestor.
+  return getNeatlogsParentContext();
 }
 
 function createAsyncWrapper(
@@ -171,12 +182,21 @@ function createAsyncWrapper(
   original: (opts: any) => Promise<unknown>,
 ): (opts: any) => Promise<unknown> {
   return async function wrappedAsyncFn(opts: any): Promise<unknown> {
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    const tracer = getNeatlogsTracer(TRACER_NAME);
+    // startSpan (NOT startActiveSpan) + withNeatlogsSpan: startActiveSpan would
+    // push our span onto the GLOBAL OTel context, so a foreign tracer's
+    // startSpan() inside generateText() would read it as parent and inherit our
+    // trace id. withNeatlogsSpan carries the parent in the private store in
+    // the private context, leaving the global context untouched.
+    const parentContext = getParentContext();
+    const span = tracer.startSpan(
       `ai.${name}`,
       { attributes: { 'openinference.span.kind': rootSpanKind(name) } },
-      getParentContext(),
-      async (span) => {
+      parentContext,
+    );
+    return withNeatlogsSpan(
+      span,
+      async () => {
         try {
           const isEmbedOrRerank = name === 'embed' || name === 'embedMany' || name === 'rerank';
           if (!isEmbedOrRerank) {
@@ -198,6 +218,7 @@ function createAsyncWrapper(
           span.end();
         }
       },
+      parentContext,
     );
   };
 }
@@ -213,47 +234,60 @@ function createStreamWrapper(
   original: (opts: any) => unknown,
 ): (opts: any) => unknown {
   return function wrappedStreamFn(opts: any): unknown {
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(`ai.${name}`, { attributes: { 'openinference.span.kind': rootSpanKind(name) } }, getParentContext(), (span) => {
-      let spanEnded = false;
-      const endOnce = () => {
-        if (spanEnded) return;
-        spanEnded = true;
-        span.end();
-      };
-      try {
-        setInputValue(span, opts);
-        const merged = mergeTelemetry(opts);
-        const userOnFinish = opts?.onFinish;
-        const userOnError = opts?.onError;
-        const wrappedOpts = {
-          ...merged,
-          onFinish: async (event: any) => {
-            try {
-              setStreamOutputValue(span, event);
-            } finally {
-              endOnce();
-            }
-            if (typeof userOnFinish === 'function') {
-              return userOnFinish(event);
-            }
-          },
-          onError: (event: any) => {
-            recordSpanError(span, (event && event.error) ?? event);
-            endOnce();
-            if (typeof userOnError === 'function') {
-              return userOnError(event);
-            }
-          },
+    const tracer = getNeatlogsTracer(TRACER_NAME);
+    // startSpan + withNeatlogsSpan (see createAsyncWrapper) so streamText's
+    // internals never see our span on the global OTel context. The span stays
+    // open past the run scope and is ended from onFinish/onError.
+    const parentContext = getParentContext();
+    const span = tracer.startSpan(
+      `ai.${name}`,
+      { attributes: { 'openinference.span.kind': rootSpanKind(name) } },
+      parentContext,
+    );
+    return withNeatlogsSpan(
+      span,
+      () => {
+        let spanEnded = false;
+        const endOnce = () => {
+          if (spanEnded) return;
+          spanEnded = true;
+          span.end();
         };
-        return original(wrappedOpts);
-      } catch (err) {
-        // Synchronous throw (e.g. bad arguments) — the stream never started.
-        recordSpanError(span, err);
-        endOnce();
-        throw err;
-      }
-    });
+        try {
+          setInputValue(span, opts);
+          const merged = mergeTelemetry(opts);
+          const userOnFinish = opts?.onFinish;
+          const userOnError = opts?.onError;
+          const wrappedOpts = {
+            ...merged,
+            onFinish: async (event: any) => {
+              try {
+                setStreamOutputValue(span, event);
+              } finally {
+                endOnce();
+              }
+              if (typeof userOnFinish === 'function') {
+                return userOnFinish(event);
+              }
+            },
+            onError: (event: any) => {
+              recordSpanError(span, (event && event.error) ?? event);
+              endOnce();
+              if (typeof userOnError === 'function') {
+                return userOnError(event);
+              }
+            },
+          };
+          return original(wrappedOpts);
+        } catch (err) {
+          // Synchronous throw (e.g. bad arguments) — the stream never started.
+          recordSpanError(span, err);
+          endOnce();
+          throw err;
+        }
+      },
+      parentContext,
+    );
   };
 }
 

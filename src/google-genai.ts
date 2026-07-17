@@ -23,8 +23,13 @@
  *   - chat.sendMessage() / sendMessageStream() — chat sessions
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import {
+  getNeatlogsTracer,
+  getNeatlogsParentContext,
+  withNeatlogsSpan,
+} from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.google_genai';
 const PROVIDER = 'google';
@@ -51,8 +56,8 @@ export function traceTool<TArgs = any, TResult = any>(
   fn: (args: TArgs) => TResult | Promise<TResult>,
 ): (args: TArgs) => Promise<TResult> {
   return async function tracedTool(args: TArgs): Promise<TResult> {
-    const tracer = getProviderTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    const tracer = getNeatlogsTracer(TRACER_NAME);
+    const span = tracer.startSpan(
       `tool.${name}`,
       {
         attributes: {
@@ -61,21 +66,21 @@ export function traceTool<TArgs = any, TResult = any>(
           'input.value': safeStringify(args),
         },
       },
-      otelContext.active(),
-      async (span) => {
-        try {
-          const result = await fn(args);
-          span.setAttribute('output.value', safeStringify(result));
-          span.setStatus({ code: SpanStatusCode.OK });
-          return result;
-        } catch (err) {
-          recordError(span, err);
-          throw err;
-        } finally {
-          span.end();
-        }
-      },
+      getNeatlogsParentContext(),
     );
+    return withNeatlogsSpan(span, async () => {
+      try {
+        const result = await fn(args);
+        span.setAttribute('output.value', safeStringify(result));
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        recordError(span, err);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
   };
 }
 
@@ -162,7 +167,7 @@ function tracedChatSend(
       'neatlogs.llm.model_name': model,
       'neatlogs.llm.is_streaming': isStream,
     },
-  }, otelContext.active());
+  }, getNeatlogsParentContext());
 
   // The chat sendMessage param shape is { message } (string or Part[]).
   const message = params?.message ?? params;
@@ -172,8 +177,7 @@ function tracedChatSend(
     (typeof message === 'string' ? message : safeStringify(message)),
   );
 
-  const ctx = trace.setSpan(otelContext.active(), span);
-  const result = otelContext.with(ctx, () => original(params, ...rest));
+  const result = withNeatlogsSpan(span, () => original(params, ...rest));
 
   return Promise.resolve(result).then(
     (response: any) => {
@@ -198,10 +202,9 @@ function tracedEmbedContent(original: (...a: any[]) => any) {
         'neatlogs.embedding.model_name': opts?.model ?? '',
         'neatlogs.embedding.text': safeStringify(opts?.contents ?? ''),
       },
-    }, otelContext.active());
+    }, getNeatlogsParentContext());
 
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const result = otelContext.with(ctx, () => original(opts, ...rest));
+    const result = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return Promise.resolve(result).then(
       (response: any) => {
@@ -233,10 +236,9 @@ function tracedCountTokens(original: (...a: any[]) => any) {
         'neatlogs.llm.task': 'count_tokens',
         'neatlogs.llm.model_name': opts?.model ?? '',
       },
-    }, otelContext.active());
+    }, getNeatlogsParentContext());
 
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const result = otelContext.with(ctx, () => original(opts, ...rest));
+    const result = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return Promise.resolve(result).then(
       (response: any) => {
@@ -270,12 +272,11 @@ function tracedGenerateContent(original: (...args: any[]) => any, isStream: bool
         'neatlogs.llm.model_name': model,
         'neatlogs.llm.is_streaming': isStream,
       },
-    }, otelContext.active());
+    }, getNeatlogsParentContext());
 
     setInputAttributes(span, opts);
 
-    const ctx = trace.setSpan(otelContext.active(), span);
-    const result = otelContext.with(ctx, () => original(opts, ...rest));
+    const result = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return Promise.resolve(result).then(
       (response: any) => {

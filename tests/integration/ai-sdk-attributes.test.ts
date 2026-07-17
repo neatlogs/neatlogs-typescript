@@ -77,6 +77,18 @@ describe('Vercel AI SDK attribute extraction', () => {
     expect(out['neatlogs.llm.output_messages.0.content']).toBe('Hi there!');
   });
 
+  it('captures ai.response.object (generateObject) as output message 0', () => {
+    const out = processSpan(
+      makeAiSdkSpan('ai.generateObject.doGenerate', {
+        'ai.model.id': 'gpt-4o-mini',
+        'ai.response.object': JSON.stringify({ city: 'Paris', tempC: 16 }),
+      }),
+    );
+    expect(out['neatlogs.llm.output_messages.0.role']).toBe('assistant');
+    expect(out['neatlogs.llm.output_messages.0.content']).toContain('Paris');
+    expect(out['neatlogs.llm.output_messages.0.content']).toContain('16');
+  });
+
   it('infers LLM kind for ai.generateText spans without explicit openinference.span.kind', () => {
     const out = processSpan(
       makeAiSdkSpan('ai.generateText.doGenerate', {

@@ -21,6 +21,27 @@ export interface LibraryInfo {
   auto_load?: string[];
   /** npm package name for eager patching (used when OTel hooks don't fire) */
   npm_package?: string;
+  /**
+   * Whether this library's manager-loaded auto-instrumentor is safe to run
+   * with Neatlogs' always-private provider. Manager-loaded OTel/OpenInference instrumentors
+   * create and activate spans through the GLOBAL OpenTelemetry context
+   * (`context.active()` / `context.with()`), which cannot be intercepted by a
+   * private-provider facade — so a foreign co-tenant (Datadog, …) can still
+   * parent or be parented by their spans in both directions. Such instrumentors
+   * are therefore NOT isolation-safe and `init()` rejects them.
+   *
+   * Absent/false = not isolation-safe (the fail-closed default). Set `true` only
+   * for an instrumentor that creates AND activates its spans exclusively through
+   * Neatlogs' private context runtime. Explicit wrappers (wrapOpenAI, etc.) are
+   * a separate, always-allowed path and don't go through the manager.
+   */
+  isolationSafe?: boolean;
+  /**
+   * Human-readable pointer to the explicit, fully-isolated Neatlogs wrapper for
+   * this library — used to build the rejection message so users
+   * know the supported alternative (e.g. "wrapOpenAI() from 'neatlogs/openai'").
+   */
+  explicitWrapper?: string;
 }
 
 /**
@@ -108,6 +129,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       // consistent with other LLM/agent libraries.
       neatlogs: '@neatlogs/instrumentation-ai-sdk',
       default_span_kind: 'LLM',
+      explicitWrapper: "wrapAISDK() from 'neatlogs/ai'",
     },
     openai: {
       openinference: '@arizeai/openinference-instrumentation-openai',
@@ -115,6 +137,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       neatlogs: null,
       default_span_kind: 'LLM',
       npm_package: 'openai',
+      explicitWrapper: "wrapOpenAI() from 'neatlogs/openai'",
     },
     anthropic: {
       openinference: '@arizeai/openinference-instrumentation-anthropic',
@@ -122,6 +145,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       neatlogs: null,
       default_span_kind: 'LLM',
       npm_package: '@anthropic-ai/sdk',
+      explicitWrapper: "wrapAnthropic() from 'neatlogs/anthropic'",
     },
     cohere: {
       openinference: null,
@@ -136,12 +160,14 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       // scope detection and tagging consistent.
       neatlogs: 'neatlogs/bedrock',
       default_span_kind: 'LLM',
+      explicitWrapper: "wrapBedrock() from 'neatlogs/bedrock'",
     },
     azure_openai: {
       openinference: null,
       openllmetry: null,
       neatlogs: 'neatlogs/azure-openai',
       default_span_kind: 'LLM',
+      explicitWrapper: "wrapAzureOpenAI() from 'neatlogs/azure-openai'",
     },
     groq: {
       openinference: null,
@@ -160,6 +186,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       openllmetry: null,
       neatlogs: 'neatlogs/vertex-ai',
       default_span_kind: 'LLM',
+      explicitWrapper: "wrapVertexAI() from 'neatlogs/vertex-ai'",
     },
     google_generativeai: {
       openinference: null,
@@ -221,6 +248,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       neatlogs: null,
       default_span_kind: 'CHAIN',
       npm_package: '@langchain/core/callbacks/manager',
+      explicitWrapper: "langchainHandler() from 'neatlogs/langchain'",
     },
     langgraph: {
       openinference: null,
@@ -246,6 +274,10 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       openllmetry: null,
       neatlogs: '@neatlogs/instrumentation-mastra',
       default_span_kind: 'AGENT',
+      // The MastraInstrumentor path monkey-patches the (sealed) Mastra
+      // constructor and its bridge activates spans on the global context, so it
+      // is neither reliable nor isolation-safe. Use the explicit wrapper.
+      explicitWrapper: "wrapMastra() from 'neatlogs/mastra'",
     },
     autogen: {
       openinference: null,
@@ -361,6 +393,8 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       neatlogs: '@neatlogs/instrumentation-google-genai',
       default_span_kind: 'LLM',
       npm_package: '@google/genai',
+      // The instrumentor calls startActiveSpan on a global-context-bound tracer.
+      explicitWrapper: "wrapGoogleGenAI() from 'neatlogs/google-genai'",
     },
     google_adk: {
       openinference: null,
@@ -434,18 +468,21 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       // Opt-in wrapper (wrapClaudeAgentSDK); entry kept for scope detection/tagging.
       neatlogs: 'neatlogs/claude-agent-sdk',
       default_span_kind: 'AGENT',
+      explicitWrapper: "wrapClaudeAgentSDK() from 'neatlogs/claude-agent-sdk'",
     },
     openrouter_agent: {
       openinference: null,
       openllmetry: null,
       neatlogs: 'neatlogs/openrouter-agent',
       default_span_kind: 'AGENT',
+      explicitWrapper: "wrapOpenRouterAgent() from 'neatlogs/openrouter-agent'",
     },
     opencode: {
       openinference: null,
       openllmetry: null,
       neatlogs: 'neatlogs/opencode',
       default_span_kind: 'AGENT',
+      explicitWrapper: "NeatlogsOpencodePlugin from 'neatlogs/opencode'",
     },
   },
 };

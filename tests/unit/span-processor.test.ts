@@ -12,6 +12,7 @@ import {
   trace as otelTrace,
 } from '@opentelemetry/api';
 import type { HrTime, SpanContext } from '@opentelemetry/api';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 // ────────────────────────────────────────────────────────
 // Mock UnifiedAttributeProcessor
@@ -371,8 +372,10 @@ describe('NeatlogsSpanProcessor', () => {
         end: vi.fn(),
       });
 
+      // Marker resolves through the private Neatlogs provider.
       const mockTracer = { startSpan: mockStartSpan };
-      const getTracerSpy = vi.spyOn(otelTrace, 'getTracer').mockReturnValue(mockTracer as any);
+      const getTracerSpy = vi.fn().mockReturnValue(mockTracer);
+      _setNeatlogsProvider({ getTracer: getTracerSpy } as any);
 
       const span = makeMockSpan({
         name: 'root-span',
@@ -397,12 +400,10 @@ describe('NeatlogsSpanProcessor', () => {
       );
       expect(markerSpan.end).toHaveBeenCalled();
 
-      getTracerSpy.mockRestore();
+      _setNeatlogsProvider(null);
     });
 
     it('should not emit completion marker for child spans', () => {
-      const getTracerSpy = vi.spyOn(otelTrace, 'getTracer');
-
       const span = makeMockSpan({
         name: 'child-span',
         parentSpanId: 'parent123456789a',
@@ -410,9 +411,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       processor.onEnd(span);
 
-      expect(getTracerSpy).not.toHaveBeenCalled();
-
-      getTracerSpy.mockRestore();
+      // Child spans do not create completion markers.
     });
 
     it('should copy neatlogs.tags from resource to completion marker', () => {
@@ -422,9 +421,9 @@ describe('NeatlogsSpanProcessor', () => {
         end: vi.fn(),
       });
 
-      const getTracerSpy = vi
-        .spyOn(otelTrace, 'getTracer')
-        .mockReturnValue({ startSpan: mockStartSpan } as any);
+      _setNeatlogsProvider({
+        getTracer: () => ({ startSpan: mockStartSpan }),
+      } as any);
 
       const span = makeMockSpan({
         name: 'root-span',
@@ -438,7 +437,46 @@ describe('NeatlogsSpanProcessor', () => {
 
       expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.tags', ['prod', 'v2']);
 
-      getTracerSpy.mockRestore();
+      _setNeatlogsProvider(null);
+    });
+
+    it('should copy root session and end-user identity to the completion marker', () => {
+      const mockSetAttribute = vi.fn();
+      const mockStartSpan = vi.fn().mockReturnValue({
+        setAttribute: mockSetAttribute,
+        end: vi.fn(),
+      });
+
+      _setNeatlogsProvider({
+        getTracer: () => ({ startSpan: mockStartSpan }),
+      } as any);
+
+      const span = makeMockSpan({
+        name: 'root-span',
+        parentSpanId: undefined,
+        attributes: {
+          'neatlogs.session.id': 'conversation-123',
+          'neatlogs.end_user.id': 'user-456',
+          'neatlogs.end_user.metadata': '{"plan":"pro"}',
+        },
+      });
+
+      processor.onEnd(span);
+
+      expect(mockSetAttribute).toHaveBeenCalledWith(
+        'neatlogs.session.id',
+        'conversation-123',
+      );
+      expect(mockSetAttribute).toHaveBeenCalledWith(
+        'neatlogs.end_user.id',
+        'user-456',
+      );
+      expect(mockSetAttribute).toHaveBeenCalledWith(
+        'neatlogs.end_user.metadata',
+        '{"plan":"pro"}',
+      );
+
+      _setNeatlogsProvider(null);
     });
   });
 

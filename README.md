@@ -138,7 +138,9 @@ await init({
 | `metadata` | `Record<string, any>` | — | Custom metadata attached to all spans. |
 | `debug` | `boolean` | `false` | Enable debug logging. |
 | `disableExport` | `boolean` | `false` | Disable export to Neatlogs backend. |
-| `instrumentations` | `string[]` | — | Libraries to auto-instrument (e.g., `['openai']`). |
+| `instrumentations` | `string[]` | — | Legacy manager path. Instrumentors that depend on global OTel context are rejected; use explicit wrappers below. |
+| `tracerProvider` | `BasicTracerProvider` | Private SDK provider | Optional caller-owned private provider. It is never registered globally or shut down by Neatlogs. |
+| `registerShutdownHandlers` | `boolean` | `true` for SDK-owned provider | Register process exit/signal handlers. Set `false` when the host application owns shutdown. |
 | `mask` | `MaskFunction` | — | Global mask function applied to all spans. |
 | `sampleRate` | `number` | `1.0` | Sampling rate (0.0 to 1.0). |
 | `captureLogs` | `boolean` | `false` | Capture log records via OTel LoggerProvider. |
@@ -431,26 +433,13 @@ registerCrewaiTask('research-task', 'Research the latest AI developments');
 
 ## Supported Instrumentations
 
-### Auto-Instrumented (via OpenInference)
+### Isolation policy
 
-These libraries are automatically instrumented when listed in `instrumentations`:
-
-| Library | Package | Instrumentation |
-|---------|---------|-----------------|
-| `openai` | `openai` | `@arizeai/openinference-instrumentation-openai` |
-| `anthropic` | `@anthropic-ai/sdk` | `@arizeai/openinference-instrumentation-anthropic` |
-| `bedrock` | `@aws-sdk/client-bedrock-runtime` | `@arizeai/openinference-instrumentation-bedrock` |
-| `langchain` | `@langchain/core` | `@arizeai/openinference-instrumentation-langchain` |
-| `mcp` | `@modelcontextprotocol/sdk` | `@arizeai/openinference-instrumentation-mcp` |
-| `beeai` | `beeai-framework` | `@arizeai/openinference-instrumentation-beeai` |
-| `claude_agent_sdk` | `@anthropic-ai/claude-agent-sdk` | `@arizeai/openinference-instrumentation-claude-agent-sdk` |
-
-### Custom Instrumentors (built into neatlogs)
-
-| Library | Package | Notes |
-|---------|---------|-------|
-| `google_genai` | `@google/genai` | Custom neatlogs instrumentor |
-| `crewai` | `crewai` | Custom neatlogs instrumentor; auto-loads `litellm` |
+Neatlogs always runs on a private provider and private async context. Third-party
+auto-instrumentors that call the global OpenTelemetry context API cannot provide
+bidirectional isolation, so the manager rejects them at initialization before
+creating any provider state. Use the explicit provider/framework wrappers
+instead.
 
 ### Registry Entries (not yet instrumented in TypeScript)
 
@@ -460,21 +449,21 @@ The following libraries are registered in the instrumentation registry for futur
 
 ## Framework Integrations
 
-For frameworks that don't fit the auto-instrument-on-init pattern, neatlogs ships dedicated companion packages. Install only the ones you need:
+For frameworks that don't fit the auto-instrument-on-init pattern, use the SDK's explicit wrappers. These wrappers use Neatlogs' private context and remain isolated from other tracing SDKs:
 
-| Framework | Package | Helper |
-|-----------|---------|--------|
-| Mastra (`@mastra/core`) | `@neatlogs/instrumentation-mastra` | `getMastraObservability()` — pass to `new Mastra({ observability })` |
-| Vercel AI SDK (`ai`) | `@neatlogs/instrumentation-ai-sdk` | `getAISDKWrapper()` — wraps `generateText` / `streamText` / `generateObject` / `streamObject` |
+| Framework | Helper |
+|-----------|--------|
+| Mastra (`@mastra/core`) | `wrapMastra()` from `neatlogs/mastra` |
+| Vercel AI SDK (`ai`) | `wrapAISDK()` from `neatlogs/ai` |
 
 ```typescript
 // Vercel AI SDK
-import { init, getAISDKWrapper, shutdown } from 'neatlogs';
+import { init, shutdown } from 'neatlogs';
+import { wrapAISDK } from 'neatlogs/ai';
 import * as ai from 'ai';
 import { openai } from '@ai-sdk/openai';
 
 await init({ apiKey: process.env.NEATLOGS_API_KEY });
-const wrapAISDK = await getAISDKWrapper();
 const { generateText } = wrapAISDK(ai);
 
 const { text } = await generateText({

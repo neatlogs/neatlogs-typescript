@@ -13,7 +13,7 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import {
-  context as otelContext,
+  ROOT_CONTEXT,
   trace as otelTrace,
   TraceFlags,
   SpanStatusCode,
@@ -39,6 +39,7 @@ import {
 import { popEntry } from './crewai-task-registry.js';
 import type { MaskFunction } from '../types.js';
 import { AttributeMapper } from '../config/attribute-mapper.js';
+import { getNeatlogsTracer } from './provider.js';
 
 const logger = getLogger();
 
@@ -318,21 +319,19 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
 
       if (!isLlmSpan) return;
 
-      // Read context values
-      const ctx = otelContext.active();
-      let variablesJson = ctx.getValue(PROMPT_VARIABLES_KEY) as
-        | string
-        | undefined;
-      let template = ctx.getValue(PROMPT_TEMPLATE_KEY) as string | undefined;
-      const versionVal = ctx.getValue(PROMPT_VERSION_KEY) as
-        | string
-        | undefined;
-      let userTemplate = ctx.getValue(USER_PROMPT_TEMPLATE_KEY) as
-        | string
-        | undefined;
-      let userVariablesJson = ctx.getValue(USER_PROMPT_VARIABLES_KEY) as
-        | string
-        | undefined;
+      // Read context values only from the span's OWN parentContext. The global
+      // OTel context belongs to another SDK and must never be consulted.
+      const getFrom = (ctx: Context | undefined, key: symbol): string | undefined =>
+        typeof ctx?.getValue === 'function'
+          ? (ctx.getValue(key) as string | undefined)
+          : undefined;
+      const readValue = (key: symbol): string | undefined =>
+        getFrom(parentContext, key);
+      let variablesJson = readValue(PROMPT_VARIABLES_KEY);
+      let template = readValue(PROMPT_TEMPLATE_KEY);
+      const versionVal = readValue(PROMPT_VERSION_KEY);
+      let userTemplate = readValue(USER_PROMPT_TEMPLATE_KEY);
+      let userVariablesJson = readValue(USER_PROMPT_VARIABLES_KEY);
 
       // Fall back to PromptContext / UserPromptContext
       if (!variablesJson) {
@@ -677,13 +676,27 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
 
       // Use wrapSpanContext to create a non-recording span from context
       const wrappedSpan = otelTrace.wrapSpanContext(spanCtx);
-      const ctx = otelTrace.setSpan(otelContext.active(), wrappedSpan);
+      const ctx = otelTrace.setSpan(ROOT_CONTEXT, wrappedSpan);
 
-      const tracer = otelTrace.getTracer('neatlogs.internal');
+      const tracer = getNeatlogsTracer('neatlogs.internal');
       const marker = tracer.startSpan('neatlogs.trace.complete', undefined, ctx);
       marker.setAttribute('neatlogs.trace.complete', true);
       marker.setAttribute('neatlogs.internal', true);
       marker.setAttribute('neatlogs.span.kind', 'Neatlogs.INTERNAL');
+
+      // The completion marker may be exported in a batch without the root span.
+      // Carry the root-owned identity so ingestion can finalize the trace under
+      // the correct conversation and end-user without depending on batch order.
+      for (const key of [
+        'neatlogs.session.id',
+        'neatlogs.end_user.id',
+        'neatlogs.end_user.metadata',
+      ]) {
+        const value = rootSpan.attributes[key];
+        if (value !== undefined) {
+          marker.setAttribute(key, value);
+        }
+      }
 
       // Copy resource tags
       if (resourceAttrs['neatlogs.tags']) {

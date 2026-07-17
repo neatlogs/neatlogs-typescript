@@ -21,6 +21,7 @@ import {
 } from '../../src/core/context.js';
 import { PromptTemplate, UserPromptTemplate, PromptContext, UserPromptContext } from '../../src/prompt/template.js';
 import { _clearMaskRegistry } from '../../src/core/mask.js';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -33,10 +34,11 @@ beforeAll(() => {
   exporter = new InMemorySpanExporter();
   provider = new NodeTracerProvider();
   provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
-  provider.register();
+  _setNeatlogsProvider(provider);
 });
 
 afterAll(async () => {
+  _setNeatlogsProvider(null);
   await provider.shutdown();
 });
 
@@ -350,7 +352,7 @@ describe('trace() with prompt template and version', () => {
 
 describe('_setSpanAttributes edge cases', () => {
   it('should handle empty attributes object', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('empty-attrs', async (span) => {
       _setSpanAttributes(span, 'CHAIN', {});
       span.end();
@@ -364,7 +366,7 @@ describe('_setSpanAttributes edge cases', () => {
   });
 
   it('should handle large number of extra attributes', async () => {
-    const tracer = otelTrace.getTracer('test');
+    const tracer = provider.getTracer('test');
     const largeAttrs: Record<string, any> = {};
     for (let i = 0; i < 100; i++) {
       largeAttrs[`custom.attr.${i}`] = `value-${i}`;

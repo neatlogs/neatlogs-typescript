@@ -806,6 +806,19 @@ export class UnifiedAttributeProcessor {
       attrs['llm.output_messages.0.message.content'] = attrs['ai.response.text'];
     }
 
+    // generateObject/streamObject emit ai.response.object (structured), not
+    // ai.response.text — build the same output message from it so the doGenerate
+    // LLM child shows the object instead of a blank output.
+    if (
+      'ai.response.object' in attrs &&
+      !('llm.output_messages.0.message.content' in attrs)
+    ) {
+      const obj = attrs['ai.response.object'];
+      attrs['llm.output_messages.0.message.role'] = 'assistant';
+      attrs['llm.output_messages.0.message.content'] =
+        typeof obj === 'string' ? obj : JSON.stringify(obj);
+    }
+
     // Response finish reason / id
     if ('ai.response.finishReason' in attrs && !('llm.response.finish_reason' in attrs)) {
       attrs['llm.response.finish_reason'] = attrs['ai.response.finishReason'];

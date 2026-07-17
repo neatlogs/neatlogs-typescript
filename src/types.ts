@@ -55,6 +55,20 @@ export interface InitOptions {
   disableExport?: boolean;
   /** Libraries to auto-instrument (e.g., ['openai', 'anthropic']). */
   instrumentations?: string[];
+  /**
+   * Optional caller-owned private provider. Neatlogs never registers it
+   * globally. The SDK adds its processors and flushes it, but never shuts it
+   * down.
+   */
+  tracerProvider?: import('@opentelemetry/sdk-trace-base').BasicTracerProvider;
+  /**
+   * Register process signal handlers (beforeExit/SIGTERM/SIGINT) that flush and
+   * shut down the SDK on exit. Defaults to true whenever Neatlogs owns the tracer
+   * private provider, so standalone scripts drain their spans. Defaults to
+   * false only when you supply your own `tracerProvider`, since its owner
+   * controls that lifecycle.
+   */
+  registerShutdownHandlers?: boolean;
   /** Global mask function applied to all spans. */
   mask?: MaskFunction;
   /** Sampling rate (0.0 to 1.0). Defaults to 1.0. */

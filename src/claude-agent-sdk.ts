@@ -36,7 +36,8 @@
  * `query` — calling the unwrapped SDK directly produces no tracing.
  */
 
-import { trace, context as otelContext, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
+import { trace, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
+import { getNeatlogsTracer, getNeatlogsBaseContext, withNeatlogsSpan } from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.claude_agent_sdk';
 const ROOT_SCOPE = '__root__';
@@ -80,7 +81,7 @@ export function wrapClaudeAgentSDK<T extends Record<string, any>>(
 
 function wrapQuery(original: (...args: any[]) => any, options: WrapClaudeAgentSDKOptions) {
   return function (params: any, ...rest: any[]): any {
-    const tracer = trace.getTracer(TRACER_NAME);
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     const workflowName = options.workflowName ?? 'claude_agent.query';
 
     // Shared ref the input-tap fills with the first user-prompt text. In
@@ -95,7 +96,7 @@ function wrapQuery(original: (...args: any[]) => any, options: WrapClaudeAgentSD
     const agentSpan = tracer.startSpan(
       'claude_agent.query',
       { attributes: { 'neatlogs.span.kind': 'AGENT', 'neatlogs.workflow.name': workflowName } },
-      otelContext.active(),
+      getNeatlogsBaseContext(),
     );
 
     // Input: a string prompt is captured directly. A streaming-input prompt (an
@@ -110,11 +111,11 @@ function wrapQuery(original: (...args: any[]) => any, options: WrapClaudeAgentSD
       params = { ...params, prompt: tapPromptStream(params.prompt, promptRef) };
     }
 
-    const agentCtx = trace.setSpan(otelContext.active(), agentSpan);
+    const agentCtx = trace.setSpan(getNeatlogsBaseContext(), agentSpan);
 
-    // Call the original query inside the AGENT context so any SDK-internal OTel
-    // spans (and our child spans) nest under it.
-    const queryObj = otelContext.with(agentCtx, () => original(params, ...rest));
+    // Call the original query with the AGENT span active only under our private
+    // context so a foreign provider's spans neither parent nor nest under ours.
+    const queryObj = withNeatlogsSpan(agentSpan, () => original(params, ...rest));
 
     return instrumentQueryIterable(queryObj, agentSpan, agentCtx, tracer, promptRef);
   };
@@ -265,7 +266,7 @@ function instrumentQueryIterable(
     return {
       async next(): Promise<IteratorResult<any>> {
         try {
-          const result = await otelContext.with(agentCtx, () => iterator.next());
+          const result = await withNeatlogsSpan(agentSpan, () => iterator.next());
           if (result.done) {
             finalizeAgent('ok');
             return result;
@@ -342,7 +343,7 @@ function getScope(
   // otherwise under the root agent.
   const parentToolSpan = state.toolSpans.get(parentId);
   const parentCtx = parentToolSpan
-    ? trace.setSpan(otelContext.active(), parentToolSpan)
+    ? trace.setSpan(getNeatlogsBaseContext(), parentToolSpan)
     : state.scopes.get(ROOT_SCOPE)!.ctx;
 
   const subType = msg?.subagent_type ? String(msg.subagent_type) : 'subagent';
@@ -355,7 +356,7 @@ function getScope(
 
   const scope: AgentScope = {
     span,
-    ctx: trace.setSpan(otelContext.active(), span),
+    ctx: trace.setSpan(getNeatlogsBaseContext(), span),
     inputMessages: msg?.task_description ? [{ role: 'user', content: String(msg.task_description) }] : [],
     assistantBuffer: null,
     finalText: '',

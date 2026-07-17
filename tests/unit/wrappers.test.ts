@@ -16,19 +16,29 @@ import { langchainHandler } from '../../src/langchain.js';
 import { strandsHooks } from '../../src/strands.js';
 import { openaiAgentsProcessor } from '../../src/openai-agents.js';
 import { wrapMastra } from '../../src/mastra-wrap.js';
+import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
 
+let prevAutoRoot: string | undefined;
+
 beforeAll(() => {
+  // These assert LLM/TOOL attribute mapping on bare wrappers. Auto-root would
+  // add a WORKFLOW parent span; disable it so span counts reflect the wrapper.
+  prevAutoRoot = process.env.NEATLOGS_AUTO_ROOT;
+  process.env.NEATLOGS_AUTO_ROOT = 'false';
   exporter = new InMemorySpanExporter();
   provider = new NodeTracerProvider();
   provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
-  provider.register();
+  _setNeatlogsProvider(provider);
 });
 
 afterAll(async () => {
+  _setNeatlogsProvider(null);
   await provider.shutdown();
+  if (prevAutoRoot === undefined) delete process.env.NEATLOGS_AUTO_ROOT;
+  else process.env.NEATLOGS_AUTO_ROOT = prevAutoRoot;
 });
 
 beforeEach(() => {
@@ -246,30 +256,10 @@ describe('langchainHandler', () => {
 // ---------------------------------------------------------------------------
 
 describe('strandsHooks', () => {
-  it('is a pass-through that does not emit its own spans (Strands self-instruments)', async () => {
-    const fakeAgent = {
-      name: 'test-agent',
-      invoke: async (input: string) => `echo: ${input}`,
-    };
-
-    const returned = strandsHooks(fakeAgent);
-    // Returns the same agent, does not patch invoke.
-    expect(returned).toBe(fakeAgent);
-    const result = await fakeAgent.invoke('hello');
-    expect(result).toBe('echo: hello');
-
-    // No neatlogs spans — Strands' native OpenTelemetry spans are the source,
-    // captured via init()'s tracer provider and the attribute mapper.
-    expect(getSpans().length).toBe(0);
-    expect((fakeAgent as any)._neatlogs_patched).toBe(true);
-  });
-
-  it('is idempotent (double-call is a no-op)', () => {
-    const fakeAgent = { name: 'a', invoke: async () => 'ok' };
-    strandsHooks(fakeAgent);
-    const first = fakeAgent.invoke;
-    strandsHooks(fakeAgent);
-    expect(fakeAgent.invoke).toBe(first);
+  it('rejects Strands because it owns the global OTel context', () => {
+    expect(() => strandsHooks({ name: 'test-agent' })).toThrow(
+      /cannot be isolated from other tracing SDKs/,
+    );
   });
 });
 
@@ -392,7 +382,65 @@ describe('wrapMastra', () => {
     expect(attr(spans[0], 'neatlogs.agent.name')).toBe('planner');
     expect(attr(spans[0], 'neatlogs.llm.model_name')).toBe('gpt-4o');
     expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Plan: do things');
+    expect(attr(spans[0], 'output.value')).toBe('Plan: do things');
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(10);
+  });
+
+  it('records canonical AGENT and LLM output for a provider stream', async () => {
+    const model = {
+      modelId: 'stream-model',
+      provider: 'test',
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: 'text-delta', delta: 'Hel' });
+            controller.enqueue({ type: 'text-delta', delta: 'lo' });
+            controller.enqueue({
+              type: 'finish',
+              finishReason: 'stop',
+              usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 },
+            });
+            controller.close();
+          },
+        }),
+      }),
+    };
+    const agent = wrapMastra({
+      name: 'streaming-agent',
+      getLLM: async () => ({ getModel: () => model }),
+      stream: async function () {
+        const llm = await this.getLLM();
+        const result = await llm.getModel().doStream({
+          prompt: [{ role: 'user', content: 'Say hello' }],
+        });
+        const reader = result.stream.getReader();
+        let text = '';
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          if (next.value.type === 'text-delta') text += next.value.delta;
+        }
+        return {
+          text: Promise.resolve(text),
+          usage: Promise.resolve({ inputTokens: 4, outputTokens: 2, totalTokens: 6 }),
+          finishReason: Promise.resolve('stop'),
+          fullStream: new ReadableStream({ start(controller) { controller.close(); } }),
+        };
+      },
+    });
+
+    const output = await agent.stream('Say hello');
+    expect(await output.text).toBe('Hello');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const spans = getSpans();
+    const agentSpan = spans.find((span) => span.name === 'mastra.agent.streaming-agent')!;
+    const llmSpan = spans.find((span) => span.name === 'mastra.llm.stream-model.doStream')!;
+    expect(attr(agentSpan, 'output.value')).toBe('Hello');
+    expect(attr(llmSpan, 'output.value')).toBe('Hello');
+    expect(attr(llmSpan, 'neatlogs.llm.output_messages.0.content')).toBe('Hello');
+    expect(attr(llmSpan, 'neatlogs.llm.token_count.total')).toBe(6);
+    expect(llmSpan.parentSpanId).toBe(agentSpan.spanContext().spanId);
   });
 
   it('wraps Workflow.createRun().start() with WORKFLOW span', async () => {
@@ -418,6 +466,45 @@ describe('wrapMastra', () => {
     expect(attr(spans[0], 'neatlogs.workflow.name')).toBe('health-check');
     // status is not a canonical neatlogs key — it is folded into neatlogs.metadata
     expect(attr(spans[0], 'neatlogs.metadata')).toContain('completed');
+    expect(attr(spans[0], 'input.value')).toContain('accountId');
+    expect(attr(spans[0], 'output.value')).toContain('score');
+  });
+
+  it('records input and output for document chunk processors', async () => {
+    class MDocument {
+      getDocs() {
+        return [];
+      }
+
+      async chunk(options: unknown) {
+        return [{ text: 'one' }, { text: 'two' }, options];
+      }
+    }
+
+    const document = wrapMastra(new MDocument());
+    await document.chunk({ strategy: 'recursive' });
+
+    const span = getSpans().find((candidate) => candidate.name === 'mastra.document.chunk')!;
+    expect(attr(span, 'input.value')).toContain('recursive');
+    expect(attr(span, 'output.value')).toContain('one');
+    expect(attr(span, 'neatlogs.db.documents_count')).toBe(3);
+  });
+
+  it('records meaningful output for void-returning memory writes', async () => {
+    class Memory {
+      async saveMessages() {
+        return undefined;
+      }
+    }
+
+    const memory = wrapMastra(new Memory());
+    await memory.saveMessages({
+      messages: [{ role: 'user', content: 'one' }, { role: 'assistant', content: 'two' }],
+    });
+
+    const span = getSpans().find((candidate) => candidate.name === 'mastra.memory.saveMessages')!;
+    expect(attr(span, 'input.value')).toContain('messages');
+    expect(attr(span, 'output.value')).toBe('{"completed":true,"messageCount":2}');
   });
 
   it('is idempotent', async () => {

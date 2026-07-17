@@ -23,9 +23,10 @@
  *   `neatlogs.end_user.metadata`  — JSON object of arbitrary end-user fields
  */
 
-import { trace as otelTrace, context as otelContext, type Span } from '@opentelemetry/api';
+import { type Span } from '@opentelemetry/api';
 import { getLogger } from './logger.js';
 import { currentEndUserId, currentEndUserMetadata } from './identity.js';
+import { getActiveNeatlogsSpan } from './provider.js';
 
 const logger = getLogger();
 
@@ -50,7 +51,9 @@ export function normalizeEndUserMetadata(
  * would be the trace root.
  */
 export function isRootSpan(): boolean {
-  const current = otelTrace.getSpan(otelContext.active());
+  // Resolve from the private span store in isolated mode (a foreign provider's
+  // active span must not count as our parent), else the active OTel span.
+  const current = getActiveNeatlogsSpan();
   return !(current && current.isRecording());
 }
 
