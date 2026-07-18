@@ -959,14 +959,36 @@ function setToolCall(span: Span, i: number, name: any, args: any, id: any): void
 function recordUsage(span: Span, usage: any): void {
   if (!usage) return;
   // Shapes seen:
-  //  - AISDK v5 raw model: { inputTokens: {total}, outputTokens: {total} }
-  //  - Mastra result:      { inputTokens, outputTokens, totalTokens }
+  //  - AISDK v5 raw model: { inputTokens: {total, cacheRead, cacheWrite},
+  //                           outputTokens: {total, reasoning} }
+  //  - Mastra result:      { inputTokens, outputTokens, totalTokens,
+  //                           cachedInputTokens, cacheCreationInputTokens }
   //  - AISDK v3:           { promptTokens, completionTokens, totalTokens }
   const prompt = tokenValue(usage.promptTokens ?? usage.inputTokens ?? usage.input_tokens);
   const completion = tokenValue(usage.completionTokens ?? usage.outputTokens ?? usage.output_tokens);
   const total = tokenValue(usage.totalTokens);
+  const reasoning = tokenValue(
+    usage.reasoningTokens ?? usage.outputTokens?.reasoning ?? usage.output_tokens?.reasoning,
+  );
+  const cacheRead = tokenValue(
+    usage.cachedInputTokens ??
+      usage.cacheReadInputTokens ??
+      usage.cache_read_input_tokens ??
+      usage.inputTokens?.cacheRead ??
+      usage.input_tokens?.cache_read,
+  );
+  const cacheWrite = tokenValue(
+    usage.cacheCreationInputTokens ??
+      usage.cacheWriteInputTokens ??
+      usage.cache_creation_input_tokens ??
+      usage.inputTokens?.cacheWrite ??
+      usage.input_tokens?.cache_write,
+  );
   if (prompt != null) span.setAttribute('neatlogs.llm.token_count.prompt', prompt);
   if (completion != null) span.setAttribute('neatlogs.llm.token_count.completion', completion);
+  if (reasoning != null) span.setAttribute('neatlogs.llm.token_count.reasoning', reasoning);
+  if (cacheRead != null) span.setAttribute('neatlogs.llm.token_count.cache_read', cacheRead);
+  if (cacheWrite != null) span.setAttribute('neatlogs.llm.token_count.cache_write', cacheWrite);
   if (total != null) span.setAttribute('neatlogs.llm.token_count.total', total);
   else if (prompt != null && completion != null) {
     span.setAttribute('neatlogs.llm.token_count.total', prompt + completion);

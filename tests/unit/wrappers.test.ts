@@ -365,7 +365,14 @@ describe('wrapMastra', () => {
       model: { modelId: 'gpt-4o' },
       generate: async (input: string) => ({
         text: 'Plan: do things',
-        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+        usage: {
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          reasoningTokens: 2,
+          cachedInputTokens: 7,
+          cacheCreationInputTokens: 3,
+        },
         finishReason: 'stop',
         toolCalls: [],
       }),
@@ -384,6 +391,9 @@ describe('wrapMastra', () => {
     expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Plan: do things');
     expect(attr(spans[0], 'output.value')).toBe('Plan: do things');
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(10);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.reasoning')).toBe(2);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.cache_read')).toBe(7);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.cache_write')).toBe(3);
   });
 
   it('records canonical AGENT and LLM output for a provider stream', async () => {
@@ -398,7 +408,10 @@ describe('wrapMastra', () => {
             controller.enqueue({
               type: 'finish',
               finishReason: 'stop',
-              usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 },
+              usage: {
+                inputTokens: { total: 4, cacheRead: 3, cacheWrite: 1 },
+                outputTokens: { total: 2, reasoning: 1 },
+              },
             });
             controller.close();
           },
@@ -422,7 +435,10 @@ describe('wrapMastra', () => {
         }
         return {
           text: Promise.resolve(text),
-          usage: Promise.resolve({ inputTokens: 4, outputTokens: 2, totalTokens: 6 }),
+          usage: Promise.resolve({
+            inputTokens: { total: 4, cacheRead: 3, cacheWrite: 1 },
+            outputTokens: { total: 2, reasoning: 1 },
+          }),
           finishReason: Promise.resolve('stop'),
           fullStream: new ReadableStream({ start(controller) { controller.close(); } }),
         };
@@ -440,6 +456,9 @@ describe('wrapMastra', () => {
     expect(attr(llmSpan, 'output.value')).toBe('Hello');
     expect(attr(llmSpan, 'neatlogs.llm.output_messages.0.content')).toBe('Hello');
     expect(attr(llmSpan, 'neatlogs.llm.token_count.total')).toBe(6);
+    expect(attr(llmSpan, 'neatlogs.llm.token_count.reasoning')).toBe(1);
+    expect(attr(llmSpan, 'neatlogs.llm.token_count.cache_read')).toBe(3);
+    expect(attr(llmSpan, 'neatlogs.llm.token_count.cache_write')).toBe(1);
     expect(llmSpan.parentSpanId).toBe(agentSpan.spanContext().spanId);
   });
 
