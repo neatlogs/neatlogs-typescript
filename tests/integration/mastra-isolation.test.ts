@@ -97,6 +97,42 @@ describe('Mastra provider isolation', () => {
     );
   });
 
+  it('flattens the model prompt into indexed input_messages (system first)', async () => {
+    const model = {
+      modelId: 'test-model',
+      provider: 'test-provider',
+      doGenerate: async () => ({ text: 'ok' }),
+    };
+    const llm = { getModel: () => model };
+    const agent = wrapMastra({
+      name: 'prompt-agent',
+      model,
+      instructions: 'You are Ari.',
+      getLLM: async () => llm,
+      generate: async function () {
+        const resolved = await this.getLLM();
+        return resolved.getModel().doGenerate({
+          prompt: [
+            { role: 'system', content: 'You are Ari.' },
+            { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+          ],
+        });
+      },
+    });
+
+    await agent.generate('hello');
+
+    const llmSpan = findSpan(
+      neatlogsExporter.getFinishedSpans(),
+      'mastra.llm.test-model.doGenerate',
+    );
+    const attrs = llmSpan.attributes;
+    expect(attrs['neatlogs.llm.input_messages.0.role']).toBe('system');
+    expect(attrs['neatlogs.llm.input_messages.0.content']).toBe('You are Ari.');
+    expect(attrs['neatlogs.llm.input_messages.1.role']).toBe('user');
+    expect(attrs['neatlogs.llm.input_messages.1.content']).toBe('hello');
+  });
+
   it('captures tools supplied dynamically through stream options', async () => {
     const dynamicTool = {
       id: 'org-search',

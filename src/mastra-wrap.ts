@@ -260,6 +260,7 @@ function patchModelInPlace(model: any): void {
       if (isStream) attrs['neatlogs.llm.is_streaming'] = true;
       const promptInput = callOpts?.prompt ?? callOpts?.messages;
       if (promptInput !== undefined) attrs['input.value'] = safeStringify(promptInput);
+      setModelInputMessages(attrs, promptInput);
       captureInvocationParams(attrs, callOpts);
 
       const spanName = `mastra.llm.${modelId || 'model'}.${fn}`;
@@ -942,6 +943,34 @@ function captureInvocationParams(attrs: Record<string, any>, callOpts: any): voi
   if (Object.keys(invocation).length) {
     attrs['neatlogs.llm.invocation_parameters'] = safeStringify(invocation);
   }
+}
+
+/**
+ * Flatten the AI SDK v5 model prompt into indexed `neatlogs.llm.input_messages.{i}`
+ * role/content attributes. This is what lets a wrapped agent's system instructions
+ * (message 0, role=system) be recognized as a prompt template at ingest, in
+ * addition to the consolidated `input.value` blob. Each message's `content` is
+ * either a string or an array of typed parts ({ type:'text', text } / tool /
+ * image); non-text parts are dropped from the text projection.
+ */
+function setModelInputMessages(attrs: Record<string, any>, promptInput: any): void {
+  if (!Array.isArray(promptInput)) return;
+  for (let i = 0; i < promptInput.length; i++) {
+    const msg = promptInput[i];
+    if (!msg || typeof msg !== 'object') continue;
+    attrs[`neatlogs.llm.input_messages.${i}.role`] = msg.role ?? 'user';
+    attrs[`neatlogs.llm.input_messages.${i}.content`] = messagePartsToText(msg.content);
+  }
+}
+
+/** Project AI SDK v5 message content (string | typed-part[]) to plain text. */
+function messagePartsToText(content: any): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
+    .map((p: any) => p.text)
+    .join('');
 }
 
 /**
