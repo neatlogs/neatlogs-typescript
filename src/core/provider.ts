@@ -11,6 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   ROOT_CONTEXT,
   INVALID_SPAN_CONTEXT,
+  createContextKey,
   trace as otelTrace,
   type Context,
   type Span,
@@ -18,6 +19,11 @@ import {
   type Tracer,
   type TracerProvider,
 } from '@opentelemetry/api';
+
+// Carries the trace-ROOT span down the private context so descendants can target
+// it (e.g. setTraceOutput). getActiveNeatlogsSpan() returns the innermost span,
+// which is not the root once nested; this key preserves the root reference.
+const NEATLOGS_ROOT_SPAN_KEY = createContextKey('neatlogs.root_span');
 
 // Entry points are bundled independently (`neatlogs`, `neatlogs/openai`,
 // `neatlogs/ai`, `neatlogs/mastra`, … each in both CJS and ESM), so every piece
@@ -156,6 +162,20 @@ export function getActiveNeatlogsSpan(): Span | undefined {
 }
 
 /**
+ * Return the trace-ROOT Neatlogs span, or undefined when no trace is active.
+ *
+ * Unlike {@link getActiveNeatlogsSpan} (innermost), this is the outermost span
+ * of the current trace — the one the backend derives trace-level output from
+ * (`parent_span_id=''`). It is stashed on the private context the first time a
+ * span becomes active, so nested calls still resolve to the root.
+ */
+export function getNeatlogsRootSpan(): Span | undefined {
+  return getNeatlogsActiveContext().getValue(NEATLOGS_ROOT_SPAN_KEY) as
+    | Span
+    | undefined;
+}
+
+/**
  * Build a parent context that cannot contain a foreign provider's span.
  *
  * The active Neatlogs context already carries the parent span AND any values
@@ -208,6 +228,11 @@ export function withNeatlogsSpan<T>(
   baseContext?: Context,
 ): T {
   const base = baseContext ?? getNeatlogsActiveContext();
-  const ctx = otelTrace.setSpan(base, span);
+  let ctx = otelTrace.setSpan(base, span);
+  // The first span activated in a context with no root recorded IS the root of
+  // this trace; remember it so descendants (setTraceOutput) can target it.
+  if (base.getValue(NEATLOGS_ROOT_SPAN_KEY) === undefined) {
+    ctx = ctx.setValue(NEATLOGS_ROOT_SPAN_KEY, span);
+  }
   return privateContextStorage.run(ctx, fn);
 }

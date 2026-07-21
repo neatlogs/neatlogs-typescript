@@ -26,7 +26,7 @@ export { init, flush, shutdown, isDebugEnabled, getSessionConfig } from './init.
 
 // Instrumentation
 export { span, Span } from './decorators/index.js';
-export { trace } from './core/context.js';
+export { trace, setTraceOutput } from './core/context.js';
 export { log } from './core/log.js';
 
 // Request-scoped session & end-user identity (per-request, not process-global).

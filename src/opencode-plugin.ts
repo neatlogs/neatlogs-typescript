@@ -4,14 +4,18 @@
  * opencode loads plugins from its config (`opencode.json` → `"plugin": [...]`)
  * or from local `.opencode/plugin/*.ts` files. A plugin is an async factory that
  * receives an app context and returns lifecycle hooks. This plugin instruments
- * opencode automatically — no per-call wiring — turning an opencode session into
- * a neatlogs span tree:
+ * opencode automatically — no per-call wiring — turning each opencode TURN into
+ * its own neatlogs trace (mirrors @neatlogs/claude-code):
  *
- *   AGENT  opencode.session       (one per user turn; parents that turn's spans)
- *     ↳ LLM   assistant turn      (per completed assistant message)
- *     ↳ TOOL  tool execution      (tool.execute.before → tool.execute.after)
+ *   WORKFLOW  opencode.turn        (one TRACE per user turn; parents that turn's spans)
+ *     ↳ LLM   assistant turn       (per completed assistant message)
+ *     ↳ TOOL  tool execution       (tool.execute.before → tool.execute.after)
  *
- * Every span carries `neatlogs.conversation.id` = the opencode session ID.
+ * A turn opens on `chat.message` and closes on `session.idle` (which fires after
+ * the turn's full tool-loop settles) — NOT on each `message.completed`, so a
+ * multi-round tool-using turn stays one trace. Every span carries
+ * `neatlogs.conversation.id` = the opencode session ID and a per-turn trace id;
+ * all of a session's turn-traces are grouped in the UI via `neatlogs.session.id`.
  *
  * Export model (mirrors @raindrop-ai/opencode-plugin and neatlogs-claude-code):
  * opencode loads the plugin in-process but `opencode run` is short-lived. Rather
@@ -60,9 +64,10 @@ interface OpenSpan {
 }
 
 interface SessionState {
-  /** Per-session trace id — all spans in a session share it. */
-  traceId: Uint8Array;
-  /** The current turn's AGENT root span (created on chat.message, ended on idle). */
+  /** Per-TURN trace id — minted when the turn's root opens, so each turn is its
+   * own trace. Undefined between turns. */
+  traceId?: Uint8Array;
+  /** The current turn's WORKFLOW root span (created on chat.message, ended on idle). */
   rootSpan?: OpenSpan;
   /** Open TOOL spans keyed by callID → start time. */
   toolStarts: Map<string, { spanId: Uint8Array; startNano: string; tool: string; args: any }>;
@@ -95,7 +100,6 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
     let s = sessions.get(sessionID);
     if (!s) {
       s = {
-        traceId: generateTraceId(),
         toolStarts: new Map(),
         outputParts: new Map(),
         toolCalls: new Map(),
@@ -108,26 +112,31 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
     return s;
   }
 
-  /** Start the per-turn AGENT root span (idempotent within a turn). */
+  /** Start the per-turn WORKFLOW root span, minting a fresh trace id for this
+   * turn (idempotent within a turn). `neatlogs.session.id` groups the session's
+   * turn-traces in the UI. */
   function startRoot(st: SessionState, sessionID: string): void {
     if (st.rootSpan) return;
+    st.traceId = generateTraceId();
     st.rootSpan = {
       spanId: generateSpanId(),
-      name: 'opencode.session',
+      name: 'opencode.turn',
       startNano: nowNanoString(),
       attributes: [
-        { key: 'neatlogs.span.kind', value: { stringValue: 'AGENT' } },
+        { key: 'neatlogs.span.kind', value: { stringValue: 'WORKFLOW' } },
         { key: 'neatlogs.agent.framework', value: { stringValue: 'opencode' } },
         { key: 'neatlogs.conversation.id', value: { stringValue: sessionID } },
+        { key: 'neatlogs.session.id', value: { stringValue: sessionID } },
       ],
     };
   }
 
-  /** End + enqueue the AGENT root, send the completion marker, and flush. */
+  /** End + enqueue the WORKFLOW turn root, send the completion marker, and flush.
+   * Clears the turn's trace id + accumulators so the next turn is a fresh trace. */
   async function closeAndFlush(st: SessionState, sessionID: string): Promise<void> {
-    if (st.rootSpan) {
+    if (st.rootSpan && st.traceId) {
       const attrs = st.rootSpan.attributes.slice();
-      setIO(attrs, 'AGENT', st.currentInput || undefined, st.lastAssistantText || undefined);
+      setIO(attrs, 'WORKFLOW', st.currentInput || undefined, st.lastAssistantText || undefined);
       shipper.enqueue({
         traceId: st.traceId,
         spanId: st.rootSpan.spanId,
@@ -155,13 +164,38 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
           { key: 'neatlogs.span.kind', value: { stringValue: 'Neatlogs.INTERNAL' } },
         ],
       });
-      st.rootSpan = undefined;
     }
+    // Reset per-turn state so the next chat.message opens a brand-new trace.
+    st.rootSpan = undefined;
+    st.traceId = undefined;
+    st.currentInput = '';
+    st.lastAssistantText = '';
+    st.processed.clear();
+    st.outputParts.clear();
+    st.toolCalls.clear();
     await shipper.flush();
     void sessionID;
   }
 
   return {
+    /**
+     * Awaited by opencode on scope teardown (registered via an internal
+     * `addFinalizer`), unlike the fire-and-forget `event` hook. On a short-lived
+     * `opencode run`, `session.idle`'s `await shipper.flush()` is a dangling
+     * promise the process kills before the POST resolves — so we close any turn
+     * still open and `settle()` all in-flight flushes here, before exit.
+     */
+    dispose: async () => {
+      try {
+        for (const [sessionID, st] of sessions) {
+          if (st.rootSpan) await closeAndFlush(st, sessionID);
+        }
+        await shipper.settle();
+      } catch {
+        /* never break opencode over tracing */
+      }
+    },
+
     /** Fired when the user submits a prompt — open the turn's AGENT root. */
     'chat.message': async (_input: any, output: any) => {
       try {
@@ -233,6 +267,7 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
         const start = st.toolStarts.get(callID);
         if (!start) return;
         st.toolStarts.delete(callID);
+        if (!st.traceId) return;
 
         const attrs: OtlpKeyValue[] = [
           { key: 'neatlogs.span.kind', value: { stringValue: 'TOOL' } },
@@ -350,6 +385,7 @@ function handleEvent(
 }
 
 function emitLlmSpan(shipper: TraceShipper, st: SessionState, info: any, sessionID: string): void {
+  if (!st.traceId) return;
   const model = info?.modelID ?? info?.model ?? '';
   const provider = info?.providerID ?? info?.provider ?? '';
 
@@ -408,6 +444,7 @@ function emitLlmSpan(shipper: TraceShipper, st: SessionState, info: any, session
     push(attrs, attrInt('neatlogs.llm.token_count.cache_write', tokens.cache?.write));
   }
   push(attrs, attrDouble('neatlogs.llm.cost_usd', info?.cost));
+  push(attrs, attrStr('neatlogs.llm.finish_reason', info?.finish ? String(info.finish) : undefined));
 
   // Use opencode's real start time when available (else now).
   const createdMs = info?.time?.created;

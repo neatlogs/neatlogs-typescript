@@ -34,6 +34,7 @@ import {
   getActiveNeatlogsSpan,
   getNeatlogsActiveContext,
   getNeatlogsParentContext,
+  getNeatlogsRootSpan,
   getNeatlogsTracer,
   withNeatlogsSpan,
 } from './provider.js';
@@ -147,6 +148,42 @@ export function _finalizePromptCapture(
         `[trace] Auto-captured variables from UserPromptContext: ${Object.keys(capturedUserVars).join(', ')}`,
       );
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit trace-level output
+// ---------------------------------------------------------------------------
+
+/**
+ * Explicitly set the trace-level "final output" shown for the current trace.
+ *
+ * By default the trace's displayed output is derived from the root span's
+ * captured output. Call this to declare it instead — useful when the turn's
+ * meaningful result lives in a tool call or is a status object you don't want
+ * shown (e.g. an agent that suspends awaiting user input). The value is stamped
+ * as `neatlogs.trace.output` on the trace ROOT span, which the backend prefers
+ * over the derived output.
+ *
+ * No-op when called outside an active trace. Never throws.
+ *
+ * @param value - The value to show as the trace's final output.
+ *
+ * @example
+ * ```typescript
+ * await trace({ name: 'turn', sessionId }, async () => {
+ *   const plan = await proposePlan();
+ *   setTraceOutput(plan.title); // show the plan, not the raw status object
+ * });
+ * ```
+ */
+export function setTraceOutput(value: unknown): void {
+  try {
+    const span = getNeatlogsRootSpan() ?? getActiveNeatlogsSpan();
+    if (!span) return;
+    span.setAttribute('neatlogs.trace.output', safeJsonDumps(serializeObj(value)));
+  } catch (err) {
+    logger.warn(`[setTraceOutput] failed to set trace output: ${err}`);
   }
 }
 

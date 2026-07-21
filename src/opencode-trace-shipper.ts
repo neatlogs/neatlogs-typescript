@@ -262,6 +262,9 @@ export class TraceShipper {
   workflowName: string;
   private queue: OtlpSpan[] = [];
   private prefix = '[neatlogs/opencode]';
+  /** In-flight flush round-trips — awaited by `settle()` on dispose so a
+   * short-lived host (`opencode run`) can force pending exports to complete. */
+  private inflight = new Set<Promise<void>>();
 
   constructor(opts: TraceShipperOptions) {
     this.apiKey = opts.apiKey;
@@ -283,8 +286,28 @@ export class TraceShipper {
    * Ship all queued spans in a single awaited POST. Resolves only once the HTTP
    * response is received (or all retries are exhausted) — so a short-lived host
    * can safely exit immediately after awaiting this.
+   *
+   * The returned promise is also tracked in `inflight` so `settle()` can await
+   * it even when the caller (an un-awaited opencode `event` hook) drops it.
    */
-  async flush(): Promise<void> {
+  flush(): Promise<void> {
+    const p = this._flush().finally(() => this.inflight.delete(p));
+    this.inflight.add(p);
+    return p;
+  }
+
+  /**
+   * Await every flush started so far (including ones whose promise the caller
+   * discarded). Called from the plugin's `dispose` hook, which opencode DOES
+   * await on scope teardown — unlike the fire-and-forget `event` hook.
+   */
+  async settle(): Promise<void> {
+    while (this.inflight.size > 0) {
+      await Promise.allSettled(Array.from(this.inflight));
+    }
+  }
+
+  private async _flush(): Promise<void> {
     if (this.queue.length === 0) return;
     if (!this.apiKey) {
       this.queue = [];
