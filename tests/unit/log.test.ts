@@ -13,6 +13,7 @@ vi.mock('@opentelemetry/api', () => {
     spanContext: () => mockSpanContext,
   };
   return {
+    createContextKey: (name: string) => Symbol.for(name),
     ROOT_CONTEXT: {},
     context: {
       active: () => mockContext,

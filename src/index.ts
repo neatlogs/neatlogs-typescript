@@ -73,7 +73,7 @@ export { langchainHandler } from './langchain.js';
 export { strandsHooks } from './strands.js';
 export { openaiAgentsProcessor } from './openai-agents.js';
 export { wrapMastra } from './mastra-wrap.js';
-export { piAgentHooks } from './pi-agent.js';
+export { piAgentHooks, tracePiAgentEvents, tracePiStream } from './pi-agent.js';
 export { wrapClaudeAgentSDK } from './claude-agent-sdk.js';
 export { wrapOpenRouterAgent, wrapCallModel } from './openrouter-agent.js';
 export { NeatlogsOpencodePlugin } from './opencode-plugin.js';

@@ -35,6 +35,7 @@ vi.mock('@opentelemetry/api', () => {
     startActiveSpan: (name: string, fn: (span: any) => any) => fn(mockSpan),
   };
   return {
+    createContextKey: (name: string) => Symbol.for(name),
     trace: {
       // Shared mode resolves the tracer via the global provider.
       getTracerProvider: () => ({ getTracer: () => tracer }),

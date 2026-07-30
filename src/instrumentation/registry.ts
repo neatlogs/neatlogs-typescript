@@ -109,6 +109,7 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       'claude_agent_sdk',
       'openrouter_agent',
       'opencode',
+      'pi_agent',
     ],
     tool: ['langchain', 'llamaindex', 'haystack', 'mcp'],
     http: ['requests', 'httpx', 'urllib3', 'aiohttp'],
@@ -483,6 +484,13 @@ export const INSTRUMENTATION_REGISTRY: InstrumentationRegistryShape = {
       neatlogs: 'neatlogs/opencode',
       default_span_kind: 'AGENT',
       explicitWrapper: "NeatlogsOpencodePlugin from 'neatlogs/opencode'",
+    },
+    pi_agent: {
+      openinference: null,
+      openllmetry: null,
+      neatlogs: 'neatlogs/pi-agent',
+      default_span_kind: 'AGENT',
+      explicitWrapper: "piAgentHooks() from 'neatlogs/pi-agent'",
     },
   },
 };

@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "neatlogs": ["../../dist/index.d.ts"],
+      "neatlogs/pi-agent": ["../../dist/pi-agent.d.ts"]
+    }
+  },
+  "include": ["./**/*.ts", "./**/*.mts"]
+}

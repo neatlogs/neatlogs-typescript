@@ -793,6 +793,11 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     const llmOutput = attrs['neatlogs.llm.output'] as string | undefined;
     if (!llmOutput) return;
 
+    // Plenty of integrations put plain assistant text here — there is no model
+    // name to recover from that, so don't try to parse it as JSON.
+    const trimmed = llmOutput.trimStart();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return;
+
     try {
       const output = JSON.parse(llmOutput);
 
@@ -821,7 +826,10 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         }
       }
     } catch (e: unknown) {
-      logger.warn(`[ModelResolve] Failed to parse LLM output for model extraction: ${e}`);
+      // Best-effort enrichment only — never worth warning the user about.
+      if (this.debug) {
+        logger.debug(`[ModelResolve] Failed to parse LLM output for model extraction: ${e}`);
+      }
     }
   }
 
