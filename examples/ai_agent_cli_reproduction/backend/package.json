@@ -1,0 +1,23 @@
+{
+  "name": "ai-agent-cli",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx ./src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "tsx": "^4.20.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@google/genai": "^2.12.0",
+    "e2b": "^2.35.0",
+    "neatlogs": "file:../../..",
+    "openai": "^6.49.0",
+    "zod": "^4.4.3"
+  }
+}

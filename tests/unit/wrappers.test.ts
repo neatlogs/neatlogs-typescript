@@ -136,6 +136,82 @@ describe('wrapOpenAI', () => {
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(5);
   });
 
+  it('traces non-streaming responses.create output', async () => {
+    const fakeResponse = {
+      id: 'resp-123',
+      model: 'gpt-5.1',
+      status: 'completed',
+      output_text: 'A complete response',
+      output: [],
+      usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 },
+    };
+    const wrapped = wrapOpenAI({
+      responses: { create: async () => fakeResponse },
+    } as any);
+
+    const result = await wrapped.responses.create({ model: 'gpt-5.1', input: 'Hello' });
+
+    expect(result).toEqual(fakeResponse);
+    const spans = getSpans();
+    expect(spans.length).toBe(1);
+    expect(attr(spans[0], 'input.value')).toBe('Hello');
+    expect(attr(spans[0], 'output.value')).toBe('A complete response');
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('A complete response');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.total')).toBe(11);
+  });
+
+  it('keeps a streaming responses.create span open and captures its final output', async () => {
+    const events = [
+      { type: 'response.output_text.delta', delta: 'Hello ' },
+      { type: 'response.output_text.delta', delta: 'world' },
+      {
+        type: 'response.completed',
+        response: {
+          model: 'gpt-5.1',
+          status: 'completed',
+          output_text: 'Hello world',
+          output: [],
+          usage: {
+            input_tokens: 7,
+            output_tokens: 2,
+            total_tokens: 9,
+            input_tokens_details: { cached_tokens: 4 },
+            output_tokens_details: { reasoning_tokens: 1 },
+          },
+        },
+      },
+    ];
+    async function* fakeStream() {
+      for (const event of events) yield event;
+    }
+    const wrapped = wrapOpenAI({
+      responses: {
+        create: async () => {
+          const iterator = fakeStream();
+          return { [Symbol.asyncIterator]: () => iterator };
+        },
+      },
+    } as any);
+
+    const stream = await wrapped.responses.create({ model: 'gpt-5.1', input: 'Hi', stream: true });
+    expect(getSpans()).toHaveLength(0);
+
+    const collected: any[] = [];
+    for await (const event of stream) collected.push(event);
+
+    expect(collected).toEqual(events);
+    const spans = getSpans();
+    expect(spans).toHaveLength(1);
+    expect(attr(spans[0], 'neatlogs.llm.is_streaming')).toBe(true);
+    expect(attr(spans[0], 'output.value')).toBe('Hello world');
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello world');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(7);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(2);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.total')).toBe(9);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.cache_read')).toBe(4);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.reasoning')).toBe(1);
+  });
+
   it('traceTool wraps a function with TOOL span', async () => {
     const getWeather = traceToolOpenAI('get_weather', async (args: { city: string }) => {
       return `Sunny in ${args.city}`;

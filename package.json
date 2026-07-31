@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.1.13",
+  "version": "1.1.14",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -205,6 +205,7 @@
     "example:openrouter": "tsx examples/sdk_examples/openrouter_agent_basic/main.ts",
     "example:pi-agent": "tsx examples/pi_agent_workflow/main.mts",
     "example:pi-agent:surface": "tsx examples/pi_agent_workflow/surface.mts",
+    "example:ai-agent-cli": "npm --prefix examples/ai_agent_cli_reproduction/backend run dev --",
     "test:examples:original7": "node scripts/run-original7-examples.mjs",
     "verify:logs": "node scripts/verify-original7-logs.mjs"
   },
