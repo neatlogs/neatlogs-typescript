@@ -105,7 +105,14 @@ export function _setSpanAttributes(
   kind: string | undefined,
   attributes: Record<string, any>,
 ): void {
-  span.setAttribute('neatlogs.internal', true);
+  // trace() is also the public API for user-visible WORKFLOW, AGENT, TOOL,
+  // EMBEDDING, and other spans. Marking every trace() span as internal causes
+  // those spans (and an all-internal trace) to be filtered by ingestion. Only
+  // the synthetic LLM wrapper span is internal by default; callers can still
+  // opt any other span into internal handling through explicit attributes.
+  if (kind?.toUpperCase() === 'LLM') {
+    span.setAttribute('neatlogs.internal', true);
+  }
   span.setAttribute('openinference.span.kind', kind ?? 'CHAIN');
 
   for (const [key, value] of Object.entries(attributes)) {
@@ -248,9 +255,16 @@ export async function trace<T>(
   // Session identity is NOT process-global — init() never sets it.
   const sessionId = sessionIdOption ?? currentSessionId();
 
-  // Determine whether we are inside an existing active trace
+  // Determine whether we are inside an existing active trace. Delayed work can
+  // retain an already-ended intermediate span in AsyncLocalStorage while its
+  // trace root is deliberately still recording. In that case, fall back to the
+  // live root instead of incorrectly opening a new standalone trace.
   const currentSpan = getActiveNeatlogsSpan();
-  const isInActiveTrace = currentSpan !== undefined && currentSpan.isRecording();
+  const rootSpan = getNeatlogsRootSpan();
+  const currentSpanIsRecording = currentSpan?.isRecording() === true;
+  const rootSpanIsRecording = rootSpan?.isRecording() === true;
+  const shouldFallbackToRoot = !currentSpanIsRecording && rootSpanIsRecording;
+  const isInActiveTrace = currentSpanIsRecording || rootSpanIsRecording;
   const shouldCreateRootTrace = !!sessionId && !isInActiveTrace;
 
   // ---------------------------------------------------------------------------
@@ -304,6 +318,9 @@ export async function trace<T>(
   // active span must never become our parent. Prompt values threaded here then
   // propagate to descendant LLM spans through the private store.
   let ctx = getNeatlogsActiveContext();
+  if (shouldFallbackToRoot) {
+    ctx = otelTrace.setSpan(ctx, rootSpan!);
+  }
 
   const variablesJson = promptVariables ? JSON.stringify(promptVariables) : undefined;
   const userVariablesJson = userPromptVariables ? JSON.stringify(userPromptVariables) : undefined;

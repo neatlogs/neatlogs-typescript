@@ -361,7 +361,7 @@ describe('_setSpanAttributes edge cases', () => {
     const spans = exporter.getFinishedSpans();
     const span = spans.find((s) => s.name === 'empty-attrs');
     expect(span).toBeDefined();
-    expect(span!.attributes['neatlogs.internal']).toBe(true);
+    expect(span!.attributes['neatlogs.internal']).toBeUndefined();
     expect(span!.attributes['openinference.span.kind']).toBe('CHAIN');
   });
 
