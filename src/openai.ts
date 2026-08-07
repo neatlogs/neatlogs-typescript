@@ -190,6 +190,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
     const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
+    const isStream = opts?.stream === true;
 
     const span = tracer.startSpan('openai.responses.create', {
       attributes: {
@@ -197,25 +198,21 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         'neatlogs.llm.provider': 'openai',
         'neatlogs.llm.system': 'openai',
         'neatlogs.llm.model_name': model,
+        'neatlogs.llm.is_streaming': isStream,
         'input.value': safeStringify(opts?.input ?? ''),
       },
     }, getNeatlogsParentContext());
+
+    setInvocationParams(span, opts);
 
     const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
       (response: any) => {
-        if (response?.output_text) {
-          span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          span.setAttribute('neatlogs.llm.output_messages.0.content', response.output_text);
+        if (isStream) {
+          return wrapResponsesAsyncIterableStream(response, span);
         }
-        if (response?.model) span.setAttribute('neatlogs.llm.model_name', response.model);
-        if (response?.usage) {
-          if (response.usage.input_tokens != null) span.setAttribute('neatlogs.llm.token_count.prompt', response.usage.input_tokens);
-          if (response.usage.output_tokens != null) span.setAttribute('neatlogs.llm.token_count.completion', response.usage.output_tokens);
-        }
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.end();
+        finalizeResponsesResponse(span, response);
         return response;
       },
       (err: any) => {
@@ -224,6 +221,132 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
       },
     );
   };
+}
+
+/**
+ * Keep a Responses API LLM span open until a streamed response is consumed.
+ * `responses.create({ stream: true })` resolves to an async iterable immediately;
+ * the assistant text and usage arrive later in `response.*` events.
+ */
+function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
+  const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
+
+  if (!originalAsyncIterator) {
+    // Be defensive about clients that ignore `stream: true` and return a normal
+    // response object.
+    finalizeResponsesResponse(span, stream);
+    return stream;
+  }
+
+  const textParts: string[] = [];
+  let completedResponse: any;
+  let finalized = false;
+
+  const finalize = () => {
+    if (finalized) return;
+    finalized = true;
+    finalizeResponsesResponse(span, completedResponse, textParts.join(''));
+  };
+
+  // A proxy preserves the OpenAI stream's public surface. Binding methods back
+  // to the original object also avoids breaking SDK classes with private fields.
+  return new Proxy(stream, {
+    get(target, prop) {
+      if (prop === Symbol.asyncIterator) {
+        return () => {
+          const iterator = originalAsyncIterator();
+          return {
+            async next(): Promise<IteratorResult<any>> {
+              try {
+                const result = await iterator.next();
+                if (result.done) {
+                  finalize();
+                  return result;
+                }
+
+                const event = result.value;
+                if (event?.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+                  textParts.push(event.delta);
+                } else if (event?.type === 'response.completed') {
+                  completedResponse = event.response;
+                }
+                return result;
+              } catch (err) {
+                if (!finalized) {
+                  finalized = true;
+                  recordError(span, err);
+                }
+                throw err;
+              }
+            },
+            async return(value?: any): Promise<IteratorResult<any>> {
+              try {
+                return await (iterator.return?.(value) ?? { done: true, value });
+              } finally {
+                finalize();
+              }
+            },
+            async throw(err?: any): Promise<IteratorResult<any>> {
+              if (!finalized) {
+                finalized = true;
+                recordError(span, err);
+              }
+              if (iterator.throw) return iterator.throw(err);
+              throw err;
+            },
+          };
+        };
+      }
+
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+function finalizeResponsesResponse(span: Span, response: any, streamedText = ''): void {
+  const text = response?.output_text || streamedText || extractResponsesOutputText(response?.output);
+  if (text) {
+    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
+    span.setAttribute('neatlogs.llm.output_messages.0.content', text);
+    span.setAttribute('output.value', text);
+  } else if (response?.output) {
+    // Tool-call-only responses still have a meaningful structured output.
+    span.setAttribute('output.value', safeStringify(response.output));
+  }
+
+  if (response?.model) span.setAttribute('neatlogs.llm.model_name', response.model);
+  if (response?.status) span.setAttribute('neatlogs.llm.finish_reason', response.status);
+
+  const usage = response?.usage;
+  if (usage) {
+    if (usage.input_tokens != null) span.setAttribute('neatlogs.llm.token_count.prompt', usage.input_tokens);
+    if (usage.output_tokens != null) span.setAttribute('neatlogs.llm.token_count.completion', usage.output_tokens);
+    if (usage.total_tokens != null) span.setAttribute('neatlogs.llm.token_count.total', usage.total_tokens);
+    if (usage.input_tokens_details?.cached_tokens != null) {
+      span.setAttribute('neatlogs.llm.token_count.cache_read', usage.input_tokens_details.cached_tokens);
+    }
+    if (usage.output_tokens_details?.reasoning_tokens != null) {
+      span.setAttribute('neatlogs.llm.token_count.reasoning', usage.output_tokens_details.reasoning_tokens);
+    }
+  }
+
+  span.setStatus({ code: SpanStatusCode.OK });
+  span.end();
+}
+
+function extractResponsesOutputText(output: any): string {
+  if (!Array.isArray(output)) return '';
+  const parts: string[] = [];
+  for (const item of output) {
+    if (item?.type !== 'message' || !Array.isArray(item.content)) continue;
+    for (const content of item.content) {
+      if (content?.type === 'output_text' && typeof content.text === 'string') {
+        parts.push(content.text);
+      }
+    }
+  }
+  return parts.join('');
 }
 
 // ---------------------------------------------------------------------------
