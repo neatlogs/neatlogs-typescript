@@ -132,6 +132,12 @@ export interface SpanOptions {
    * backend groups traces by it; when absent it falls back to the trace id.
    */
   sessionId?: string;
+  /** Optional immediate parent session. */
+  parentSessionId?: string;
+  /** Product feature that initiated this request. */
+  sessionFeatureName?: string;
+  /** Application entry point that initiated this request. */
+  sessionEntryPoint?: string;
 
   // End-user identity (one end-user per trace; usually set on the WORKFLOW root)
   /**
@@ -158,6 +164,14 @@ export interface TraceOptions {
   name: string;
   /** Span kind. Defaults to 'CHAIN'. */
   kind?: SpanKind;
+  /** Session this root trace belongs to. */
+  sessionId?: string;
+  /** Optional immediate parent session. */
+  parentSessionId?: string;
+  /** Product feature that initiated this request. */
+  sessionFeatureName?: string;
+  /** Application entry point that initiated this request. */
+  sessionEntryPoint?: string;
   /** Input data for this span. Auto-serialized to input.value. */
   input?: any;
   /** Prompt template to associate with this trace (string or PromptTemplate instance). */

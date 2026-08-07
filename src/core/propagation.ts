@@ -6,12 +6,23 @@
  * should travel.
  */
 
-import { TraceFlags } from '@opentelemetry/api';
-import { getActiveNeatlogsSpan } from './provider.js';
+import {
+  TraceFlags,
+  createTraceState,
+  trace as otelTrace,
+  type SpanContext,
+} from '@opentelemetry/api';
+import {
+  getActiveNeatlogsSpan,
+  withNeatlogsRemoteParent,
+} from './provider.js';
 
 export type TraceContextCarrier =
-  | Record<string, string>
-  | { set(name: string, value: string): unknown };
+  | Record<string, string | undefined>
+  | {
+      get?(name: string): string | null | undefined;
+      set?(name: string, value: string): unknown;
+    };
 
 /**
  * Inject the active private Neatlogs span as W3C `traceparent`/`tracestate`
@@ -48,6 +59,65 @@ export function injectTraceContext(carrier: TraceContextCarrier): boolean {
   return true;
 }
 
+/**
+ * Run a callback under a remote W3C parent in Neatlogs' private context.
+ * Invalid or absent context is ignored, so request handling remains fail-open.
+ * The process-global OpenTelemetry context and propagator are never touched.
+ */
+export function extractTraceContext<T>(
+  carrier: TraceContextCarrier,
+  fn: () => T,
+): T {
+  const spanContext = parseTraceParent(
+    getHeader(carrier, 'traceparent'),
+    getHeader(carrier, 'tracestate'),
+  );
+  if (!spanContext) {
+    return fn();
+  }
+  return withNeatlogsRemoteParent(otelTrace.wrapSpanContext(spanContext), fn);
+}
+
+function parseTraceParent(
+  traceparent: string | undefined,
+  tracestate: string | undefined,
+): SpanContext | undefined {
+  const match = traceparent?.trim().match(
+    /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/,
+  );
+  if (
+    !match ||
+    match[1] === '00000000000000000000000000000000' ||
+    match[2] === '0000000000000000'
+  ) {
+    return undefined;
+  }
+  const flags = Number.parseInt(match[3], 16);
+  return {
+    traceId: match[1],
+    spanId: match[2],
+    traceFlags:
+      flags & TraceFlags.SAMPLED ? TraceFlags.SAMPLED : TraceFlags.NONE,
+    isRemote: true,
+    ...(tracestate?.trim()
+      ? { traceState: createTraceState(tracestate.trim()) }
+      : {}),
+  };
+}
+
+function getHeader(
+  carrier: TraceContextCarrier,
+  name: string,
+): string | undefined {
+  const getter = (carrier as { get?: unknown }).get;
+  if (typeof getter === 'function') {
+    const value = getter.call(carrier, name);
+    return typeof value === 'string' ? value : undefined;
+  }
+  const record = carrier as Record<string, string | undefined>;
+  return record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
+}
+
 function setHeader(
   carrier: TraceContextCarrier,
   name: string,
@@ -57,5 +127,5 @@ function setHeader(
     carrier.set(name, value);
     return;
   }
-  (carrier as Record<string, string>)[name] = value;
+  (carrier as Record<string, string | undefined>)[name] = value;
 }

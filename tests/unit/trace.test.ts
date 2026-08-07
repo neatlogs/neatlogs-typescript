@@ -29,6 +29,7 @@ import {
   _setNeatlogsProvider,
   withNeatlogsSpan,
 } from '../../src/core/provider.js';
+import { identify } from '../../src/core/identity.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -184,6 +185,30 @@ describe('trace()', () => {
     expect(agent!.parentSpanId).toBe(root!.spanContext().spanId);
     expect(embedding!.spanContext().traceId).toBe(root!.spanContext().traceId);
     expect(embedding!.parentSpanId).toBe(root!.spanContext().spanId);
+    expect(embedding!.attributes['neatlogs.internal']).toBeUndefined();
+  });
+
+  it('should preserve an ended inherited parent when no live root reference is available', async () => {
+    const tracer = provider.getTracer('test');
+    const inheritedParent = tracer.startSpan('inherited-ended-agent');
+
+    await withNeatlogsSpan(inheritedParent, async () => {
+      inheritedParent.end();
+      await identify({ sessionId: 'session-detached-embedding' }, async () => {
+        await trace(
+          { name: 'detached-delayed-embedding', kind: 'EMBEDDING' },
+          async () => {},
+        );
+      });
+    });
+
+    const spans = exporter.getFinishedSpans();
+    const parent = spans.find((s) => s.name === 'inherited-ended-agent');
+    const embedding = spans.find((s) => s.name === 'detached-delayed-embedding');
+    expect(parent).toBeDefined();
+    expect(embedding).toBeDefined();
+    expect(embedding!.spanContext().traceId).toBe(parent!.spanContext().traceId);
+    expect(embedding!.parentSpanId).toBe(parent!.spanContext().spanId);
     expect(embedding!.attributes['neatlogs.internal']).toBeUndefined();
   });
 

@@ -88,6 +88,9 @@ const KNOWN_OPTION_KEYS = new Set([
   'mask',
   'attributes',
   'sessionId',
+  'parentSessionId',
+  'sessionFeatureName',
+  'sessionEntryPoint',
   'endUserId',
   'endUserMetadata',
 ]);
@@ -245,6 +248,9 @@ export async function trace<T>(
     version,
     mask,
     sessionId: sessionIdOption,
+    parentSessionId,
+    sessionFeatureName,
+    sessionEntryPoint,
     endUserId,
     endUserMetadata,
     attributes: explicitAttributes,
@@ -255,17 +261,20 @@ export async function trace<T>(
   // Session identity is NOT process-global — init() never sets it.
   const sessionId = sessionIdOption ?? currentSessionId();
 
-  // Determine whether we are inside an existing active trace. Delayed work can
-  // retain an already-ended intermediate span in AsyncLocalStorage while its
-  // trace root is deliberately still recording. In that case, fall back to the
-  // live root instead of incorrectly opening a new standalone trace.
+  // Determine whether we are inside an existing trace. Delayed work can retain
+  // an already-ended intermediate span in AsyncLocalStorage. Prefer a live root
+  // when one is available; if the root reference is unavailable, preserve the
+  // ended parent context so the delayed span keeps the original trace id instead
+  // of incorrectly opening a new standalone trace.
   const currentSpan = getActiveNeatlogsSpan();
   const rootSpan = getNeatlogsRootSpan();
   const currentSpanIsRecording = currentSpan?.isRecording() === true;
   const rootSpanIsRecording = rootSpan?.isRecording() === true;
   const shouldFallbackToRoot = !currentSpanIsRecording && rootSpanIsRecording;
-  const isInActiveTrace = currentSpanIsRecording || rootSpanIsRecording;
-  const shouldCreateRootTrace = !!sessionId && !isInActiveTrace;
+  const hasInheritedTraceContext =
+    currentSpan !== undefined || rootSpan !== undefined;
+  const shouldCreateRootTrace =
+    !!sessionId && !hasInheritedTraceContext && !rootSpanIsRecording;
 
   // ---------------------------------------------------------------------------
   // Process prompt templates
@@ -359,7 +368,7 @@ export async function trace<T>(
 
   // End-user belongs to the trace root only. This trace() call is a root when it
   // creates a new root trace, or when it isn't nested in an already-active trace.
-  const isRootTrace = shouldCreateRootTrace || !isInActiveTrace;
+  const isRootTrace = shouldCreateRootTrace || !hasInheritedTraceContext;
 
   // ---------------------------------------------------------------------------
   // Create span and execute callback
@@ -371,7 +380,11 @@ export async function trace<T>(
     _setSpanAttributes(span, kind, extraAttributes);
 
     // Session/end-user belong to the trace root only; skipped on a non-root span.
-    applySessionAttributes(span, sessionId, isRootTrace);
+    applySessionAttributes(span, sessionId, isRootTrace, {
+      parentSessionId,
+      sessionFeatureName,
+      sessionEntryPoint,
+    });
     applyEndUserAttributes(span, endUserId, endUserMetadata, isRootTrace);
 
     if (input !== undefined && input !== null) {

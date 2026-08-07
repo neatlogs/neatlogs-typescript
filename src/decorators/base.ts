@@ -110,7 +110,11 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         setCommonSpanAttrs(span, opts);
 
         // Session/end-user identity (root span only; skipped on a non-root child).
-        applySessionAttributes(span, opts.sessionId, isRoot);
+        applySessionAttributes(span, opts.sessionId, isRoot, {
+          parentSessionId: opts.parentSessionId,
+          sessionFeatureName: opts.sessionFeatureName,
+          sessionEntryPoint: opts.sessionEntryPoint,
+        });
         applyEndUserAttributes(span, opts.endUserId, opts.endUserMetadata, isRoot);
 
         // Capture input

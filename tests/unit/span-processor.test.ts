@@ -456,6 +456,9 @@ describe('NeatlogsSpanProcessor', () => {
         parentSpanId: undefined,
         attributes: {
           'neatlogs.session.id': 'conversation-123',
+          'neatlogs.session.parent_id': 'conversation-parent',
+          'neatlogs.session.feature.name': 'copilot',
+          'neatlogs.session.entry_point': 'api',
           'neatlogs.end_user.id': 'user-456',
           'neatlogs.end_user.metadata': '{"plan":"pro"}',
         },
@@ -466,6 +469,18 @@ describe('NeatlogsSpanProcessor', () => {
       expect(mockSetAttribute).toHaveBeenCalledWith(
         'neatlogs.session.id',
         'conversation-123',
+      );
+      expect(mockSetAttribute).toHaveBeenCalledWith(
+        'neatlogs.session.parent_id',
+        'conversation-parent',
+      );
+      expect(mockSetAttribute).toHaveBeenCalledWith(
+        'neatlogs.session.feature.name',
+        'copilot',
+      );
+      expect(mockSetAttribute).toHaveBeenCalledWith(
+        'neatlogs.session.entry_point',
+        'api',
       );
       expect(mockSetAttribute).toHaveBeenCalledWith(
         'neatlogs.end_user.id',

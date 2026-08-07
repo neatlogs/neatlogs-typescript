@@ -236,3 +236,13 @@ export function withNeatlogsSpan<T>(
   }
   return privateContextStorage.run(ctx, fn);
 }
+
+/**
+ * @internal Run with a private Neatlogs parent without treating that parent as
+ * a locally-recording trace root. This is used for an extracted remote parent:
+ * the first local recording span should remain the target for local trace-level
+ * output, while still inheriting the remote trace/span IDs.
+ */
+export function withNeatlogsRemoteParent<T>(span: Span, fn: () => T): T {
+  return privateContextStorage.run(otelTrace.setSpan(ROOT_CONTEXT, span), fn);
+}
