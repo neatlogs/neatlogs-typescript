@@ -26,12 +26,21 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 export interface IdentityStore {
   sessionId?: string;
+  parentSessionId?: string;
+  sessionFeatureName?: string;
+  sessionEntryPoint?: string;
   endUserId?: string;
   endUserMetadata?: Record<string, any>;
 }
 
 export interface IdentifyOptions {
   sessionId?: string;
+  /** Optional immediate parent session. */
+  parentSessionId?: string;
+  /** Product feature that initiated this request. */
+  sessionFeatureName?: string;
+  /** Application entry point that initiated this request. */
+  sessionEntryPoint?: string;
   endUserId?: string;
   endUserMetadata?: Record<string, any>;
 }
@@ -52,6 +61,18 @@ const _storage: AsyncLocalStorage<IdentityStore> =
 
 export function currentSessionId(): string | undefined {
   return _storage.getStore()?.sessionId;
+}
+
+export function currentParentSessionId(): string | undefined {
+  return _storage.getStore()?.parentSessionId;
+}
+
+export function currentSessionFeatureName(): string | undefined {
+  return _storage.getStore()?.sessionFeatureName;
+}
+
+export function currentSessionEntryPoint(): string | undefined {
+  return _storage.getStore()?.sessionEntryPoint;
 }
 
 export function currentEndUserId(): string | undefined {
@@ -81,6 +102,9 @@ export function identify<T>(opts: IdentifyOptions, fn: () => T): T {
   const prev = _storage.getStore();
   const next: IdentityStore = { ...(prev ?? {}) };
   if (opts.sessionId !== undefined) next.sessionId = opts.sessionId;
+  if (opts.parentSessionId !== undefined) next.parentSessionId = opts.parentSessionId;
+  if (opts.sessionFeatureName !== undefined) next.sessionFeatureName = opts.sessionFeatureName;
+  if (opts.sessionEntryPoint !== undefined) next.sessionEntryPoint = opts.sessionEntryPoint;
   if (opts.endUserId !== undefined) next.endUserId = opts.endUserId;
   if (opts.endUserMetadata !== undefined) next.endUserMetadata = opts.endUserMetadata;
   return _storage.run(next, fn);

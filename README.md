@@ -250,6 +250,10 @@ const result = await trace({
 |--------|------|---------|-------------|
 | `name` | `string` | — | **Required.** Name for the trace span. |
 | `kind` | `SpanKind` | `'CHAIN'` | Span kind. |
+| `sessionId` | `string` | — | Session ID for grouping this root trace. |
+| `parentSessionId` | `string` | — | Immediate parent session ID. |
+| `sessionFeatureName` | `string` | — | Product feature that initiated the session request. |
+| `sessionEntryPoint` | `string` | — | Application entry point that initiated the session request. |
 | `promptTemplate` | `string &#124; PromptTemplate` | — | Prompt template to track. |
 | `promptVariables` | `Record<string, any>` | — | Prompt variables for the template. |
 | `userPromptTemplate` | `string &#124; UserPromptTemplate` | — | User prompt template. |

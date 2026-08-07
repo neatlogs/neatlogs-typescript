@@ -29,6 +29,7 @@ import {
   _setNeatlogsProvider,
   withNeatlogsSpan,
 } from '../../src/core/provider.js';
+import { identify } from '../../src/core/identity.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -96,13 +97,21 @@ describe('trace()', () => {
     expect(testSpan).toBeDefined();
   });
 
-  it('should set neatlogs.internal = true on the span', async () => {
-    await trace({ name: 'internal-test' }, async () => {});
+  it('should mark only LLM trace wrappers internal by default', async () => {
+    await trace({ name: 'chain-test', kind: 'CHAIN' }, async () => {});
+    await trace({ name: 'embedding-test', kind: 'EMBEDDING' }, async () => {});
+    await trace({ name: 'llm-test', kind: 'LLM' }, async () => {});
 
     const spans = exporter.getFinishedSpans();
-    const span = spans.find((s) => s.name === 'internal-test');
-    expect(span).toBeDefined();
-    expect(span!.attributes['neatlogs.internal']).toBe(true);
+    expect(
+      spans.find((s) => s.name === 'chain-test')!.attributes['neatlogs.internal'],
+    ).toBeUndefined();
+    expect(
+      spans.find((s) => s.name === 'embedding-test')!.attributes['neatlogs.internal'],
+    ).toBeUndefined();
+    expect(
+      spans.find((s) => s.name === 'llm-test')!.attributes['neatlogs.internal'],
+    ).toBe(true);
   });
 
   it('should set openinference.span.kind to CHAIN by default', async () => {
@@ -140,6 +149,67 @@ describe('trace()', () => {
     expect(child!.spanContext().traceId).toBe(parent!.spanContext().traceId);
     // Child's parentSpanId should be parent's spanId
     expect(child!.parentSpanId).toBe(parent!.spanContext().spanId);
+  });
+
+  it('should parent delayed work to a recording root after its intermediate span ends', async () => {
+    let releaseDelayedWork!: () => void;
+    let delayedWork!: Promise<void>;
+    const delayedWorkGate = new Promise<void>((resolve) => {
+      releaseDelayedWork = resolve;
+    });
+
+    await trace(
+      { name: 'long-lived-root', kind: 'WORKFLOW', sessionId: 'session-delayed' },
+      async () => {
+        await trace({ name: 'short-lived-agent', kind: 'AGENT' }, async () => {
+          // This async chain captures the agent's private context. It resumes only
+          // after that intermediate span has ended, while the outer root remains open.
+          delayedWork = (async () => {
+            await delayedWorkGate;
+            await trace({ name: 'delayed-embedding', kind: 'EMBEDDING' }, async () => {});
+          })();
+        });
+
+        releaseDelayedWork();
+        await delayedWork;
+      },
+    );
+
+    const spans = exporter.getFinishedSpans();
+    const root = spans.find((s) => s.name === 'long-lived-root');
+    const agent = spans.find((s) => s.name === 'short-lived-agent');
+    const embedding = spans.find((s) => s.name === 'delayed-embedding');
+    expect(root).toBeDefined();
+    expect(agent).toBeDefined();
+    expect(embedding).toBeDefined();
+    expect(agent!.parentSpanId).toBe(root!.spanContext().spanId);
+    expect(embedding!.spanContext().traceId).toBe(root!.spanContext().traceId);
+    expect(embedding!.parentSpanId).toBe(root!.spanContext().spanId);
+    expect(embedding!.attributes['neatlogs.internal']).toBeUndefined();
+  });
+
+  it('should preserve an ended inherited parent when no live root reference is available', async () => {
+    const tracer = provider.getTracer('test');
+    const inheritedParent = tracer.startSpan('inherited-ended-agent');
+
+    await withNeatlogsSpan(inheritedParent, async () => {
+      inheritedParent.end();
+      await identify({ sessionId: 'session-detached-embedding' }, async () => {
+        await trace(
+          { name: 'detached-delayed-embedding', kind: 'EMBEDDING' },
+          async () => {},
+        );
+      });
+    });
+
+    const spans = exporter.getFinishedSpans();
+    const parent = spans.find((s) => s.name === 'inherited-ended-agent');
+    const embedding = spans.find((s) => s.name === 'detached-delayed-embedding');
+    expect(parent).toBeDefined();
+    expect(embedding).toBeDefined();
+    expect(embedding!.spanContext().traceId).toBe(parent!.spanContext().traceId);
+    expect(embedding!.parentSpanId).toBe(parent!.spanContext().spanId);
+    expect(embedding!.attributes['neatlogs.internal']).toBeUndefined();
   });
 
   it('should create a root span when session_id is set and no parent exists', async () => {
@@ -416,7 +486,7 @@ describe('trace()', () => {
 // ---------------------------------------------------------------------------
 
 describe('_setSpanAttributes', () => {
-  it('should set neatlogs.internal and openinference.span.kind', async () => {
+  it('should leave non-LLM spans visible and set openinference.span.kind', async () => {
     const tracer = provider.getTracer('test');
     await tracer.startActiveSpan('helper-test', async (span) => {
       _setSpanAttributes(span, 'AGENT', {});
@@ -425,8 +495,19 @@ describe('_setSpanAttributes', () => {
 
     const spans = exporter.getFinishedSpans();
     const span = spans.find((s) => s.name === 'helper-test');
-    expect(span!.attributes['neatlogs.internal']).toBe(true);
+    expect(span!.attributes['neatlogs.internal']).toBeUndefined();
     expect(span!.attributes['openinference.span.kind']).toBe('AGENT');
+  });
+
+  it('should set neatlogs.internal for LLM spans', async () => {
+    const tracer = provider.getTracer('test');
+    await tracer.startActiveSpan('helper-llm', async (span) => {
+      _setSpanAttributes(span, 'LLM', {});
+      span.end();
+    });
+
+    const span = exporter.getFinishedSpans().find((s) => s.name === 'helper-llm');
+    expect(span!.attributes['neatlogs.internal']).toBe(true);
   });
 
   it('should default kind to CHAIN', async () => {

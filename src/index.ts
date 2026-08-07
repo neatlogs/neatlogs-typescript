@@ -30,8 +30,9 @@ export { trace, setTraceOutput } from './core/context.js';
 export { log } from './core/log.js';
 
 // Request-scoped session & end-user identity (per-request, not process-global).
-export { identify } from './core/identity.js';
+export { identify, type IdentifyOptions } from './core/identity.js';
 export {
+  extractTraceContext,
   injectTraceContext,
   type TraceContextCarrier,
 } from './core/propagation.js';

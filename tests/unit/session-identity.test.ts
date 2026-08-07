@@ -12,11 +12,19 @@ import {
 
 import { trace, _setSessionConfig } from '../../src/core/context.js';
 import { span } from '../../src/decorators/orchestration.js';
-import { SESSION_ID_KEY } from '../../src/core/session.js';
+import {
+  PARENT_SESSION_ID_KEY,
+  SESSION_ENTRY_POINT_KEY,
+  SESSION_FEATURE_NAME_KEY,
+  SESSION_ID_KEY,
+} from '../../src/core/session.js';
 import { END_USER_ID_KEY, END_USER_METADATA_KEY } from '../../src/core/end-user.js';
 import {
   identify,
   currentSessionId,
+  currentParentSessionId,
+  currentSessionFeatureName,
+  currentSessionEntryPoint,
   currentEndUserId,
   currentEndUserMetadata,
 } from '../../src/core/identity.js';
@@ -63,9 +71,73 @@ describe('session identity', () => {
     expect(inner?.attributes[SESSION_ID_KEY]).toBeUndefined();
   });
 
-  it('stamps session via the span() decorator on a WORKFLOW root', async () => {
+  it('stamps trimmed session lineage and origin fields on a trace() root', async () => {
+    await trace(
+      {
+        name: 'delegated_turn',
+        sessionId: 'child_123',
+        parentSessionId: '  parent_456  ',
+        sessionFeatureName: '  copilot  ',
+        sessionEntryPoint: '  api  ',
+      },
+      async () => 'ok',
+    );
+
+    const root = exporter.getFinishedSpans().find((s) => s.name === 'delegated_turn');
+    expect(root?.attributes[SESSION_ID_KEY]).toBe('child_123');
+    expect(root?.attributes[PARENT_SESSION_ID_KEY]).toBe('parent_456');
+    expect(root?.attributes[SESSION_FEATURE_NAME_KEY]).toBe('copilot');
+    expect(root?.attributes[SESSION_ENTRY_POINT_KEY]).toBe('api');
+  });
+
+  it('ignores empty values and a parent equal to the current session', async () => {
+    await trace(
+      {
+        name: 'self_parented_turn',
+        sessionId: 'same_123',
+        parentSessionId: '  same_123  ',
+        sessionFeatureName: '   ',
+        sessionEntryPoint: '',
+      },
+      async () => 'ok',
+    );
+
+    const root = exporter.getFinishedSpans().find((s) => s.name === 'self_parented_turn');
+    expect(root?.attributes[PARENT_SESSION_ID_KEY]).toBeUndefined();
+    expect(root?.attributes[SESSION_FEATURE_NAME_KEY]).toBeUndefined();
+    expect(root?.attributes[SESSION_ENTRY_POINT_KEY]).toBeUndefined();
+  });
+
+  it('ignores malformed optional values without breaking the trace', async () => {
+    await expect(
+      trace(
+        {
+          name: 'malformed_session_context',
+          sessionId: 'session_123',
+          parentSessionId: 42,
+          sessionFeatureName: {},
+          sessionEntryPoint: false,
+        } as any,
+        async () => 'ok',
+      ),
+    ).resolves.toBe('ok');
+
+    const root = exporter.getFinishedSpans().find((s) => s.name === 'malformed_session_context');
+    expect(root?.attributes[PARENT_SESSION_ID_KEY]).toBeUndefined();
+    expect(root?.attributes[SESSION_FEATURE_NAME_KEY]).toBeUndefined();
+    expect(root?.attributes[SESSION_ENTRY_POINT_KEY]).toBeUndefined();
+  });
+
+  it('stamps explicit session fields via the span() decorator on a WORKFLOW root', async () => {
     const handleTurn = span(
-      { kind: 'WORKFLOW', name: 'handleTurn', sessionId: 'chat_123' },
+      {
+        kind: 'WORKFLOW',
+        name: 'handleTurn',
+        sessionId: 'chat_123',
+        parentSessionId: 'parent_123',
+        sessionFeatureName: 'copilot',
+        sessionEntryPoint: 'api',
+      },
       () => 42,
     );
 
@@ -74,6 +146,31 @@ describe('session identity', () => {
     const spans = exporter.getFinishedSpans();
     const root = spans.find((s) => s.name === 'handleTurn');
     expect(root?.attributes[SESSION_ID_KEY]).toBe('chat_123');
+    expect(root?.attributes[PARENT_SESSION_ID_KEY]).toBe('parent_123');
+    expect(root?.attributes[SESSION_FEATURE_NAME_KEY]).toBe('copilot');
+    expect(root?.attributes[SESSION_ENTRY_POINT_KEY]).toBe('api');
+  });
+
+  it('ignores explicit session fields on a nested span() child', async () => {
+    const child = span(
+      {
+        kind: 'TOOL',
+        name: 'nestedTool',
+        sessionId: 'child_session',
+        parentSessionId: 'child_parent',
+        sessionFeatureName: 'child_feature',
+        sessionEntryPoint: 'child_entry',
+      },
+      () => 42,
+    );
+
+    await trace({ name: 'outer', sessionId: 'root_session' }, async () => child());
+
+    const nested = exporter.getFinishedSpans().find((s) => s.name === 'nestedTool');
+    expect(nested?.attributes[SESSION_ID_KEY]).toBeUndefined();
+    expect(nested?.attributes[PARENT_SESSION_ID_KEY]).toBeUndefined();
+    expect(nested?.attributes[SESSION_FEATURE_NAME_KEY]).toBeUndefined();
+    expect(nested?.attributes[SESSION_ENTRY_POINT_KEY]).toBeUndefined();
   });
 });
 
@@ -92,6 +189,28 @@ describe('identify() request-scoped identity', () => {
     expect(root?.attributes[END_USER_METADATA_KEY]).toBe(JSON.stringify({ plan: 'pro' }));
   });
 
+  it('stamps request-scoped session lineage and origin fields from identify()', async () => {
+    await identify(
+      {
+        sessionId: 'child_ctx',
+        parentSessionId: ' parent_ctx ',
+        sessionFeatureName: ' assistant ',
+        sessionEntryPoint: ' web ',
+      },
+      async () => {
+        expect(currentParentSessionId()).toBe(' parent_ctx ');
+        expect(currentSessionFeatureName()).toBe(' assistant ');
+        expect(currentSessionEntryPoint()).toBe(' web ');
+        await trace({ name: 'context_turn' }, async () => 'ok');
+      },
+    );
+
+    const root = exporter.getFinishedSpans().find((s) => s.name === 'context_turn');
+    expect(root?.attributes[PARENT_SESSION_ID_KEY]).toBe('parent_ctx');
+    expect(root?.attributes[SESSION_FEATURE_NAME_KEY]).toBe('assistant');
+    expect(root?.attributes[SESSION_ENTRY_POINT_KEY]).toBe('web');
+  });
+
   it('stamps identity from identify() onto a span() decorator root', async () => {
     await identify({ sessionId: 'sess_dec', endUserId: 'eu_dec' }, async () => {
       const handle = span({ kind: 'WORKFLOW', name: 'handleTurn' }, () => 42);
@@ -104,20 +223,42 @@ describe('identify() request-scoped identity', () => {
   });
 
   it('per-call arg wins over identify() context (per field)', async () => {
-    await identify({ sessionId: 'ctx_sess', endUserId: 'ctx_eu' }, async () => {
+    await identify({
+      sessionId: 'ctx_sess',
+      parentSessionId: 'ctx_parent',
+      sessionFeatureName: 'ctx_feature',
+      sessionEntryPoint: 'ctx_entry',
+      endUserId: 'ctx_eu',
+    }, async () => {
       await trace(
-        { name: 'chat_turn', sessionId: 'call_sess', endUserId: 'call_eu' },
+        {
+          name: 'chat_turn',
+          sessionId: 'call_sess',
+          parentSessionId: 'call_parent',
+          sessionFeatureName: 'call_feature',
+          sessionEntryPoint: 'call_entry',
+          endUserId: 'call_eu',
+        },
         async () => 'ok',
       );
     });
 
     const root = exporter.getFinishedSpans().find((s) => s.name === 'chat_turn');
     expect(root?.attributes[SESSION_ID_KEY]).toBe('call_sess');
+    expect(root?.attributes[PARENT_SESSION_ID_KEY]).toBe('call_parent');
+    expect(root?.attributes[SESSION_FEATURE_NAME_KEY]).toBe('call_feature');
+    expect(root?.attributes[SESSION_ENTRY_POINT_KEY]).toBe('call_entry');
     expect(root?.attributes[END_USER_ID_KEY]).toBe('call_eu');
   });
 
   it('does not stamp identify() identity on a nested child span', async () => {
-    await identify({ sessionId: 'chat_123', endUserId: 'user_456' }, async () => {
+    await identify({
+      sessionId: 'chat_123',
+      parentSessionId: 'parent_123',
+      sessionFeatureName: 'chat',
+      sessionEntryPoint: 'web',
+      endUserId: 'user_456',
+    }, async () => {
       await trace({ name: 'outer' }, async () => {
         await trace({ name: 'inner' }, async () => 'deep');
       });
@@ -127,8 +268,14 @@ describe('identify() request-scoped identity', () => {
     const outer = spans.find((s) => s.name === 'outer');
     const inner = spans.find((s) => s.name === 'inner');
     expect(outer?.attributes[SESSION_ID_KEY]).toBe('chat_123');
+    expect(outer?.attributes[PARENT_SESSION_ID_KEY]).toBe('parent_123');
+    expect(outer?.attributes[SESSION_FEATURE_NAME_KEY]).toBe('chat');
+    expect(outer?.attributes[SESSION_ENTRY_POINT_KEY]).toBe('web');
     expect(outer?.attributes[END_USER_ID_KEY]).toBe('user_456');
     expect(inner?.attributes[SESSION_ID_KEY]).toBeUndefined();
+    expect(inner?.attributes[PARENT_SESSION_ID_KEY]).toBeUndefined();
+    expect(inner?.attributes[SESSION_FEATURE_NAME_KEY]).toBeUndefined();
+    expect(inner?.attributes[SESSION_ENTRY_POINT_KEY]).toBeUndefined();
     expect(inner?.attributes[END_USER_ID_KEY]).toBeUndefined();
   });
 
@@ -213,7 +360,13 @@ describe('span-processor identity fallback (framework roots)', () => {
   it('stamps identify() onto a bare framework root', async () => {
     const { trace: otTrace } = await import('@opentelemetry/api');
     const tracer = fwProvider.getTracer('test');
-    await identify({ sessionId: 'conv_fw', endUserId: 'u_fw' }, async () => {
+    await identify({
+      sessionId: 'conv_fw',
+      parentSessionId: 'parent_fw',
+      sessionFeatureName: 'agent_framework',
+      sessionEntryPoint: 'worker',
+      endUserId: 'u_fw',
+    }, async () => {
       // Framework-style own root: a plain WORKFLOW root, no explicit stamp.
       tracer
         .startSpan('openai_agents.trace', {
@@ -226,6 +379,9 @@ describe('span-processor identity fallback (framework roots)', () => {
       .getFinishedSpans()
       .find((s) => s.name === 'openai_agents.trace');
     expect(root?.attributes[SESSION_ID_KEY]).toBe('conv_fw');
+    expect(root?.attributes[PARENT_SESSION_ID_KEY]).toBe('parent_fw');
+    expect(root?.attributes[SESSION_FEATURE_NAME_KEY]).toBe('agent_framework');
+    expect(root?.attributes[SESSION_ENTRY_POINT_KEY]).toBe('worker');
     expect(root?.attributes[END_USER_ID_KEY]).toBe('u_fw');
   });
 

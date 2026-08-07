@@ -83,7 +83,7 @@ describe('SDK lifecycle integration', () => {
     expect(wf).toBeDefined();
     expect(wf!.attributes['openinference.span.kind']).toBe('WORKFLOW');
     expect(wf!.attributes['custom.attr']).toBe('hello');
-    expect(wf!.attributes['neatlogs.internal']).toBe(true);
+    expect(wf!.attributes['neatlogs.internal']).toBeUndefined();
   });
 
   // ─── TC-LIFE-4: trace() always ends span, even when callback throws ───────

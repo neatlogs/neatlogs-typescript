@@ -689,6 +689,9 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       // the correct conversation and end-user without depending on batch order.
       for (const key of [
         'neatlogs.session.id',
+        'neatlogs.session.parent_id',
+        'neatlogs.session.feature.name',
+        'neatlogs.session.entry_point',
         'neatlogs.end_user.id',
         'neatlogs.end_user.metadata',
       ]) {

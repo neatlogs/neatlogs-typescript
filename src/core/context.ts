@@ -88,6 +88,9 @@ const KNOWN_OPTION_KEYS = new Set([
   'mask',
   'attributes',
   'sessionId',
+  'parentSessionId',
+  'sessionFeatureName',
+  'sessionEntryPoint',
   'endUserId',
   'endUserMetadata',
 ]);
@@ -105,7 +108,14 @@ export function _setSpanAttributes(
   kind: string | undefined,
   attributes: Record<string, any>,
 ): void {
-  span.setAttribute('neatlogs.internal', true);
+  // trace() is also the public API for user-visible WORKFLOW, AGENT, TOOL,
+  // EMBEDDING, and other spans. Marking every trace() span as internal causes
+  // those spans (and an all-internal trace) to be filtered by ingestion. Only
+  // the synthetic LLM wrapper span is internal by default; callers can still
+  // opt any other span into internal handling through explicit attributes.
+  if (kind?.toUpperCase() === 'LLM') {
+    span.setAttribute('neatlogs.internal', true);
+  }
   span.setAttribute('openinference.span.kind', kind ?? 'CHAIN');
 
   for (const [key, value] of Object.entries(attributes)) {
@@ -238,6 +248,9 @@ export async function trace<T>(
     version,
     mask,
     sessionId: sessionIdOption,
+    parentSessionId,
+    sessionFeatureName,
+    sessionEntryPoint,
     endUserId,
     endUserMetadata,
     attributes: explicitAttributes,
@@ -248,10 +261,20 @@ export async function trace<T>(
   // Session identity is NOT process-global — init() never sets it.
   const sessionId = sessionIdOption ?? currentSessionId();
 
-  // Determine whether we are inside an existing active trace
+  // Determine whether we are inside an existing trace. Delayed work can retain
+  // an already-ended intermediate span in AsyncLocalStorage. Prefer a live root
+  // when one is available; if the root reference is unavailable, preserve the
+  // ended parent context so the delayed span keeps the original trace id instead
+  // of incorrectly opening a new standalone trace.
   const currentSpan = getActiveNeatlogsSpan();
-  const isInActiveTrace = currentSpan !== undefined && currentSpan.isRecording();
-  const shouldCreateRootTrace = !!sessionId && !isInActiveTrace;
+  const rootSpan = getNeatlogsRootSpan();
+  const currentSpanIsRecording = currentSpan?.isRecording() === true;
+  const rootSpanIsRecording = rootSpan?.isRecording() === true;
+  const shouldFallbackToRoot = !currentSpanIsRecording && rootSpanIsRecording;
+  const hasInheritedTraceContext =
+    currentSpan !== undefined || rootSpan !== undefined;
+  const shouldCreateRootTrace =
+    !!sessionId && !hasInheritedTraceContext && !rootSpanIsRecording;
 
   // ---------------------------------------------------------------------------
   // Process prompt templates
@@ -304,6 +327,9 @@ export async function trace<T>(
   // active span must never become our parent. Prompt values threaded here then
   // propagate to descendant LLM spans through the private store.
   let ctx = getNeatlogsActiveContext();
+  if (shouldFallbackToRoot) {
+    ctx = otelTrace.setSpan(ctx, rootSpan!);
+  }
 
   const variablesJson = promptVariables ? JSON.stringify(promptVariables) : undefined;
   const userVariablesJson = userPromptVariables ? JSON.stringify(userPromptVariables) : undefined;
@@ -342,7 +368,7 @@ export async function trace<T>(
 
   // End-user belongs to the trace root only. This trace() call is a root when it
   // creates a new root trace, or when it isn't nested in an already-active trace.
-  const isRootTrace = shouldCreateRootTrace || !isInActiveTrace;
+  const isRootTrace = shouldCreateRootTrace || !hasInheritedTraceContext;
 
   // ---------------------------------------------------------------------------
   // Create span and execute callback
@@ -354,7 +380,11 @@ export async function trace<T>(
     _setSpanAttributes(span, kind, extraAttributes);
 
     // Session/end-user belong to the trace root only; skipped on a non-root span.
-    applySessionAttributes(span, sessionId, isRootTrace);
+    applySessionAttributes(span, sessionId, isRootTrace, {
+      parentSessionId,
+      sessionFeatureName,
+      sessionEntryPoint,
+    });
     applyEndUserAttributes(span, endUserId, endUserMetadata, isRootTrace);
 
     if (input !== undefined && input !== null) {
