@@ -409,6 +409,61 @@ await shutdown();
 
 ---
 
+### `Client` — independent pipelines in one process
+
+`init()` is process-wide and single-shot: a second call is a no-op. When one
+codebase runs several independent features — a customer-facing copilot and a
+nightly batch job, say — that need different API keys, workflow names, or tags,
+use a `Client`. It is a second, fully independent pipeline (its own provider and
+exporters) that applies **only** inside `client.activate(...)`. Everything
+outside keeps using `init()`.
+
+```typescript
+import { init, Client } from 'neatlogs';
+
+await init({ apiKey: process.env.NEATLOGS_API_KEY, workflowName: 'support-copilot' });
+
+const summarizer = new Client({
+  apiKey: process.env.NEATLOGS_SUMMARIZER_KEY,
+  workflowName: 'nightly-summarizer',
+  tags: ['batch'],
+});
+
+await handleTicket(question);                 // → support-copilot
+
+await summarizer.activate(async () => {
+  const openai = summarizer.wrap(new OpenAI());
+  await openai.chat.completions.create({ ... });  // → nightly-summarizer
+});
+
+await handleTicket(other);                    // → support-copilot again
+
+await summarizer.shutdown();                  // leaves init()'s pipeline intact
+```
+
+`activate()` takes a callback rather than mirroring Python's
+`with client.activate():` — that is what `AsyncLocalStorage` needs to propagate
+across `await` boundaries. It returns whatever the callback returns, so
+`await`ing the call awaits your work. Nesting is supported; the outer client is
+restored on exit.
+
+**Options** — `apiKey` (required unless `disableExport`), `workflowName`
+(required), `endpoint`, `tags`, `captureLogs`, `batchSize`, `flushInterval`,
+`disableExport`, `mask`, `sampleRate`, `debug`, `tracerProvider`.
+
+**Lifecycle** — `flush()` drains this client only; `shutdown()` (alias `close()`)
+flushes then tears it down, leaving the `init()` pipeline untouched. A
+caller-supplied `tracerProvider` is flushed but never shut down.
+
+> **Note:** `client.wrap()` patches the target's *class*, which is process-wide.
+> Wrapping inside one client therefore instruments that class for every client;
+> what stays per-context is the *routing* — which pipeline receives the spans.
+> Same behaviour as the Python SDK.
+
+A `Client` also works standalone, with no `init()` call at all.
+
+---
+
 ### `bindTemplates(llm, systemTpl, userTpl?, compiledVars?)`
 
 Bind prompt templates to a LangChain-compatible LLM so templates are automatically captured on LLM spans managed by frameworks like CrewAI.
