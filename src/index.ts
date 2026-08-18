@@ -24,6 +24,11 @@
 // Lifecycle
 export { init, flush, shutdown, isDebugEnabled, getSessionConfig } from './init.js';
 
+// Independent, context-scoped pipelines. init() stays the process-wide default;
+// a Client is a second pipeline (own API key / workflow / exporters) that
+// applies only inside client.activate(...).
+export { Client, type ClientOptions } from './core/client.js';
+
 // Instrumentation
 export { span, Span } from './decorators/index.js';
 export { trace, setTraceOutput } from './core/context.js';

@@ -30,6 +30,7 @@ import {
 } from '@opentelemetry/api';
 
 import { getSessionConfig } from './context.js';
+import { getActiveClient } from './active-client.js';
 import { applySessionAttributes } from './session.js';
 import { applyEndUserAttributes } from './end-user.js';
 import {
@@ -48,6 +49,12 @@ function autoRootEnabled(): boolean {
 }
 
 function resolveRootWorkflowName(): string {
+  // An activated Client names its own roots, so a secondary pipeline's traces
+  // are labelled with ITS workflow rather than init()'s. Mirrors Python's
+  // _resolve_root_workflow_name().
+  const client = getActiveClient();
+  if (client !== undefined) return client.workflowName;
+
   try {
     const name = getSessionConfig()?.workflowName;
     if (typeof name === 'string' && name.trim()) return name;

@@ -20,6 +20,8 @@ import {
   type TracerProvider,
 } from '@opentelemetry/api';
 
+import { getActiveClient } from './active-client.js';
+
 // Carries the trace-ROOT span down the private context so descendants can target
 // it (e.g. setTraceOutput). getActiveNeatlogsSpan() returns the innermost span,
 // which is not the root once nested; this key preserves the root reference.
@@ -86,8 +88,19 @@ export function _setNeatlogsProvider(provider: TracerProvider | null): void {
   providerState.provider = provider;
 }
 
-/** Resolve a tracer from the private provider when one is configured. */
+/**
+ * Resolve a tracer from the private provider when one is configured.
+ *
+ * A `Client` activated in the current execution context wins over the process-
+ * wide `init()` provider, which is how a secondary pipeline captures spans from
+ * every wrapper, decorator, and integration without any of them knowing about
+ * it. Outside `client.activate(...)` this is byte-for-byte the old behaviour.
+ */
 export function getNeatlogsTracer(name: string): Tracer {
+  const client = getActiveClient();
+  if (client !== undefined) {
+    return client.getTracer(name);
+  }
   return providerState.provider?.getTracer(name) ?? preInitTracer;
 }
 
@@ -97,6 +110,10 @@ export function getNeatlogsTracer(name: string): Tracer {
  * captured provider onto ours.
  */
 export function getNeatlogsProvider(): TracerProvider | null {
+  const client = getActiveClient();
+  if (client !== undefined) {
+    return client.tracerProvider;
+  }
   return providerState.provider;
 }
 
