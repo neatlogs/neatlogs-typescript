@@ -87,6 +87,7 @@ vi.mock('../../src/core/span-processor.js', () => ({
   NeatlogsSpanProcessor: vi.fn().mockImplementation(() => ({
     onStart: vi.fn(),
     onEnd: vi.fn(),
+    endActiveSpans: vi.fn().mockReturnValue(0),
     forceFlush: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
   })),

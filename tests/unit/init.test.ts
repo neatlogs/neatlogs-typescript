@@ -82,6 +82,7 @@ vi.mock('../../src/core/span-processor.js', () => ({
   NeatlogsSpanProcessor: vi.fn().mockImplementation(() => ({
     onStart: vi.fn(),
     onEnd: vi.fn(),
+    endActiveSpans: vi.fn().mockReturnValue(0),
     forceFlush: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
   })),
@@ -345,6 +346,45 @@ describe('shutdown()', () => {
     await init({ apiKey: 'test-key', disableExport: true });
     const result = await shutdown();
     expect(result).toBe(true);
+  });
+
+  it('is idempotent while shutdown is in progress and forwards the reason', async () => {
+    const { NeatlogsSpanProcessor } = await import('../../src/core/span-processor.js');
+    await init({ apiKey: 'test-key', disableExport: true });
+    const spanProcessor = (NeatlogsSpanProcessor as any).mock.results.at(-1).value;
+
+    const first = shutdown('SIGTERM');
+    const second = shutdown('ignored-second-reason');
+
+    expect(second).toBe(first);
+    await expect(first).resolves.toBe(true);
+    expect(spanProcessor.endActiveSpans).toHaveBeenCalledTimes(1);
+    expect(spanProcessor.endActiveSpans).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('wraps SIGTERM with one graceful shutdown before re-delivery', async () => {
+    const { NeatlogsSpanProcessor } = await import('../../src/core/span-processor.js');
+    const listenersBefore = new Set(process.listeners('SIGTERM'));
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+
+    await init({
+      apiKey: 'test-key',
+      disableExport: true,
+      registerShutdownHandlers: true,
+    });
+    const spanProcessor = (NeatlogsSpanProcessor as any).mock.results.at(-1).value;
+    const handler = process
+      .listeners('SIGTERM')
+      .find((listener) => !listenersBefore.has(listener));
+    expect(handler).toBeDefined();
+
+    (handler as (signal: NodeJS.Signals) => void)('SIGTERM');
+    await vi.waitFor(() => {
+      expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    });
+    expect(spanProcessor.endActiveSpans).toHaveBeenCalledTimes(1);
+    expect(spanProcessor.endActiveSpans).toHaveBeenCalledWith('SIGTERM');
+    kill.mockRestore();
   });
 
   it('resets debug mode', async () => {

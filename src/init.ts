@@ -54,8 +54,29 @@ let _instrumentationManager: InstrumentationManager | null = null;
 
 // Track signal handlers so we can remove them in shutdown()
 let _sigHandlersRegistered = false;
-const _shutdownOnSignal = () => {
-  shutdown().catch(() => {});
+let _signalShutdownStarted = false;
+let _shutdownPromise: Promise<boolean> | null = null;
+const _shutdownBeforeExit = () => {
+  void shutdown('beforeExit').catch((error) => {
+    logger.error(`Error shutting down before exit: ${error}`);
+  });
+};
+const _shutdownOnSignal = (signal: NodeJS.Signals) => {
+  if (_signalShutdownStarted) return;
+  _signalShutdownStarted = true;
+  void shutdown(signal)
+    .catch((error) => {
+      logger.error(`Error shutting down after ${signal}: ${error}`);
+    })
+    .finally(() => {
+      // shutdown() removed our listener, so re-delivery preserves the normal
+      // process exit code and any supervisor/container signal semantics.
+      try {
+        process.kill(process.pid, signal);
+      } catch {
+        process.exitCode = signal === 'SIGINT' ? 130 : 143;
+      }
+    });
 };
 
 // ---------------------------------------------------------------------------
@@ -332,7 +353,7 @@ export async function init(options: InitOptions = {}): Promise<void> {
   const registerShutdownHandlers =
     options.registerShutdownHandlers ?? _ownsTracerProvider;
   if (registerShutdownHandlers && !_sigHandlersRegistered) {
-    process.on('beforeExit', _shutdownOnSignal);
+    process.on('beforeExit', _shutdownBeforeExit);
     process.on('SIGTERM', _shutdownOnSignal);
     process.on('SIGINT', _shutdownOnSignal);
     _sigHandlersRegistered = true;
@@ -405,16 +426,37 @@ export async function flush(): Promise<boolean> {
  *
  * @returns true if all providers shut down successfully
  */
-export async function shutdown(): Promise<boolean> {
+export function shutdown(terminationReason = 'shutdown'): Promise<boolean> {
+  if (_shutdownPromise) return _shutdownPromise;
+
+  const currentShutdown = _performShutdown(terminationReason);
+  _shutdownPromise = currentShutdown;
+  const clearCurrentShutdown = () => {
+    if (_shutdownPromise === currentShutdown) _shutdownPromise = null;
+  };
+  void currentShutdown.then(clearCurrentShutdown, clearCurrentShutdown);
+  return currentShutdown;
+}
+
+async function _performShutdown(terminationReason: string): Promise<boolean> {
   // Remove signal handlers
   if (_sigHandlersRegistered) {
-    process.removeListener('beforeExit', _shutdownOnSignal);
+    process.removeListener('beforeExit', _shutdownBeforeExit);
     process.removeListener('SIGTERM', _shutdownOnSignal);
     process.removeListener('SIGINT', _shutdownOnSignal);
     _sigHandlersRegistered = false;
   }
 
   let success = true;
+
+  if (_spanProcessor) {
+    const ended = _spanProcessor.endActiveSpans(terminationReason);
+    if (ended > 0) {
+      logger.info(
+        `Ended ${ended} active Neatlogs span(s) during ${terminationReason}`,
+      );
+    }
+  }
 
   // Disable instrumentors BEFORE tearing down the provider so they stop emitting
   // spans against it, and clear the Mastra bridge cache so a subsequent init()
@@ -465,6 +507,7 @@ export async function shutdown(): Promise<boolean> {
   _logProvider = null;
   _spanProcessor = null;
   _debugMode = false;
+  _signalShutdownStarted = false;
 
   // Reset session config
   _setSessionConfig({});

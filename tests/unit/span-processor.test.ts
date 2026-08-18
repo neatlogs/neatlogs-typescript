@@ -4,8 +4,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { NeatlogsSpanProcessor, spanToDict } from '../../src/core/span-processor.js';
-import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+  type ReadableSpan,
+} from '@opentelemetry/sdk-trace-base';
+import {
+  ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
   TraceFlags,
@@ -199,6 +205,58 @@ describe('NeatlogsSpanProcessor', () => {
 
       expect(mockNormalize).not.toHaveBeenCalled();
       expect(processor._perfStats.spansProcessed).toBe(0);
+    });
+  });
+
+  // ── Graceful active-span finalization ─────────────────
+
+  describe('endActiveSpans', () => {
+    it('ends Neatlogs spans child-first exactly once without changing status or adding events', async () => {
+      const exporter = new InMemorySpanExporter();
+      const provider = new BasicTracerProvider();
+      provider.addSpanProcessor(processor);
+      provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+      _setNeatlogsProvider(provider);
+
+      const tracer = provider.getTracer('neatlogs.test');
+      const root = tracer.startSpan('workflow');
+      root.setStatus({ code: SpanStatusCode.OK });
+      const child = provider.getTracer('openinference.test').startSpan(
+        'agent',
+        undefined,
+        otelTrace.setSpan(ROOT_CONTEXT, root),
+      );
+      const foreign = provider.getTracer('foreign.test').startSpan('foreign');
+
+      try {
+        expect(processor.endActiveSpans('SIGTERM')).toBe(2);
+        expect(processor.endActiveSpans('SIGTERM')).toBe(0);
+        expect(foreign.isRecording()).toBe(true);
+
+        const spans = exporter.getFinishedSpans();
+        const names = spans.map((span) => span.name);
+        expect(names.indexOf('agent')).toBeLessThan(names.indexOf('workflow'));
+        expect(names).toContain('neatlogs.trace.complete');
+
+        const finishedRoot = spans.find((span) => span.name === 'workflow')!;
+        const finishedChild = spans.find((span) => span.name === 'agent')!;
+        expect(finishedRoot.status.code).toBe(SpanStatusCode.OK);
+        expect(finishedChild.status.code).toBe(SpanStatusCode.UNSET);
+        expect(finishedRoot.attributes['neatlogs.trace.interrupted']).toBe(true);
+        expect(
+          finishedRoot.attributes['neatlogs.trace.termination.reason'],
+        ).toBe('SIGTERM');
+        expect(finishedChild.attributes['neatlogs.trace.interrupted']).toBe(true);
+        expect(
+          finishedChild.attributes['neatlogs.trace.termination.reason'],
+        ).toBe('SIGTERM');
+        expect(finishedRoot.events).toHaveLength(0);
+        expect(finishedChild.events).toHaveLength(0);
+      } finally {
+        foreign.end();
+        await provider.shutdown();
+        _setNeatlogsProvider(null);
+      }
     });
   });
 
