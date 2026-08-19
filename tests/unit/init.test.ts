@@ -20,6 +20,8 @@ vi.mock('@opentelemetry/sdk-trace-node', () => {
 
 vi.mock('@opentelemetry/sdk-trace-base', () => ({
   BatchSpanProcessor: vi.fn().mockImplementation(() => ({})),
+  ParentBasedSampler: vi.fn().mockImplementation((options) => ({ options })),
+  TraceIdRatioBasedSampler: vi.fn().mockImplementation((rate) => ({ rate })),
 }));
 
 vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({

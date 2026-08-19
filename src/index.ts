@@ -54,6 +54,8 @@ export {
   saveAsVersion,
   deletePrompt,
   removeTag,
+  type GetPromptOptions,
+  type PromptClientOptions,
 } from './prompt/client.js';
 
 // Mastra integration

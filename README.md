@@ -143,7 +143,6 @@ await init({
 | `mask` | `MaskFunction` | — | Global mask function applied to all spans. |
 | `sampleRate` | `number` | `1.0` | Sampling rate (0.0 to 1.0). |
 | `captureLogs` | `boolean` | `false` | Capture log records via OTel LoggerProvider. |
-| `traceContent` | `boolean` | `true` | Capture input/output content on spans. |
 | `pii` | `'redact' &#124; 'hash' &#124; false` | — | PII detection mode. |
 | `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Base ingest endpoint. The SDK sends traces to `/v1/traces` and logs to `/v1/logs`. |
 | `batchSize` | `number` | `100` | Maximum spans per export batch. |
@@ -377,6 +376,7 @@ import { PromptClient } from 'neatlogs';
 const client = new PromptClient({
   baseUrl: 'https://ingest.neatlogs.com',
   apiKey: process.env.NEATLOGS_API_KEY!,
+  cacheTtlMs: 60_000, // stale prompts refresh in the background after this TTL
 });
 
 // Create a prompt
@@ -388,6 +388,11 @@ const prompt = await client.createPrompt({
 
 // Fetch by name (returns latest version)
 const handle = await client.getPrompt('qa-system');
+
+// Override the cache TTL for an unpinned prompt. When stale, getPrompt returns
+// the last known value immediately and performs one deduplicated background
+// refresh. A pinned version stays stable in the process cache.
+const fastRefresh = await client.getPrompt('qa-system', { cacheTtlMs: 5_000 });
 
 // Fetch by label or version
 const prod = await client.getPrompt('qa-system', { label: 'production' });

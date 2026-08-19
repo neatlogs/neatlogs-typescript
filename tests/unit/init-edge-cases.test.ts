@@ -26,6 +26,8 @@ vi.mock('@opentelemetry/sdk-trace-node', () => {
 
 vi.mock('@opentelemetry/sdk-trace-base', () => ({
   BatchSpanProcessor: vi.fn().mockImplementation(() => ({})),
+  ParentBasedSampler: vi.fn().mockImplementation((options) => ({ options })),
+  TraceIdRatioBasedSampler: vi.fn().mockImplementation((rate) => ({ rate })),
 }));
 
 vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
@@ -364,9 +366,14 @@ describe('init() edge cases', () => {
     expect(resourceCall['session.id']).toBeUndefined();
   });
 
-  it('creates NeatlogsSpanProcessor with sampleRate', async () => {
-    const { NeatlogsSpanProcessor } = await import('../../src/core/span-processor.js');
-    (NeatlogsSpanProcessor as any).mockClear();
+  it('installs parent-based trace sampling on the SDK-owned provider', async () => {
+    const { NodeTracerProvider } = await import('@opentelemetry/sdk-trace-node');
+    const { ParentBasedSampler, TraceIdRatioBasedSampler } = await import(
+      '@opentelemetry/sdk-trace-base'
+    );
+    (NodeTracerProvider as any).mockClear();
+    (ParentBasedSampler as any).mockClear();
+    (TraceIdRatioBasedSampler as any).mockClear();
 
     await init({
       apiKey: 'test-key',
@@ -374,9 +381,32 @@ describe('init() edge cases', () => {
       sampleRate: 0.5,
     });
 
-    expect(NeatlogsSpanProcessor).toHaveBeenCalledWith(
-      expect.objectContaining({ sampleRate: 0.5 }),
+    expect(TraceIdRatioBasedSampler).toHaveBeenCalledWith(0.5);
+    expect(ParentBasedSampler).toHaveBeenCalledOnce();
+    expect(NodeTracerProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ sampler: expect.any(Object) }),
     );
+  });
+
+  it.each([-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid sampleRate %s before initialization',
+    async (sampleRate) => {
+      await expect(
+        init({ apiKey: 'test-key', disableExport: true, sampleRate }),
+      ).rejects.toThrow('sampleRate must be a finite number between 0 and 1');
+      expect(getSessionConfig().workflowName).toBeUndefined();
+    },
+  );
+
+  it('rejects sampleRate with a caller-owned provider instead of ignoring it', async () => {
+    await expect(
+      init({
+        apiKey: 'test-key',
+        disableExport: true,
+        sampleRate: 0.5,
+        tracerProvider: { addSpanProcessor: vi.fn() } as any,
+      }),
+    ).rejects.toThrow('configure its sampler directly');
   });
 
   it('creates NeatlogsSpanProcessor with mask function', async () => {

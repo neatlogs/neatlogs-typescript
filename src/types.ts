@@ -73,8 +73,6 @@ export interface InitOptions {
   sampleRate?: number;
   /** Whether to capture log records. Defaults to false. */
   captureLogs?: boolean;
-  /** Whether to capture input/output content. Defaults to true. */
-  traceContent?: boolean;
   /** PII detection settings. */
   pii?: 'redact' | 'hash' | false;
   /** SDK version override. */
@@ -221,6 +219,5 @@ export interface SessionConfig {
   workflowName: string;
   tags: string[];
   metadata: Record<string, any>;
-  traceContent: boolean;
   pii: 'redact' | 'hash' | false;
 }

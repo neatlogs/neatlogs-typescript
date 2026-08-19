@@ -48,13 +48,6 @@ export function serializeObj(obj: any): any {
   return String(obj);
 }
 
-/** Check if content capture is enabled via env var. */
-export function shouldCaptureContent(): boolean {
-  const envVal = process.env.NEATLOGS_TRACE_CONTENT;
-  if (envVal === undefined || envVal === '') return true;
-  return envVal.toLowerCase() !== 'false' && envVal !== '0';
-}
-
 /** Set common span attributes from options. */
 export function setCommonSpanAttrs(span: OtelSpan, opts: SpanOptions): void {
   if (opts.kind) {
@@ -90,7 +83,6 @@ export function decorateSpan<TArgs extends any[], TReturn>(
   const spanName = opts.spanName ?? opts.name ?? (fn.name || 'anonymous');
   const captureInput = opts.captureInput !== false;
   const captureOutput = opts.captureOutput !== false;
-  const doCapture = shouldCaptureContent();
 
   const wrapped = (...args: TArgs): any => {
     // Resolve the tracer at CALL time, not definition time: a decorator applied
@@ -118,7 +110,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         applyEndUserAttributes(span, opts.endUserId, opts.endUserMetadata, isRoot);
 
         // Capture input
-        if (captureInput && doCapture && args.length > 0) {
+        if (captureInput && args.length > 0) {
           try {
             const inputValue = args.length === 1 ? serializeObj(args[0]) : args.map(serializeObj);
             span.setAttribute('input.value', safeJsonDumps(inputValue));
@@ -135,7 +127,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
           return result
             .then((resolved: any) => {
               // Capture output
-              if (captureOutput && doCapture) {
+              if (captureOutput) {
                 try {
                   span.setAttribute('output.value', safeJsonDumps(serializeObj(resolved)));
                 } catch (err) {
@@ -169,7 +161,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         }
 
         // Sync result
-        if (captureOutput && doCapture) {
+        if (captureOutput) {
           try {
             span.setAttribute('output.value', safeJsonDumps(serializeObj(result)));
           } catch (err) {

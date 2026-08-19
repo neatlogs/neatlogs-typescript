@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   safeJsonDumps,
   serializeObj,
-  shouldCaptureContent,
   setCommonSpanAttrs,
   decorateSpan,
 } from '../../src/decorators/base.js';
@@ -149,50 +148,6 @@ describe('serializeObj', () => {
   });
 });
 
-// ─── shouldCaptureContent ──────────────────────────────────────────────────────
-
-describe('shouldCaptureContent', () => {
-  const origEnv = process.env.NEATLOGS_TRACE_CONTENT;
-
-  afterEach(() => {
-    if (origEnv === undefined) {
-      delete process.env.NEATLOGS_TRACE_CONTENT;
-    } else {
-      process.env.NEATLOGS_TRACE_CONTENT = origEnv;
-    }
-  });
-
-  it('should return true when env var is not set', () => {
-    delete process.env.NEATLOGS_TRACE_CONTENT;
-    expect(shouldCaptureContent()).toBe(true);
-  });
-
-  it('should return true when env var is empty', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = '';
-    expect(shouldCaptureContent()).toBe(true);
-  });
-
-  it('should return false when env var is "false"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = 'false';
-    expect(shouldCaptureContent()).toBe(false);
-  });
-
-  it('should return false when env var is "0"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = '0';
-    expect(shouldCaptureContent()).toBe(false);
-  });
-
-  it('should return false when env var is "FALSE"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = 'FALSE';
-    expect(shouldCaptureContent()).toBe(false);
-  });
-
-  it('should return true when env var is "true"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = 'true';
-    expect(shouldCaptureContent()).toBe(true);
-  });
-});
-
 // ─── setCommonSpanAttrs ────────────────────────────────────────────────────────
 
 describe('setCommonSpanAttrs', () => {
@@ -237,7 +192,6 @@ describe('setCommonSpanAttrs', () => {
 describe('decorateSpan', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should wrap a sync function and capture input/output', () => {
@@ -384,7 +338,6 @@ describe('decorateSpan', () => {
 describe('span()', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should throw for invalid span kind', () => {
@@ -618,7 +571,6 @@ describe('retrieverPostprocessor', () => {
 describe('span() with RETRIEVER', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should use retrieverPostprocessor for RETRIEVER kind', () => {

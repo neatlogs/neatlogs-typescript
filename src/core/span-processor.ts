@@ -208,7 +208,6 @@ export function spanToDict(
 // ────────────────────────────────────────────────────────
 
 export interface NeatlogsSpanProcessorOptions {
-  sampleRate?: number;
   debug?: boolean;
   mask?: MaskFunction;
   /** Pre-built AttributeMapper. If not supplied, a default mapper is created. */
@@ -223,7 +222,6 @@ export interface NeatlogsSpanProcessorOptions {
 // ────────────────────────────────────────────────────────
 
 export class NeatlogsSpanProcessor implements SpanProcessor {
-  private readonly sampleRate: number;
   private readonly debug: boolean;
   private readonly mask: MaskFunction | undefined;
   private readonly unifiedProcessor: UnifiedAttributeProcessor;
@@ -244,7 +242,6 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   private _processedLogStream: fs.WriteStream | null;
 
   constructor(opts: NeatlogsSpanProcessorOptions = {}) {
-    this.sampleRate = opts.sampleRate ?? 1.0;
     this.debug = opts.debug ?? false;
     this.mask = opts.mask;
     this.emitCompletionMarkers = opts.emitCompletionMarkers ?? true;
@@ -472,11 +469,6 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         } catch (e) {
           logger.warn(`Failed to write span to raw log file: ${e}`);
         }
-      }
-
-      // Sample rate check
-      if (this.sampleRate < 1.0 && Math.random() > this.sampleRate) {
-        return;
       }
 
       // 2. Process and normalize attributes

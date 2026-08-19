@@ -134,7 +134,7 @@ describe('NeatlogsSpanProcessor', () => {
       'neatlogs.llm.model_name': 'gpt-4o',
       'neatlogs.llm.token_count.total': 100,
     });
-    processor = new NeatlogsSpanProcessor({ sampleRate: 1.0, debug: false });
+    processor = new NeatlogsSpanProcessor({ debug: false });
   });
 
   afterEach(async () => {
@@ -375,29 +375,6 @@ describe('NeatlogsSpanProcessor', () => {
       } finally {
         await provider.shutdown();
       }
-    });
-  });
-
-  // ── Sample rate filtering ─────────────────────────────
-
-  describe('sample rate filtering', () => {
-    it('should drop spans when sampleRate < 1 and random exceeds rate', () => {
-      const sampledProcessor = new NeatlogsSpanProcessor({ sampleRate: 0.0 });
-      const span = makeMockSpan();
-
-      // With sampleRate 0.0, Math.random() (0..1) will always be > 0.0
-      sampledProcessor.onEnd(span);
-
-      // spansProcessed still incremented, but spansExported should be 0
-      expect(sampledProcessor._perfStats.spansProcessed).toBe(1);
-      expect(sampledProcessor._perfStats.spansExported).toBe(0);
-    });
-
-    it('should process all spans when sampleRate is 1.0', () => {
-      const span = makeMockSpan();
-      processor.onEnd(span);
-
-      expect(processor._perfStats.spansExported).toBe(1);
     });
   });
 
@@ -793,7 +770,7 @@ describe('NeatlogsSpanProcessor', () => {
         process.env.NEATLOGS_LOG_SPANS_FILE = processedLogPath;
       }
 
-      const loggingProcessor = new NeatlogsSpanProcessor({ sampleRate: 1.0 });
+      const loggingProcessor = new NeatlogsSpanProcessor();
       try {
         loggingProcessor.onEnd(makeMockSpan({ name: opts.spanName }));
         await loggingProcessor.shutdown();

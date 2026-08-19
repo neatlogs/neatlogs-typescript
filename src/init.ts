@@ -15,6 +15,8 @@ import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   BatchSpanProcessor,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
@@ -158,6 +160,16 @@ export function init(options: InitOptions = {}): Promise<void> {
 
 async function _performInit(options: InitOptions): Promise<void> {
 
+  const sampleRate = options.sampleRate ?? 1.0;
+  if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+    throw new RangeError('sampleRate must be a finite number between 0 and 1.');
+  }
+  if (options.tracerProvider && options.sampleRate !== undefined) {
+    throw new Error(
+      'sampleRate cannot configure a caller-owned tracerProvider; configure its sampler directly.',
+    );
+  }
+
   // 1b. Validate the requested instrumentations against the isolation policy
   // BEFORE touching any module state (debug flag, session config, provider, …).
   // The check is a pure function of the registry + the requested set, so failing
@@ -264,12 +276,14 @@ async function _performInit(options: InitOptions): Promise<void> {
     new NodeTracerProvider({
       resource,
       spanLimits: { attributeCountLimit: 10_000 },
+      sampler: new ParentBasedSampler({
+        root: new TraceIdRatioBasedSampler(sampleRate),
+      }),
     });
   _ownsTracerProvider = options.tracerProvider === undefined;
 
   // 11. Add NeatlogsSpanProcessor
   _spanProcessor = new NeatlogsSpanProcessor({
-    sampleRate: options.sampleRate ?? 1.0,
     debug: options.debug ?? false,
     mask: options.mask,
     emitCompletionMarkers: false,
@@ -417,7 +431,7 @@ async function _performInit(options: InitOptions): Promise<void> {
     logger.info(
       `Instrumentations: ${_instrumentationManager.instrumented.join(', ') || '(none)'}`,
     );
-    logger.info(`Sample Rate: ${options.sampleRate ?? 1.0}`);
+    logger.info(`Sample Rate: ${sampleRate}`);
   }
 }
 

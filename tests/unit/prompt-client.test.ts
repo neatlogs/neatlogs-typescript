@@ -413,6 +413,145 @@ describe('PromptClient', () => {
       // Should only have fetched once due to caching
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
+
+    it('returns stale data immediately and refreshes it once in the background', async () => {
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              items: [
+                {
+                  id: 'p1',
+                  name: 'my-prompt',
+                  version: 1,
+                  content: 'old',
+                  config: {},
+                  labels: [],
+                  updatedAt: '2024-01-01',
+                  createdAt: '2024-01-01',
+                  type: 'text',
+                },
+              ],
+            }),
+        })
+        .mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              items: [
+                {
+                  id: 'p2',
+                  name: 'my-prompt',
+                  version: 2,
+                  content: 'new',
+                  config: {},
+                  labels: [],
+                  updatedAt: '2024-06-01',
+                  createdAt: '2024-06-01',
+                  type: 'text',
+                },
+              ],
+            }),
+        });
+      vi.stubGlobal('fetch', mockFetch);
+      const expiringClient = new PromptClient({
+        baseUrl: 'https://api.test.com',
+        apiKey: 'key',
+      });
+
+      const first = await expiringClient.getPrompt('my-prompt');
+      const staleResults = await Promise.all([
+        expiringClient.getPrompt('my-prompt', { cacheTtlMs: 0 }),
+        expiringClient.getPrompt('my-prompt', { cacheTtlMs: 0 }),
+        expiringClient.getPrompt('my-prompt', { cacheTtlMs: 0 }),
+      ]);
+
+      expect(first.content).toBe('old');
+      expect(staleResults.map((item) => item.content)).toEqual(['old', 'old', 'old']);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+
+      await vi.waitFor(() =>
+        expect(expiringClient.getPrompt('my-prompt')).resolves.toMatchObject({
+          version: 2,
+        }),
+      );
+    });
+
+    it('deduplicates concurrent cold cache misses', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            items: [
+              {
+                id: 'p1',
+                name: 'my-prompt',
+                version: 1,
+                content: 'hello',
+                config: {},
+                labels: [],
+                updatedAt: '2024-01-01',
+                createdAt: '2024-01-01',
+                type: 'text',
+              },
+            ],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      const results = await Promise.all([
+        client.getPrompt('my-prompt'),
+        client.getPrompt('my-prompt'),
+        client.getPrompt('my-prompt'),
+      ]);
+
+      expect(results).toHaveLength(3);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps an explicitly pinned version stable even with a zero TTL', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            items: [
+              {
+                id: 'p1',
+                name: 'my-prompt',
+                version: 1,
+                content: 'pinned',
+                config: {},
+                labels: [],
+                updatedAt: '2024-01-01',
+                createdAt: '2024-01-01',
+                type: 'text',
+              },
+            ],
+          }),
+      });
+      vi.stubGlobal('fetch', mockFetch);
+
+      await client.getPrompt('my-prompt', { version: 1, cacheTtlMs: 0 });
+      await client.getPrompt('my-prompt', { version: 1, cacheTtlMs: 0 });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects invalid cache TTLs', async () => {
+      expect(
+        () =>
+          new PromptClient({
+            baseUrl: 'https://api.test.com',
+            apiKey: 'key',
+            cacheTtlMs: -1,
+          }),
+      ).toThrow('cacheTtlMs must be a finite number greater than or equal to 0');
+      await expect(client.getPrompt('my-prompt', { cacheTtlMs: Number.NaN })).rejects.toThrow(
+        'cacheTtlMs must be a finite number greater than or equal to 0',
+      );
+    });
   });
 
   describe('fetchPrompt', () => {

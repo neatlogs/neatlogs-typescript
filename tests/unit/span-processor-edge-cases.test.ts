@@ -116,7 +116,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
     mockNormalize.mockReturnValue({
       'neatlogs.span.kind': 'llm',
     });
-    processor = new NeatlogsSpanProcessor({ sampleRate: 1.0, debug: false });
+    processor = new NeatlogsSpanProcessor({ debug: false });
   });
 
   afterEach(async () => {

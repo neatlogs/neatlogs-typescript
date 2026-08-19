@@ -367,7 +367,6 @@ src/decorators/base.ts — (mirrors decorators/_base.py):
 serializeObj(obj: any): any — handle Pydantic-like objects, plain objects, primitives
 safeJsonDumps(value: any): string — safe JSON serialization
 bindCallArgs(fn, args): Record<string, any> — extract named arguments
-shouldCaptureContent(): boolean — check NEATLOGS_TRACE_CONTENT env var
 setCommonSpanAttrs(span, opts) — set openinference.span.kind, neatlogs.internal, tags, metadata, etc.
 decorateSpan(opts): (fn) => wrappedFn — core wrapper factory:
 Creates OTel span via tracer.startActiveSpan()

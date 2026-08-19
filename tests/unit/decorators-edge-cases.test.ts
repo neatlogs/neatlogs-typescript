@@ -76,7 +76,6 @@ afterEach(() => {
 describe('Span() class-method decorator', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should decorate a class method and wrap it with span instrumentation', () => {
@@ -161,7 +160,6 @@ describe('Span() class-method decorator', () => {
 describe('span() with MCP_TOOL edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should handle MCP_TOOL with object arg that has toJSON', () => {
@@ -379,7 +377,6 @@ describe('retrieverPostprocessor edge cases', () => {
 describe('span() with AGENT edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should not set role/goal when they are not provided', () => {
@@ -415,7 +412,6 @@ describe('span() with AGENT edge cases', () => {
 describe('span() with TOOL edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should not set tool attributes when not provided', () => {
@@ -435,7 +431,6 @@ describe('span() with TOOL edge cases', () => {
 describe('span() with EMBEDDING edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should not set model/dimension when not provided', () => {
@@ -459,7 +454,6 @@ describe('span() with EMBEDDING edge cases', () => {
 describe('decorateSpan additional edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should handle non-Error thrown values in sync function', () => {
