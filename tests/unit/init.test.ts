@@ -6,10 +6,12 @@ vi.mock('@opentelemetry/sdk-trace-node', () => {
   const register = vi.fn();
   const forceFlush = vi.fn().mockResolvedValue(undefined);
   const shutdownFn = vi.fn().mockResolvedValue(undefined);
+  const getTracer = vi.fn().mockReturnValue({ startSpan: vi.fn() });
   return {
     NodeTracerProvider: vi.fn().mockImplementation(() => ({
       addSpanProcessor,
       register,
+      getTracer,
       forceFlush,
       shutdown: shutdownFn,
     })),
@@ -79,9 +81,18 @@ vi.mock('@opentelemetry/sdk-logs', () => {
 
 // Mock core modules
 vi.mock('../../src/core/span-processor.js', () => ({
+  CompletionMarkerSpanProcessor: vi.fn().mockImplementation(() => ({
+    onStart: vi.fn(),
+    onEnd: vi.fn(),
+    beginShutdown: vi.fn(),
+    emitDeferred: vi.fn(),
+    forceFlush: vi.fn().mockResolvedValue(undefined),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+  })),
   NeatlogsSpanProcessor: vi.fn().mockImplementation(() => ({
     onStart: vi.fn(),
     onEnd: vi.fn(),
+    beginShutdown: vi.fn().mockReturnValue('shutdown'),
     endActiveSpans: vi.fn().mockReturnValue(0),
     forceFlush: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
@@ -154,6 +165,14 @@ describe('init()', () => {
     await init({ apiKey: 'key1', disableExport: true });
     // Second call should silently skip
     await expect(init({ apiKey: 'key2', disableExport: true })).resolves.not.toThrow();
+  });
+
+  it('coalesces overlapping initialization calls', async () => {
+    const first = init({ apiKey: 'key1', disableExport: true });
+    const second = init({ apiKey: 'key2', disableExport: true });
+    expect(second).toBe(first);
+    await first;
+    expect(getSessionConfig()._apiKey).toBe('key1');
   });
 
   it('with disableExport: true skips OTLP exporter', async () => {
@@ -342,6 +361,16 @@ describe('shutdown()', () => {
     await shutdown();
   });
 
+  it('queues immediate reinitialization behind an active shutdown', async () => {
+    await init({ apiKey: 'first', disableExport: true });
+    const closing = shutdown();
+    const restarting = init({ apiKey: 'second', disableExport: true });
+
+    await closing;
+    await restarting;
+    expect(getSessionConfig()._apiKey).toBe('second');
+  });
+
   it('returns true on successful shutdown', async () => {
     await init({ apiKey: 'test-key', disableExport: true });
     const result = await shutdown();
@@ -360,6 +389,22 @@ describe('shutdown()', () => {
     await expect(first).resolves.toBe(true);
     expect(spanProcessor.endActiveSpans).toHaveBeenCalledTimes(1);
     expect(spanProcessor.endActiveSpans).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('shares the installed promise when onEnd re-enters shutdown', async () => {
+    const { NeatlogsSpanProcessor } = await import('../../src/core/span-processor.js');
+    await init({ apiKey: 'test-key', disableExport: true });
+    const spanProcessor = (NeatlogsSpanProcessor as any).mock.results.at(-1).value;
+    let nested: Promise<boolean> | undefined;
+    spanProcessor.endActiveSpans.mockImplementationOnce(() => {
+      nested = shutdown('onEnd-reentry');
+      return 0;
+    });
+
+    const first = shutdown('SIGTERM');
+    await expect(first).resolves.toBe(true);
+    expect(nested).toBe(first);
+    expect(spanProcessor.endActiveSpans).toHaveBeenCalledTimes(1);
   });
 
   it('wraps SIGTERM with one graceful shutdown before re-delivery', async () => {
@@ -385,6 +430,32 @@ describe('shutdown()', () => {
     expect(spanProcessor.endActiveSpans).toHaveBeenCalledTimes(1);
     expect(spanProcessor.endActiveSpans).toHaveBeenCalledWith('SIGTERM');
     kill.mockRestore();
+  });
+
+  it('does not re-deliver a signal owned by a host listener', async () => {
+    const listenersBefore = new Set(process.listeners('SIGTERM'));
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+    const hostHandler = vi.fn();
+
+    await init({
+      apiKey: 'test-key',
+      disableExport: true,
+      registerShutdownHandlers: true,
+    });
+    process.on('SIGTERM', hostHandler);
+    const handler = process
+      .listeners('SIGTERM')
+      .find((listener) => !listenersBefore.has(listener) && listener !== hostHandler);
+    expect(handler).toBeDefined();
+
+    try {
+      (handler as (signal: NodeJS.Signals) => void)('SIGTERM');
+      await vi.waitFor(() => expect(getSessionConfig().workflowName).toBeUndefined());
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      process.removeListener('SIGTERM', hostHandler);
+      kill.mockRestore();
+    }
   });
 
   it('resets debug mode', async () => {

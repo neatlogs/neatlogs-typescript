@@ -23,6 +23,7 @@
 
 // Lifecycle
 export { init, flush, shutdown, isDebugEnabled, getSessionConfig } from './init.js';
+export { Client, type ClientOptions } from './core/client.js';
 
 // Instrumentation
 export { span, Span } from './decorators/index.js';

@@ -187,6 +187,8 @@
     "version:sync": "node scripts/sync-version.mjs",
     "prebuild": "node scripts/sync-version.mjs",
     "build": "tsup && rm -f dist/*.d.mts",
+    "pretest": "npm run build",
+    "prepack": "npm run build && node scripts/verify-package.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",

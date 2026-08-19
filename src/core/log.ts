@@ -5,17 +5,30 @@
  * emitting OTel LogRecords that are associated with the active span.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { getLogger } from './logger.js';
 import {
   getActiveNeatlogsSpan,
   getNeatlogsActiveContext,
 } from './provider.js';
+import { getActiveClient } from './active-client.js';
 
 const logger = getLogger();
 
 // Module-level reference to the OTel Logger, set during init()
 let _otelLogger: any = null;
 let _debugMode = false;
+const stdoutCaptureContext = new AsyncLocalStorage<boolean>();
+let stdoutCaptureDepth = 0;
+let originalConsoleLog: typeof console.log | null = null;
+let captureConsoleLog: typeof console.log | null = null;
+
+function resolveOtelLogger(): any | null {
+  const client = getActiveClient();
+  // An active Client owns the whole context. `null` means logging is disabled
+  // for that Client; it must never fall through to the process-global project.
+  return client ? client.getLogger() : _otelLogger;
+}
 
 /**
  * Set the OTel logger instance. Called by init().
@@ -55,7 +68,8 @@ export function log(
   }
 
   // Emit OTel LogRecord if logger is available
-  if (_otelLogger) {
+  const otelLogger = resolveOtelLogger();
+  if (otelLogger) {
     // Correlate to the active NEATLOGS span, not the global active span: in
     // isolated mode the latter is the foreign co-tenant's (Datadog/Braintrust)
     // span, which would either mis-correlate the log or attach a foreign context.
@@ -73,7 +87,7 @@ export function log(
     }
 
     try {
-      _otelLogger.emit({
+      otelLogger.emit({
         body: rendered,
         attributes,
         // The OTel Logs API accepts a Context, not a raw SpanContext. Passing
@@ -94,39 +108,49 @@ export function log(
  * @returns The return value of fn
  */
 export async function captureStdout<T>(fn: () => T | Promise<T>): Promise<T> {
-  if (!_otelLogger) {
+  if (!resolveOtelLogger()) {
     return fn();
   }
 
-  const originalLog = console.log;
-  // Correlate to the active Neatlogs span (not the global active span) — same
-  // reasoning as log(): in isolated mode the global span is a co-tenant's.
-  const activeSpan = getActiveNeatlogsSpan();
-  const activeContext = activeSpan ? getNeatlogsActiveContext() : undefined;
-
-  console.log = (...args: any[]) => {
-    // Still output to console
-    originalLog.apply(console, args);
-
-    // Also emit as OTel log record
-    const message = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-    try {
-      _otelLogger.emit({
-        body: message,
-        attributes: {
-          'log.source': 'stdout',
-          'log.level': 'info',
-        },
-        ...(activeContext ? { context: activeContext } : {}),
-      });
-    } catch {
-      // Ignore errors in log capture
-    }
-  };
+  if (stdoutCaptureDepth === 0) {
+    originalConsoleLog = console.log;
+    captureConsoleLog = (...args: any[]) => {
+      originalConsoleLog?.apply(console, args);
+      if (!stdoutCaptureContext.getStore()) return;
+      const otelLogger = resolveOtelLogger();
+      if (!otelLogger) return;
+      const activeSpan = getActiveNeatlogsSpan();
+      const activeContext = activeSpan ? getNeatlogsActiveContext() : undefined;
+      const message = args
+        .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
+        .join(' ');
+      try {
+        otelLogger.emit({
+          body: message,
+          attributes: {
+            'log.source': 'stdout',
+            'log.level': 'info',
+          },
+          ...(activeContext ? { context: activeContext } : {}),
+        });
+      } catch {
+        // Ignore errors in log capture
+      }
+    };
+    console.log = captureConsoleLog;
+  }
+  stdoutCaptureDepth += 1;
 
   try {
-    return await fn();
+    return await stdoutCaptureContext.run(true, fn);
   } finally {
-    console.log = originalLog;
+    stdoutCaptureDepth -= 1;
+    if (stdoutCaptureDepth === 0) {
+      if (captureConsoleLog && console.log === captureConsoleLog && originalConsoleLog) {
+        console.log = originalConsoleLog;
+      }
+      originalConsoleLog = null;
+      captureConsoleLog = null;
+    }
   }
 }

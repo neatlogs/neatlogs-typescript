@@ -19,6 +19,7 @@ import {
   type Tracer,
   type TracerProvider,
 } from '@opentelemetry/api';
+import { getActiveClient } from './active-client.js';
 
 // Carries the trace-ROOT span down the private context so descendants can target
 // it (e.g. setTraceOutput). getActiveNeatlogsSpan() returns the innermost span,
@@ -88,7 +89,26 @@ export function _setNeatlogsProvider(provider: TracerProvider | null): void {
 
 /** Resolve a tracer from the private provider when one is configured. */
 export function getNeatlogsTracer(name: string): Tracer {
+  const client = getActiveClient();
+  if (client) return client.getTracer(name);
   return providerState.provider?.getTracer(name) ?? preInitTracer;
+}
+
+/** A reusable tracer facade that resolves the active Client on every call. */
+export function getRoutingNeatlogsTracer(name: string): Tracer {
+  return {
+    startSpan(spanName: string, options?: SpanOptions, context?: Context): Span {
+      return isolateTracer(getNeatlogsTracer(name)).startSpan(
+        spanName,
+        options,
+        context,
+      );
+    },
+    startActiveSpan: ((...args: any[]) =>
+      (isolateTracer(getNeatlogsTracer(name)).startActiveSpan as (...inner: any[]) => any)(
+        ...args,
+      )) as Tracer['startActiveSpan'],
+  };
 }
 
 /**
@@ -97,7 +117,14 @@ export function getNeatlogsTracer(name: string): Tracer {
  * captured provider onto ours.
  */
 export function getNeatlogsProvider(): TracerProvider | null {
+  const client = getActiveClient();
+  if (client) return client.tracerProvider;
   return providerState.provider;
+}
+
+/** Run a Client callback without inheriting another pipeline's private span. */
+export function runWithFreshNeatlogsContext<T>(fn: () => T): T {
+  return privateContextStorage.run(ROOT_CONTEXT, fn);
 }
 
 /**

@@ -37,6 +37,7 @@ import {
   getNeatlogsParentContext,
   getActiveNeatlogsSpan,
 } from './provider.js';
+import { getActiveClient } from './active-client.js';
 
 // A parentless span of one of these kinds already satisfies the backend's
 // root requirement, so it must NOT be wrapped in another root.
@@ -48,6 +49,8 @@ function autoRootEnabled(): boolean {
 }
 
 function resolveRootWorkflowName(): string {
+  const clientName = getActiveClient()?.workflowName;
+  if (typeof clientName === 'string' && clientName.trim()) return clientName;
   try {
     const name = getSessionConfig()?.workflowName;
     if (typeof name === 'string' && name.trim()) return name;

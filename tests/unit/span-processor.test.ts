@@ -3,8 +3,13 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { NeatlogsSpanProcessor, spanToDict } from '../../src/core/span-processor.js';
 import {
+  CompletionMarkerSpanProcessor,
+  NeatlogsSpanProcessor,
+  spanToDict,
+} from '../../src/core/span-processor.js';
+import {
+  BatchSpanProcessor,
   BasicTracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
@@ -19,6 +24,7 @@ import {
 } from '@opentelemetry/api';
 import type { HrTime, SpanContext } from '@opentelemetry/api';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
+import { FilteringExporter } from '../../src/core/filtering-exporter.js';
 
 // ────────────────────────────────────────────────────────
 // Mock UnifiedAttributeProcessor
@@ -211,7 +217,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Graceful active-span finalization ─────────────────
 
   describe('endActiveSpans', () => {
-    it('ends Neatlogs spans child-first exactly once without changing status or adding events', async () => {
+    it('ends spans child-first once, preserving OK and marking unfinished spans ERROR', async () => {
       const exporter = new InMemorySpanExporter();
       const provider = new BasicTracerProvider();
       provider.addSpanProcessor(processor);
@@ -241,7 +247,7 @@ describe('NeatlogsSpanProcessor', () => {
         const finishedRoot = spans.find((span) => span.name === 'workflow')!;
         const finishedChild = spans.find((span) => span.name === 'agent')!;
         expect(finishedRoot.status.code).toBe(SpanStatusCode.OK);
-        expect(finishedChild.status.code).toBe(SpanStatusCode.UNSET);
+        expect(finishedChild.status.code).toBe(SpanStatusCode.ERROR);
         expect(finishedRoot.attributes['neatlogs.trace.interrupted']).toBe(true);
         expect(
           finishedRoot.attributes['neatlogs.trace.termination.reason'],
@@ -250,12 +256,124 @@ describe('NeatlogsSpanProcessor', () => {
         expect(
           finishedChild.attributes['neatlogs.trace.termination.reason'],
         ).toBe('SIGTERM');
-        expect(finishedRoot.events).toHaveLength(0);
-        expect(finishedChild.events).toHaveLength(0);
+        expect(finishedRoot.events).toHaveLength(1);
+        expect(finishedChild.events).toHaveLength(1);
+        expect(finishedRoot.events[0].name).toBe('neatlogs.trace.interrupted');
+        expect(finishedChild.events[0].name).toBe('neatlogs.trace.interrupted');
       } finally {
         foreign.end();
         await provider.shutdown();
         _setNeatlogsProvider(null);
+      }
+    });
+
+    it('closes cached-tracer spans started after shutdown begins', async () => {
+      const exporter = new InMemorySpanExporter();
+      const provider = new BasicTracerProvider();
+      const lifecycle = new NeatlogsSpanProcessor({ emitCompletionMarkers: false });
+      provider.addSpanProcessor(lifecycle);
+      provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+      const tracer = provider.getTracer('neatlogs.test');
+
+      try {
+        expect(lifecycle.endActiveSpans('SIGTERM\nforged=value')).toBe(0);
+        const late = tracer.startSpan('late');
+        expect(late.isRecording()).toBe(false);
+        const finished = exporter
+          .getFinishedSpans()
+          .find((span) => span.name === 'late')!;
+        expect(finished.status.code).toBe(SpanStatusCode.ERROR);
+        expect(
+          finished.attributes['neatlogs.trace.termination.reason'],
+        ).toBe('SIGTERM forged=value');
+      } finally {
+        await provider.shutdown();
+      }
+    });
+
+    it('queues the root before its completion marker', async () => {
+      const exporter = new InMemorySpanExporter();
+      const provider = new BasicTracerProvider();
+      const lifecycle = new NeatlogsSpanProcessor({ emitCompletionMarkers: false });
+      provider.addSpanProcessor(lifecycle);
+      provider.addSpanProcessor(
+        new BatchSpanProcessor(exporter, {
+          maxExportBatchSize: 1,
+          scheduledDelayMillis: 60_000,
+        }),
+      );
+      provider.addSpanProcessor(
+        new CompletionMarkerSpanProcessor(
+          lifecycle,
+          provider.getTracer('neatlogs.internal'),
+        ),
+      );
+
+      try {
+        provider.getTracer('neatlogs.test').startSpan('workflow').end();
+        await provider.forceFlush();
+        const names = exporter.getFinishedSpans().map((span) => span.name);
+        expect(names.indexOf('workflow')).toBeLessThan(
+          names.indexOf('neatlogs.trace.complete'),
+        );
+      } finally {
+        await provider.shutdown();
+      }
+    });
+
+    it('emits roots ending after the deferred-marker boundary', async () => {
+      const exporter = new InMemorySpanExporter();
+      const provider = new BasicTracerProvider();
+      const lifecycle = new NeatlogsSpanProcessor({ emitCompletionMarkers: false });
+      provider.addSpanProcessor(lifecycle);
+      provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+      const completion = new CompletionMarkerSpanProcessor(
+        lifecycle,
+        provider.getTracer('neatlogs.internal'),
+      );
+      provider.addSpanProcessor(completion);
+
+      try {
+        completion.beginShutdown();
+        provider.getTracer('neatlogs.test').startSpan('before-boundary').end();
+        completion.emitDeferred();
+        provider.getTracer('neatlogs.test').startSpan('after-boundary').end();
+        expect(
+          exporter
+            .getFinishedSpans()
+            .filter((span) => span.name === 'neatlogs.trace.complete'),
+        ).toHaveLength(2);
+      } finally {
+        await provider.shutdown();
+      }
+    });
+
+    it('does not emit a completion marker for a masked-out root', async () => {
+      const exporter = new InMemorySpanExporter();
+      const provider = new BasicTracerProvider();
+      const lifecycle = new NeatlogsSpanProcessor({
+        emitCompletionMarkers: false,
+        mask: () => null,
+      });
+      provider.addSpanProcessor(lifecycle);
+      provider.addSpanProcessor(
+        new BatchSpanProcessor(new FilteringExporter(exporter), {
+          scheduledDelayMillis: 60_000,
+        }),
+      );
+      provider.addSpanProcessor(
+        new CompletionMarkerSpanProcessor(
+          lifecycle,
+          provider.getTracer('neatlogs.internal'),
+        ),
+      );
+
+      try {
+        provider.getTracer('neatlogs.test').startSpan('dropped-root').end();
+        await provider.forceFlush();
+        expect(exporter.getFinishedSpans()).toEqual([]);
+      } finally {
+        await provider.shutdown();
       }
     });
   });
