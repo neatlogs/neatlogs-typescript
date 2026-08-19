@@ -265,7 +265,7 @@ describe('retrieverPostprocessor edge cases', () => {
     retrieverPostprocessor(spanObj as any, [], { something_else: 'value' });
 
     const queryCalls = spanObj.setAttribute.mock.calls.filter(
-      ([key]: [string]) => key === 'retrieval.query',
+      ([key]: [string]) => key === 'neatlogs.retriever.query',
     );
     expect(queryCalls).toHaveLength(0);
   });
@@ -274,7 +274,7 @@ describe('retrieverPostprocessor edge cases', () => {
     retrieverPostprocessor(spanObj as any, [], { query: 42 });
 
     const queryCalls = spanObj.setAttribute.mock.calls.filter(
-      ([key]: [string]) => key === 'retrieval.query',
+      ([key]: [string]) => key === 'neatlogs.retriever.query',
     );
     expect(queryCalls).toHaveLength(0);
   });
@@ -285,11 +285,11 @@ describe('retrieverPostprocessor edge cases', () => {
 
     // Should set id and score but not content
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.id',
+      'neatlogs.retriever.documents.0.id',
       'doc1',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.score',
+      'neatlogs.retriever.documents.0.score',
       0.9,
     );
     const contentCalls = spanObj.setAttribute.mock.calls.filter(
@@ -301,9 +301,10 @@ describe('retrieverPostprocessor edge cases', () => {
   it('should handle empty array result', () => {
     retrieverPostprocessor(spanObj as any, [], { query: 'test' });
 
-    expect(spanObj.setAttribute).toHaveBeenCalledWith('retrieval.query', 'test');
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.query', 'test');
     const docCalls = spanObj.setAttribute.mock.calls.filter(
-      ([key]: [string]) => typeof key === 'string' && key.startsWith('retrieval.documents'),
+      ([key]: [string]) =>
+        typeof key === 'string' && key.startsWith('neatlogs.retriever.documents'),
     );
     expect(docCalls).toHaveLength(0);
   });
@@ -314,7 +315,8 @@ describe('retrieverPostprocessor edge cases', () => {
 
     // Should not set any document attributes
     const docCalls = spanObj.setAttribute.mock.calls.filter(
-      ([key]: [string]) => typeof key === 'string' && key.startsWith('retrieval.documents'),
+      ([key]: [string]) =>
+        typeof key === 'string' && key.startsWith('neatlogs.retriever.documents'),
     );
     expect(docCalls).toHaveLength(0);
   });
@@ -324,7 +326,7 @@ describe('retrieverPostprocessor edge cases', () => {
     retrieverPostprocessor(spanObj as any, docs, {});
 
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.id',
+      'neatlogs.retriever.documents.0.id',
       '123', // Should be converted to string
     );
   });
@@ -334,7 +336,7 @@ describe('retrieverPostprocessor edge cases', () => {
     retrieverPostprocessor(spanObj as any, docs, {});
 
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.documents.0.content',
       'c1',
     );
   });
@@ -344,7 +346,7 @@ describe('retrieverPostprocessor edge cases', () => {
     retrieverPostprocessor(spanObj as any, docs, {});
 
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.documents.0.content',
       'p1',
     );
   });
@@ -357,13 +359,16 @@ describe('retrieverPostprocessor edge cases', () => {
     };
     retrieverPostprocessor(spanObj as any, result, { query: 'search query' });
 
-    expect(spanObj.setAttribute).toHaveBeenCalledWith('retrieval.query', 'search query');
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.query',
+      'search query',
+    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.retriever.documents.0.content',
       'result-text',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.score',
+      'neatlogs.retriever.documents.0.score',
       0.95,
     );
   });

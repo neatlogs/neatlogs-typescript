@@ -94,8 +94,8 @@ async function main() {
 
   async function retrieveDocuments(query: string, topK: number = 3): Promise<Array<{ id: string; content: string; title: string; score: number }>> {
     return trace({ name: 'knowledge_base_search', kind: 'RETRIEVER' as any }, async (s) => {
-      s.setAttribute('neatlogs.retrieval.query', query);
-      s.setAttribute('neatlogs.retrieval.top_k', topK);
+      s.setAttribute('neatlogs.retriever.query', query);
+      s.setAttribute('neatlogs.retriever.top_k', topK);
 
       const qResp = await client.embeddings.create({
         model: 'text-embedding-3-small',
@@ -113,7 +113,7 @@ async function main() {
         title: ARTICLES[r.idx].title,
         score: Math.round(r.score * 10000) / 10000,
       }));
-      s.setAttribute('neatlogs.retrieval.documents', JSON.stringify(docs));
+      s.setAttribute('neatlogs.retriever.documents', JSON.stringify(docs));
 
       log('retrieved {count} documents for: {query}', { count: results.length, query });
       return docs;

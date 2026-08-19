@@ -392,7 +392,7 @@ Sets both mcp.* and standard attributes
 retrieverPostprocessor(span, result, boundInputs) — extract documents from result:
 Look for query in query, question, text keys
 Extract documents from list/tuple results or dict with documents/docs/results keys
-Set retrieval.documents.N.document.* attributes (up to 20 docs)
+Set canonical neatlogs.retriever.documents.N.* attributes for every document
 Also export a class-method decorator variant:
 
 Span(options: SpanOptions) — TC39 Stage 3 decorator for class methods
