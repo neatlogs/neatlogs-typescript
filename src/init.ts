@@ -35,6 +35,7 @@ import { getLogger, enableDebugLogging } from './core/logger.js';
 import { PromptClient, setSharedClient } from './prompt/client.js';
 import { _resetMastraCache } from './mastra.js';
 import { __version__ } from './version.js';
+import { NeatlogsConfigurationError } from './errors.js';
 import type { InitOptions } from './types.js';
 
 const logger = getLogger();
@@ -112,6 +113,49 @@ function _resolveWorkflowName(workflowName?: string): string {
   return 'neatlogs-app';
 }
 
+const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
+  'apiKey',
+  'workflowName',
+  'userId',
+  'tags',
+  'metadata',
+  'debug',
+  'disableExport',
+  'tracerProvider',
+  'registerShutdownHandlers',
+  'mask',
+  'sampleRate',
+  'captureLogs',
+  'pii',
+  'version',
+  'endpoint',
+  'batchSize',
+  'flushInterval',
+  'piiEnabled',
+  'piiSpanTypes',
+]);
+
+function validateInitOptions(options: InitOptions): void {
+  const raw = options as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(raw, 'instrumentations')) {
+    throw new NeatlogsConfigurationError(
+      'UNSUPPORTED_INSTRUMENTATIONS',
+      'instrumentations',
+      'The instrumentations option was removed. Use an explicit Neatlogs wrapper, handler, hook, processor, or plugin for the library instance.',
+    );
+  }
+  const unknown = Object.keys(raw).find(
+    (key) => !INIT_OPTION_KEYS.has(key as keyof InitOptions),
+  );
+  if (unknown) {
+    throw new NeatlogsConfigurationError(
+      'UNKNOWN_INIT_OPTION',
+      unknown,
+      `Unknown Neatlogs init option: ${unknown}`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // init()
 // ---------------------------------------------------------------------------
@@ -124,6 +168,11 @@ function _resolveWorkflowName(workflowName?: string): string {
  * across concurrent callers and future asynchronous transports.
  */
 export function init(options: InitOptions = {}): Promise<void> {
+  try {
+    validateInitOptions(options);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   if (_lifecycleState === 'initializing' && _initPromise) return _initPromise;
   if (_lifecycleState === 'closing' && _shutdownPromise) {
     return _shutdownPromise.then(() => init(options));

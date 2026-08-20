@@ -24,6 +24,10 @@
 // Lifecycle
 export { init, flush, flushAll, shutdown, isDebugEnabled, getSessionConfig } from './init.js';
 export { Client, type ClientOptions } from './core/client.js';
+export {
+  NeatlogsConfigurationError,
+  type NeatlogsConfigurationErrorCode,
+} from './errors.js';
 
 // Instrumentation
 export { span, Span } from './decorators/index.js';

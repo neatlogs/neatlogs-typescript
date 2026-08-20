@@ -92,6 +92,7 @@ vi.mock('../../src/core/log.js', () => ({
 
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';
 import { _setSessionConfig } from '../../src/core/context.js';
+import { NeatlogsConfigurationError } from '../../src/errors.js';
 
 describe('init()', () => {
   beforeEach(() => {
@@ -108,6 +109,26 @@ describe('init()', () => {
     await init({ apiKey: 'test-key', disableExport: true });
     // Calling init again should be a no-op (no error)
     await init({ apiKey: 'test-key', disableExport: true });
+  });
+
+  it('rejects the removed instrumentations option with a typed error', async () => {
+    await expect(
+      init({ instrumentations: ['openai'] } as any),
+    ).rejects.toMatchObject({
+      name: 'NeatlogsConfigurationError',
+      code: 'UNSUPPORTED_INSTRUMENTATIONS',
+      option: 'instrumentations',
+    });
+    await expect(init({ instrumentations: [] } as any)).rejects.toBeInstanceOf(
+      NeatlogsConfigurationError,
+    );
+  });
+
+  it('rejects unknown init options instead of silently ignoring typos', async () => {
+    await expect(init({ sampleRtae: 0.5 } as any)).rejects.toMatchObject({
+      code: 'UNKNOWN_INIT_OPTION',
+      option: 'sampleRtae',
+    });
   });
 
   it('does not register its tracer or meter globally', async () => {
