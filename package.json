@@ -175,10 +175,21 @@
         "types": "./dist/browser.d.ts",
         "default": "./dist/browser.cjs"
       }
+    },
+    "./doctor": {
+      "import": {
+        "types": "./dist/doctor/index.d.ts",
+        "default": "./dist/doctor/index.mjs"
+      },
+      "require": {
+        "types": "./dist/doctor/index.d.ts",
+        "default": "./dist/doctor/index.cjs"
+      }
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
   "engines": {
     "node": ">=18.0.0"
@@ -206,7 +217,8 @@
     "example:pi-agent": "tsx examples/pi_agent_workflow/main.mts",
     "example:pi-agent:surface": "tsx examples/pi_agent_workflow/surface.mts",
     "test:examples:original7": "node scripts/run-original7-examples.mjs",
-    "verify:logs": "node scripts/verify-original7-logs.mjs"
+    "verify:logs": "node scripts/verify-original7-logs.mjs",
+    "doctor": "node bin/neatlogs-doctor.mjs"
   },
   "keywords": [
     "observability",
