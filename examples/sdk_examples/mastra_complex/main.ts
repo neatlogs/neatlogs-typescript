@@ -45,7 +45,6 @@ async function main() {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: 'mastra-customer-health',
     tags: ['mastra', 'workflow', 'complex', 'mcp', 'langgraph'],
-    instrumentations: ['mastra', 'google_genai', 'openai', 'langchain', 'mcp'],
     captureLogs: true,
     disableExport: false,
     debug: true,

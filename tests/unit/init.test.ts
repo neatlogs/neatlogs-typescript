@@ -49,21 +49,6 @@ vi.mock('@opentelemetry/api', async (importOriginal) => {
   };
 });
 
-vi.mock('@opentelemetry/api-logs', () => ({
-  logs: { setGlobalLoggerProvider: vi.fn() },
-}));
-
-vi.mock('@opentelemetry/sdk-metrics', () => {
-  const forceFlush = vi.fn().mockResolvedValue(undefined);
-  const shutdownFn = vi.fn().mockResolvedValue(undefined);
-  return {
-    MeterProvider: vi.fn().mockImplementation(() => ({
-      forceFlush,
-      shutdown: shutdownFn,
-    })),
-  };
-});
-
 vi.mock('@opentelemetry/sdk-logs', () => {
   const getLoggerFn = vi.fn().mockReturnValue({ emit: vi.fn() });
   const addLogRecordProcessor = vi.fn();
@@ -103,17 +88,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
 
 vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
-}));
-
-vi.mock('../../src/instrumentation/manager.js', () => ({
-  InstrumentationManager: vi.fn().mockImplementation(() => ({
-    instrumentHttp: vi.fn().mockResolvedValue(undefined),
-    instrument: vi.fn().mockResolvedValue(undefined),
-    disable: vi.fn(),
-    instrumented: [],
-  })),
-  // Pre-flight isolation gate init() calls before touching module state.
-  assertInstrumentationsIsolationSafe: vi.fn(),
 }));
 
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';
@@ -199,7 +173,11 @@ describe('init()', () => {
 
   it('with invalid tags throws', async () => {
     await expect(
-      init({ apiKey: 'test-key', disableExport: true, tags: [1 as any, 2 as any] }),
+      init({
+        apiKey: 'test-key',
+        disableExport: true,
+        tags: [1 as any, 2 as any],
+      }),
     ).rejects.toThrow('tags must be a list of strings');
   });
 
@@ -265,11 +243,8 @@ describe('init()', () => {
   });
 
   it('sets up OTLP log export when captureLogs: true', async () => {
-    const {
-      LoggerProvider,
-      BatchLogRecordProcessor,
-      SimpleLogRecordProcessor,
-    } = await import('@opentelemetry/sdk-logs');
+    const { LoggerProvider, BatchLogRecordProcessor, SimpleLogRecordProcessor } =
+      await import('@opentelemetry/sdk-logs');
     const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
     const { _setOtelLogger } = await import('../../src/core/log.js');
 
@@ -295,11 +270,8 @@ describe('init()', () => {
   });
 
   it('keeps the log provider local when captureLogs is enabled but export is disabled', async () => {
-    const {
-      LoggerProvider,
-      BatchLogRecordProcessor,
-      SimpleLogRecordProcessor,
-    } = await import('@opentelemetry/sdk-logs');
+    const { LoggerProvider, BatchLogRecordProcessor, SimpleLogRecordProcessor } =
+      await import('@opentelemetry/sdk-logs');
     const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
     const { _setOtelLogger } = await import('../../src/core/log.js');
 
@@ -420,9 +392,7 @@ describe('shutdown()', () => {
       registerShutdownHandlers: true,
     });
     const spanProcessor = (NeatlogsSpanProcessor as any).mock.results.at(-1).value;
-    const handler = process
-      .listeners('SIGTERM')
-      .find((listener) => !listenersBefore.has(listener));
+    const handler = process.listeners('SIGTERM').find((listener) => !listenersBefore.has(listener));
     expect(handler).toBeDefined();
 
     (handler as (signal: NodeJS.Signals) => void)('SIGTERM');

@@ -48,12 +48,22 @@ vi.mock('../../src/core/crewai-task-registry.js', () => ({
   popEntry: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock('../../src/core/mask.js', () => ({
-  applyMask: vi.fn().mockImplementation((data: any, _mask: any) => {
-    if (_mask) return _mask(data);
+vi.mock('../../src/core/mask.js', () => {
+  const results = new WeakMap<object, Promise<any>>();
+  const applyMask = vi.fn().mockImplementation(async (data: any, mask: any) => {
+    if (mask) return mask(data);
     return data;
-  }),
-}));
+  });
+  return {
+    applyMask,
+    scheduleMask: vi.fn().mockImplementation((span: object, data: any, mask: any) => {
+      const result = applyMask(data, mask);
+      results.set(span, result);
+      return result;
+    }),
+    getScheduledMask: vi.fn().mockImplementation((span: object) => results.get(span)),
+  };
+});
 
 vi.mock('../../src/prompt/template.js', () => ({
   PromptContext: {
@@ -74,20 +84,22 @@ function makeHrTime(seconds: number, nanos: number): HrTime {
   return [seconds, nanos];
 }
 
-function makeMockSpan(overrides: Partial<{
-  name: string;
-  kind: SpanKind;
-  traceId: string;
-  spanId: string;
-  parentSpanId: string | undefined;
-  startTime: HrTime;
-  endTime: HrTime;
-  attributes: Record<string, any>;
-  resource: { attributes: Record<string, any> };
-  status: { code: SpanStatusCode; message?: string };
-  events: any[];
-  instrumentationLibrary: { name: string; version?: string } | undefined;
-}> = {}): ReadableSpan {
+function makeMockSpan(
+  overrides: Partial<{
+    name: string;
+    kind: SpanKind;
+    traceId: string;
+    spanId: string;
+    parentSpanId: string | undefined;
+    startTime: HrTime;
+    endTime: HrTime;
+    attributes: Record<string, any>;
+    resource: { attributes: Record<string, any> };
+    status: { code: SpanStatusCode; message?: string };
+    events: any[];
+    instrumentationLibrary: { name: string; version?: string } | undefined;
+  }> = {},
+): ReadableSpan {
   const traceId = overrides.traceId ?? '0af7651916cd43dd8448eb211c80319c';
   const spanId = overrides.spanId ?? 'b7ad6b7169203331';
   const parentSpanId = overrides.parentSpanId;
@@ -113,7 +125,9 @@ function makeMockSpan(overrides: Partial<{
     links: [],
     duration: makeHrTime(1, 0),
     ended: true,
-    instrumentationLibrary: overrides.instrumentationLibrary ?? { name: 'test' },
+    instrumentationLibrary: overrides.instrumentationLibrary ?? {
+      name: 'test',
+    },
     droppedAttributesCount: 0,
     droppedEventsCount: 0,
     droppedLinksCount: 0,
@@ -146,10 +160,12 @@ describe('NeatlogsSpanProcessor', () => {
   });
 
   /** Create a minimal mock object conforming to the WriteStream interface used by closeLogStream. */
-  function makeMockLogStream(opts: {
-    destroyed?: boolean;
-    write?: (data: string) => void;
-  } = {}) {
+  function makeMockLogStream(
+    opts: {
+      destroyed?: boolean;
+      write?: (data: string) => void;
+    } = {},
+  ) {
     const listeners = new Map<string, Set<(...args: any[]) => void>>();
     return {
       destroyed: opts.destroyed ?? false,
@@ -193,9 +209,10 @@ describe('NeatlogsSpanProcessor', () => {
       expect(attrs['neatlogs.llm.model_name']).toBe('gpt-4o');
     });
 
-    it('should increment spansProcessed and spansExported', () => {
+    it('should increment spansProcessed and spansExported', async () => {
       const span = makeMockSpan();
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(processor._perfStats.spansProcessed).toBe(1);
       expect(processor._perfStats.spansExported).toBe(1);
@@ -227,17 +244,16 @@ describe('NeatlogsSpanProcessor', () => {
       const tracer = provider.getTracer('neatlogs.test');
       const root = tracer.startSpan('workflow');
       root.setStatus({ code: SpanStatusCode.OK });
-      const child = provider.getTracer('openinference.test').startSpan(
-        'agent',
-        undefined,
-        otelTrace.setSpan(ROOT_CONTEXT, root),
-      );
+      const child = provider
+        .getTracer('openinference.test')
+        .startSpan('agent', undefined, otelTrace.setSpan(ROOT_CONTEXT, root));
       const foreign = provider.getTracer('foreign.test').startSpan('foreign');
 
       try {
         expect(processor.endActiveSpans('SIGTERM')).toBe(2);
         expect(processor.endActiveSpans('SIGTERM')).toBe(0);
         expect(foreign.isRecording()).toBe(true);
+        await processor.forceFlush();
 
         const spans = exporter.getFinishedSpans();
         const names = spans.map((span) => span.name);
@@ -249,13 +265,9 @@ describe('NeatlogsSpanProcessor', () => {
         expect(finishedRoot.status.code).toBe(SpanStatusCode.OK);
         expect(finishedChild.status.code).toBe(SpanStatusCode.ERROR);
         expect(finishedRoot.attributes['neatlogs.trace.interrupted']).toBe(true);
-        expect(
-          finishedRoot.attributes['neatlogs.trace.termination.reason'],
-        ).toBe('SIGTERM');
+        expect(finishedRoot.attributes['neatlogs.trace.termination.reason']).toBe('SIGTERM');
         expect(finishedChild.attributes['neatlogs.trace.interrupted']).toBe(true);
-        expect(
-          finishedChild.attributes['neatlogs.trace.termination.reason'],
-        ).toBe('SIGTERM');
+        expect(finishedChild.attributes['neatlogs.trace.termination.reason']).toBe('SIGTERM');
         expect(finishedRoot.events).toHaveLength(1);
         expect(finishedChild.events).toHaveLength(1);
         expect(finishedRoot.events[0].name).toBe('neatlogs.trace.interrupted');
@@ -270,7 +282,9 @@ describe('NeatlogsSpanProcessor', () => {
     it('closes cached-tracer spans started after shutdown begins', async () => {
       const exporter = new InMemorySpanExporter();
       const provider = new BasicTracerProvider();
-      const lifecycle = new NeatlogsSpanProcessor({ emitCompletionMarkers: false });
+      const lifecycle = new NeatlogsSpanProcessor({
+        emitCompletionMarkers: false,
+      });
       provider.addSpanProcessor(lifecycle);
       provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
       const tracer = provider.getTracer('neatlogs.test');
@@ -279,13 +293,11 @@ describe('NeatlogsSpanProcessor', () => {
         expect(lifecycle.endActiveSpans('SIGTERM\nforged=value')).toBe(0);
         const late = tracer.startSpan('late');
         expect(late.isRecording()).toBe(false);
-        const finished = exporter
-          .getFinishedSpans()
-          .find((span) => span.name === 'late')!;
+        const finished = exporter.getFinishedSpans().find((span) => span.name === 'late')!;
         expect(finished.status.code).toBe(SpanStatusCode.ERROR);
-        expect(
-          finished.attributes['neatlogs.trace.termination.reason'],
-        ).toBe('SIGTERM forged=value');
+        expect(finished.attributes['neatlogs.trace.termination.reason']).toBe(
+          'SIGTERM forged=value',
+        );
       } finally {
         await provider.shutdown();
       }
@@ -294,7 +306,9 @@ describe('NeatlogsSpanProcessor', () => {
     it('queues the root before its completion marker', async () => {
       const exporter = new InMemorySpanExporter();
       const provider = new BasicTracerProvider();
-      const lifecycle = new NeatlogsSpanProcessor({ emitCompletionMarkers: false });
+      const lifecycle = new NeatlogsSpanProcessor({
+        emitCompletionMarkers: false,
+      });
       provider.addSpanProcessor(lifecycle);
       provider.addSpanProcessor(
         new BatchSpanProcessor(exporter, {
@@ -302,20 +316,19 @@ describe('NeatlogsSpanProcessor', () => {
           scheduledDelayMillis: 60_000,
         }),
       );
-      provider.addSpanProcessor(
-        new CompletionMarkerSpanProcessor(
-          lifecycle,
-          provider.getTracer('neatlogs.internal'),
-        ),
+      const completion = new CompletionMarkerSpanProcessor(
+        lifecycle,
+        provider.getTracer('neatlogs.internal'),
       );
+      provider.addSpanProcessor(completion);
 
       try {
         provider.getTracer('neatlogs.test').startSpan('workflow').end();
+        await lifecycle.forceFlush();
+        await completion.forceFlush();
         await provider.forceFlush();
         const names = exporter.getFinishedSpans().map((span) => span.name);
-        expect(names.indexOf('workflow')).toBeLessThan(
-          names.indexOf('neatlogs.trace.complete'),
-        );
+        expect(names.indexOf('workflow')).toBeLessThan(names.indexOf('neatlogs.trace.complete'));
       } finally {
         await provider.shutdown();
       }
@@ -324,7 +337,9 @@ describe('NeatlogsSpanProcessor', () => {
     it('emits roots ending after the deferred-marker boundary', async () => {
       const exporter = new InMemorySpanExporter();
       const provider = new BasicTracerProvider();
-      const lifecycle = new NeatlogsSpanProcessor({ emitCompletionMarkers: false });
+      const lifecycle = new NeatlogsSpanProcessor({
+        emitCompletionMarkers: false,
+      });
       provider.addSpanProcessor(lifecycle);
       provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
       const completion = new CompletionMarkerSpanProcessor(
@@ -338,10 +353,10 @@ describe('NeatlogsSpanProcessor', () => {
         provider.getTracer('neatlogs.test').startSpan('before-boundary').end();
         completion.emitDeferred();
         provider.getTracer('neatlogs.test').startSpan('after-boundary').end();
+        await lifecycle.forceFlush();
+        await completion.forceFlush();
         expect(
-          exporter
-            .getFinishedSpans()
-            .filter((span) => span.name === 'neatlogs.trace.complete'),
+          exporter.getFinishedSpans().filter((span) => span.name === 'neatlogs.trace.complete'),
         ).toHaveLength(2);
       } finally {
         await provider.shutdown();
@@ -362,10 +377,7 @@ describe('NeatlogsSpanProcessor', () => {
         }),
       );
       provider.addSpanProcessor(
-        new CompletionMarkerSpanProcessor(
-          lifecycle,
-          provider.getTracer('neatlogs.internal'),
-        ),
+        new CompletionMarkerSpanProcessor(lifecycle, provider.getTracer('neatlogs.internal')),
       );
 
       try {
@@ -519,7 +531,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Completion marker ─────────────────────────────────
 
   describe('completion marker', () => {
-    it('should emit completion marker for root spans (no parent)', () => {
+    it('should emit completion marker for root spans (no parent)', async () => {
       const mockStartSpan = vi.fn().mockReturnValue({
         setAttribute: vi.fn(),
         end: vi.fn(),
@@ -536,6 +548,7 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(getTracerSpy).toHaveBeenCalledWith('neatlogs.internal');
       expect(mockStartSpan).toHaveBeenCalledWith(
@@ -567,7 +580,7 @@ describe('NeatlogsSpanProcessor', () => {
       // Child spans do not create completion markers.
     });
 
-    it('should copy neatlogs.tags from resource to completion marker', () => {
+    it('should copy neatlogs.tags from resource to completion marker', async () => {
       const mockSetAttribute = vi.fn();
       const mockStartSpan = vi.fn().mockReturnValue({
         setAttribute: mockSetAttribute,
@@ -587,13 +600,14 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.tags', ['prod', 'v2']);
 
       _setNeatlogsProvider(null);
     });
 
-    it('should copy root session and end-user identity to the completion marker', () => {
+    it('should copy root session and end-user identity to the completion marker', async () => {
       const mockSetAttribute = vi.fn();
       const mockStartSpan = vi.fn().mockReturnValue({
         setAttribute: mockSetAttribute,
@@ -618,31 +632,17 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
-      expect(mockSetAttribute).toHaveBeenCalledWith(
-        'neatlogs.session.id',
-        'conversation-123',
-      );
+      expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.session.id', 'conversation-123');
       expect(mockSetAttribute).toHaveBeenCalledWith(
         'neatlogs.session.parent_id',
         'conversation-parent',
       );
-      expect(mockSetAttribute).toHaveBeenCalledWith(
-        'neatlogs.session.feature.name',
-        'copilot',
-      );
-      expect(mockSetAttribute).toHaveBeenCalledWith(
-        'neatlogs.session.entry_point',
-        'api',
-      );
-      expect(mockSetAttribute).toHaveBeenCalledWith(
-        'neatlogs.end_user.id',
-        'user-456',
-      );
-      expect(mockSetAttribute).toHaveBeenCalledWith(
-        'neatlogs.end_user.metadata',
-        '{"plan":"pro"}',
-      );
+      expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.session.feature.name', 'copilot');
+      expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.session.entry_point', 'api');
+      expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.end_user.id', 'user-456');
+      expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.end_user.metadata', '{"plan":"pro"}');
 
       _setNeatlogsProvider(null);
     });
@@ -652,7 +652,7 @@ describe('NeatlogsSpanProcessor', () => {
 
   describe('mask application', () => {
     it('should call applyMask with the mask function', async () => {
-      const { applyMask: mockApplyMask } = await import('../../src/core/mask.js');
+      const { scheduleMask: mockScheduleMask } = await import('../../src/core/mask.js');
 
       const maskFn = vi.fn((data: Record<string, any>) => {
         const result = { ...data };
@@ -673,11 +673,11 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan();
       maskedProcessor.onEnd(span);
+      await maskedProcessor.forceFlush();
 
-      // applyMask should have been called
-      expect(mockApplyMask).toHaveBeenCalled();
-      const callArgs = (mockApplyMask as any).mock.calls[0];
-      expect(callArgs[1]).toBe(maskFn);
+      expect(mockScheduleMask).toHaveBeenCalled();
+      const callArgs = (mockScheduleMask as any).mock.calls[0];
+      expect(callArgs[2]).toBe(maskFn);
     });
   });
 
@@ -699,7 +699,7 @@ describe('NeatlogsSpanProcessor', () => {
       expect(parsed.name).toBe('test-raw-log');
     });
 
-    it('should write processed spans when processed log stream is open', () => {
+    it('should write processed spans when processed log stream is open', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -708,6 +708,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan({ name: 'test-processed-log' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
@@ -741,10 +742,7 @@ describe('NeatlogsSpanProcessor', () => {
         /** Span name written before shutdown so it appears in log files. */
         spanName: string;
       },
-      assertFn: (paths: {
-        rawLogPath: string;
-        processedLogPath: string;
-      }) => void,
+      assertFn: (paths: { rawLogPath: string; processedLogPath: string }) => void,
     ) {
       await processor.shutdown();
 
@@ -788,9 +786,7 @@ describe('NeatlogsSpanProcessor', () => {
           expect(existsSync(rawLogPath)).toBe(true);
           expect(existsSync(processedLogPath)).toBe(true);
           expect(readFileSync(rawLogPath, 'utf8')).toContain('nested-log-dir-span');
-          expect(readFileSync(processedLogPath, 'utf8')).toContain(
-            'nested-log-dir-span',
-          );
+          expect(readFileSync(processedLogPath, 'utf8')).toContain('nested-log-dir-span');
         },
       );
     });
@@ -802,9 +798,7 @@ describe('NeatlogsSpanProcessor', () => {
           expect(existsSync(rawLogPath)).toBe(true);
           expect(existsSync(processedLogPath)).toBe(true);
           expect(readFileSync(rawLogPath, 'utf8')).toContain('relative-log-dir-span');
-          expect(readFileSync(processedLogPath, 'utf8')).toContain(
-            'relative-log-dir-span',
-          );
+          expect(readFileSync(processedLogPath, 'utf8')).toContain('relative-log-dir-span');
         },
       );
     });
@@ -813,7 +807,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Self-parenting detection ──────────────────────────
 
   describe('self-parenting detection', () => {
-    it('should set parent_span_id to null when span is self-parented', () => {
+    it('should set parent_span_id to null when span is self-parented', async () => {
       const spanId = 'abcdef0123456789';
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
@@ -827,6 +821,7 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
@@ -905,9 +900,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const result = (processor as any)._normalizeFrameworkSpanNames(spans);
       expect(result[0].name).toBe('crewai.task');
-      expect(result[0].attributes['neatlogs.task.description']).toBe(
-        'Research market trends',
-      );
+      expect(result[0].attributes['neatlogs.task.description']).toBe('Research market trends');
     });
 
     it('should not rename non-task spans', () => {
@@ -928,13 +921,8 @@ describe('NeatlogsSpanProcessor', () => {
 
   describe('_injectCrewaiTaskTemplates', () => {
     it('should inject template from registry', async () => {
-      const { popEntry: mockPopEntry } = await import(
-        '../../src/core/crewai-task-registry.js'
-      );
-      (mockPopEntry as any).mockReturnValueOnce([
-        'Research {{topic}}',
-        '{"topic": "AI"}',
-      ]);
+      const { popEntry: mockPopEntry } = await import('../../src/core/crewai-task-registry.js');
+      (mockPopEntry as any).mockReturnValueOnce(['Research {{topic}}', '{"topic": "AI"}']);
 
       const spans = [
         {
@@ -948,12 +936,10 @@ describe('NeatlogsSpanProcessor', () => {
 
       const result = (processor as any)._injectCrewaiTaskTemplates(spans);
 
-      expect(result[0].attributes['neatlogs.task.user_prompt_template']).toBe(
-        'Research {{topic}}',
+      expect(result[0].attributes['neatlogs.task.user_prompt_template']).toBe('Research {{topic}}');
+      expect(result[0].attributes['neatlogs.task.user_prompt_template_variables']).toBe(
+        '{"topic": "AI"}',
       );
-      expect(
-        result[0].attributes['neatlogs.task.user_prompt_template_variables'],
-      ).toBe('{"topic": "AI"}');
       expect(result[0].attributes['neatlogs.span.kind']).toBe('crewai_task');
     });
   });

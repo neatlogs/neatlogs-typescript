@@ -4,7 +4,6 @@ await init({
   apiKey: process.env.NEATLOGS_API_KEY ?? '',
   endpoint: "http://localhost:4100",
   workflowName: 'text-to-sql',
-  instrumentations: ['mastra'],
   debug: true,
 });
 

@@ -33,7 +33,6 @@ async function main() {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: 'openai-investment-research',
     tags: ['openai', 'investment', 'research'],
-    instrumentations: ['openai'],
     captureLogs: true,
     disableExport: false,
     debug: true,

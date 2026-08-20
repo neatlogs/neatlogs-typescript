@@ -4,12 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NeatlogsSpanProcessor, spanToDict } from '../../src/core/span-processor.js';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
-import {
-  SpanKind,
-  SpanStatusCode,
-  TraceFlags,
-  trace as otelTrace,
-} from '@opentelemetry/api';
+import { SpanKind, SpanStatusCode, TraceFlags, trace as otelTrace } from '@opentelemetry/api';
 import type { HrTime, SpanContext } from '@opentelemetry/api';
 
 // ────────────────────────────────────────────────────────
@@ -32,12 +27,22 @@ vi.mock('../../src/core/crewai-task-registry.js', () => ({
   popEntry: vi.fn().mockReturnValue(undefined),
 }));
 
-vi.mock('../../src/core/mask.js', () => ({
-  applyMask: vi.fn().mockImplementation((data: any, _mask: any) => {
-    if (_mask) return _mask(data);
+vi.mock('../../src/core/mask.js', () => {
+  const results = new WeakMap<object, Promise<any>>();
+  const applyMask = vi.fn().mockImplementation(async (data: any, mask: any) => {
+    if (mask) return mask(data);
     return data;
-  }),
-}));
+  });
+  return {
+    applyMask,
+    scheduleMask: vi.fn().mockImplementation((span: object, data: any, mask: any) => {
+      const result = applyMask(data, mask);
+      results.set(span, result);
+      return result;
+    }),
+    getScheduledMask: vi.fn().mockImplementation((span: object) => results.get(span)),
+  };
+});
 
 vi.mock('../../src/prompt/template.js', () => ({
   PromptContext: {
@@ -58,20 +63,22 @@ function makeHrTime(seconds: number, nanos: number): HrTime {
   return [seconds, nanos];
 }
 
-function makeMockSpan(overrides: Partial<{
-  name: string;
-  kind: SpanKind;
-  traceId: string;
-  spanId: string;
-  parentSpanId: string | undefined;
-  startTime: HrTime;
-  endTime: HrTime;
-  attributes: Record<string, any>;
-  resource: { attributes: Record<string, any> };
-  status: { code: SpanStatusCode; message?: string };
-  events: any[];
-  instrumentationLibrary: { name: string; version?: string } | undefined;
-}> = {}): ReadableSpan {
+function makeMockSpan(
+  overrides: Partial<{
+    name: string;
+    kind: SpanKind;
+    traceId: string;
+    spanId: string;
+    parentSpanId: string | undefined;
+    startTime: HrTime;
+    endTime: HrTime;
+    attributes: Record<string, any>;
+    resource: { attributes: Record<string, any> };
+    status: { code: SpanStatusCode; message?: string };
+    events: any[];
+    instrumentationLibrary: { name: string; version?: string } | undefined;
+  }> = {},
+): ReadableSpan {
   const traceId = overrides.traceId ?? '0af7651916cd43dd8448eb211c80319c';
   const spanId = overrides.spanId ?? 'b7ad6b7169203331';
   const parentSpanId = overrides.parentSpanId;
@@ -97,7 +104,9 @@ function makeMockSpan(overrides: Partial<{
     links: [],
     duration: makeHrTime(1, 0),
     ended: true,
-    instrumentationLibrary: overrides.instrumentationLibrary ?? { name: 'test' },
+    instrumentationLibrary: overrides.instrumentationLibrary ?? {
+      name: 'test',
+    },
     droppedAttributesCount: 0,
     droppedEventsCount: 0,
     droppedLinksCount: 0,
@@ -124,10 +133,12 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   });
 
   /** Create a minimal mock object conforming to the WriteStream interface used by closeLogStream. */
-  function makeMockLogStream(opts: {
-    destroyed?: boolean;
-    write?: (data: string) => void;
-  } = {}) {
+  function makeMockLogStream(
+    opts: {
+      destroyed?: boolean;
+      write?: (data: string) => void;
+    } = {},
+  ) {
     const listeners = new Map<string, Set<(...args: any[]) => void>>();
     return {
       destroyed: opts.destroyed ?? false,
@@ -169,7 +180,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Very large attribute values ─────────────────────────
 
   describe('very large attribute values', () => {
-    it('should handle attributes with very large string values', () => {
+    it('should handle attributes with very large string values', async () => {
       const largeValue = 'x'.repeat(100_000);
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'llm',
@@ -178,18 +189,19 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({
         name: 'large-attr-span',
-        attributes: { 'large_key': largeValue },
+        attributes: { large_key: largeValue },
       });
 
       // Should not throw
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(processor._perfStats.spansExported).toBe(1);
       // The large value should be written back
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.llm.response']?.length).toBe(100_000);
     });
 
-    it('should handle attributes with many keys', () => {
+    it('should handle attributes with many keys', async () => {
       const manyAttrs: Record<string, any> = {
         'neatlogs.span.kind': 'llm',
       };
@@ -200,6 +212,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'many-attrs-span' });
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(processor._perfStats.spansExported).toBe(1);
     });
   });
@@ -234,7 +247,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
     it('should set attributes when span kind is LLM', async () => {
       const { PromptContext } = await import('../../src/prompt/template.js');
-      (PromptContext.getVariables as any).mockReturnValueOnce({ name: 'world' });
+      (PromptContext.getVariables as any).mockReturnValueOnce({
+        name: 'world',
+      });
       (PromptContext.getTemplate as any).mockReturnValueOnce('Hello {{name}}');
 
       const mockSdkSpan = {
@@ -258,7 +273,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
     it('should fall back to UserPromptContext when context key has no value', async () => {
       const { UserPromptContext } = await import('../../src/prompt/template.js');
       (UserPromptContext.getTemplate as any).mockReturnValueOnce('Q: {{q}}');
-      (UserPromptContext.getVariables as any).mockReturnValueOnce({ q: 'test' });
+      (UserPromptContext.getVariables as any).mockReturnValueOnce({
+        q: 'test',
+      });
 
       const mockSdkSpan = {
         name: 'chat-span',
@@ -268,10 +285,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       processor.onStart(mockSdkSpan as any, {} as any);
 
-      expect(mockSdkSpan.setAttribute).toHaveBeenCalledWith(
-        'llm.user_prompt_template',
-        'Q: {{q}}',
-      );
+      expect(mockSdkSpan.setAttribute).toHaveBeenCalledWith('llm.user_prompt_template', 'Q: {{q}}');
       expect(mockSdkSpan.setAttribute).toHaveBeenCalledWith(
         'llm.user_prompt_template_variables',
         '{"q":"test"}',
@@ -324,7 +338,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Resource attribute handling ─────────────────────────
 
   describe('resource attribute handling', () => {
-    it('should handle array values in resource attributes', () => {
+    it('should handle array values in resource attributes', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -344,6 +358,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
       expect(parsed.resource.attributes['neatlogs.tags']).toEqual(['tag1', 'tag2']);
@@ -352,7 +367,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(parsed.resource.attributes['some.bool']).toBe(true);
     });
 
-    it('should stringify non-primitive, non-array resource values', () => {
+    it('should stringify non-primitive, non-array resource values', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -369,6 +384,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
       // Non-primitive should be stringified
@@ -477,7 +493,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── span events handling ────────────────────────────────
 
   describe('span events handling', () => {
-    it('should include events in the processed span dict', () => {
+    it('should include events in the processed span dict', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -490,12 +506,16 @@ describe('NeatlogsSpanProcessor edge cases', () => {
           {
             name: 'exception',
             time: makeHrTime(1000, 500_000_000),
-            attributes: { 'exception.type': 'Error', 'exception.message': 'fail' },
+            attributes: {
+              'exception.type': 'Error',
+              'exception.message': 'fail',
+            },
           },
         ],
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
@@ -617,28 +637,30 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
   describe('framework span name normalization', () => {
     it('should handle task name with trailing dots', () => {
-      const spans = [{
-        name: 'Research market trends...task',
-        kind: 'task',
-        attributes: { 'neatlogs.crewai.crew_id': 'crew-1' },
-      }];
+      const spans = [
+        {
+          name: 'Research market trends...task',
+          kind: 'task',
+          attributes: { 'neatlogs.crewai.crew_id': 'crew-1' },
+        },
+      ];
 
       const result = (processor as any)._normalizeFrameworkSpanNames(spans);
       expect(result[0].name).toBe('crewai.task');
-      expect(result[0].attributes['neatlogs.task.description']).toBe(
-        'Research market trends',
-      );
+      expect(result[0].attributes['neatlogs.task.description']).toBe('Research market trends');
     });
 
     it('should not overwrite existing task description', () => {
-      const spans = [{
-        name: 'Do thing.task',
-        kind: 'task',
-        attributes: {
-          'neatlogs.crewai.crew_id': 'crew-1',
-          'neatlogs.task.description': 'existing description',
+      const spans = [
+        {
+          name: 'Do thing.task',
+          kind: 'task',
+          attributes: {
+            'neatlogs.crewai.crew_id': 'crew-1',
+            'neatlogs.task.description': 'existing description',
+          },
         },
-      }];
+      ];
 
       const result = (processor as any)._normalizeFrameworkSpanNames(spans);
       expect(result[0].name).toBe('crewai.task');
@@ -646,22 +668,26 @@ describe('NeatlogsSpanProcessor edge cases', () => {
     });
 
     it('should not rename task spans without crewai attributes', () => {
-      const spans = [{
-        name: 'some-operation.task',
-        kind: 'task',
-        attributes: {},
-      }];
+      const spans = [
+        {
+          name: 'some-operation.task',
+          kind: 'task',
+          attributes: {},
+        },
+      ];
 
       const result = (processor as any)._normalizeFrameworkSpanNames(spans);
       expect(result[0].name).toBe('some-operation.task');
     });
 
     it('should handle empty span name with .task suffix', () => {
-      const spans = [{
-        name: '.task',
-        kind: 'task',
-        attributes: { 'neatlogs.crewai.crew_id': 'crew-1' },
-      }];
+      const spans = [
+        {
+          name: '.task',
+          kind: 'task',
+          attributes: { 'neatlogs.crewai.crew_id': 'crew-1' },
+        },
+      ];
 
       const result = (processor as any)._normalizeFrameworkSpanNames(spans);
       expect(result[0].name).toBe('crewai.task');
@@ -672,26 +698,28 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
   describe('CrewAI task injection edge cases', () => {
     it('should not inject when no task ID is present', () => {
-      const spans = [{
-        name: 'some-span',
-        attributes: {},
-      }];
+      const spans = [
+        {
+          name: 'some-span',
+          attributes: {},
+        },
+      ];
 
       const result = (processor as any)._injectCrewaiTaskTemplates(spans);
       expect(result[0].attributes['neatlogs.task.user_prompt_template']).toBeUndefined();
     });
 
     it('should inject template without variables', async () => {
-      const { popEntry: mockPopEntry } = await import(
-        '../../src/core/crewai-task-registry.js'
-      );
+      const { popEntry: mockPopEntry } = await import('../../src/core/crewai-task-registry.js');
       (mockPopEntry as any).mockReturnValueOnce(['Research topic', null]);
 
-      const spans = [{
-        name: 'crewai.task',
-        kind: 'task',
-        attributes: { 'neatlogs.task.id': 'task-456' },
-      }];
+      const spans = [
+        {
+          name: 'crewai.task',
+          kind: 'task',
+          attributes: { 'neatlogs.task.id': 'task-456' },
+        },
+      ];
 
       const result = (processor as any)._injectCrewaiTaskTemplates(spans);
       expect(result[0].attributes['neatlogs.task.user_prompt_template']).toBe('Research topic');
@@ -703,7 +731,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Concurrent span processing ──────────────────────────
 
   describe('concurrent span processing', () => {
-    it('should handle multiple spans processed sequentially', () => {
+    it('should handle multiple spans processed sequentially', async () => {
       for (let i = 0; i < 10; i++) {
         const span = makeMockSpan({
           name: `span-${i}`,
@@ -712,6 +740,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
         });
         processor.onEnd(span);
       }
+      await processor.forceFlush();
 
       expect(processor._perfStats.spansProcessed).toBe(10);
       expect(processor._perfStats.spansExported).toBe(10);
@@ -723,7 +752,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   describe('shutdown stream error handling', () => {
     it('should handle errors when closing raw log stream', async () => {
       const mock = makeMockLogStream();
-      mock.end = vi.fn(() => { throw new Error('close error'); });
+      mock.end = vi.fn(() => {
+        throw new Error('close error');
+      });
       (processor as any)._rawLogStream = mock;
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -734,7 +765,9 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
     it('should handle errors when closing processed log stream', async () => {
       const mock = makeMockLogStream();
-      mock.end = vi.fn(() => { throw new Error('close error'); });
+      mock.end = vi.fn(() => {
+        throw new Error('close error');
+      });
       (processor as any)._processedLogStream = mock;
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});

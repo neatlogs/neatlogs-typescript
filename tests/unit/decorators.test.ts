@@ -15,6 +15,7 @@ function createMockSpan() {
   return {
     setAttribute: vi.fn(),
     setStatus: vi.fn(),
+    addEvent: vi.fn(),
     end: vi.fn(),
     recordException: vi.fn(),
     _attrs: {} as Record<string, any>,
@@ -168,22 +169,28 @@ describe('setCommonSpanAttrs', () => {
   });
 
   it('should set neatlogs.description when description is provided', () => {
-    setCommonSpanAttrs(spanObj as any, { kind: 'CHAIN', description: 'Summarizes documents' });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.description', 'Summarizes documents');
+    setCommonSpanAttrs(spanObj as any, {
+      kind: 'CHAIN',
+      description: 'Summarizes documents',
+    });
+    expect(spanObj.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.description',
+      'Summarizes documents',
+    );
   });
 
   it('should not set neatlogs.description when not provided', () => {
     setCommonSpanAttrs(spanObj as any, { kind: 'CHAIN' });
-    expect(spanObj.setAttribute).not.toHaveBeenCalledWith('neatlogs.description', expect.anything());
+    expect(spanObj.setAttribute).not.toHaveBeenCalledWith(
+      'neatlogs.description',
+      expect.anything(),
+    );
   });
 
   it('should register mask and set neatlogs.mask_id', () => {
     const maskFn = (data: Record<string, any>) => data;
     setCommonSpanAttrs(spanObj as any, { kind: 'CHAIN', mask: maskFn });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.mask_id',
-      expect.any(String),
-    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.mask_id', expect.any(String));
   });
 });
 
@@ -245,6 +252,86 @@ describe('decorateSpan', () => {
     expect(mockSpan.end).toHaveBeenCalled();
   });
 
+  it('keeps an async-generator span open until all chunks are consumed', async () => {
+    const wrapped = decorateSpan({ kind: 'CHAIN' }, async function* () {
+      yield { text: 'first' };
+      yield { text: 'second' };
+    });
+
+    const stream = wrapped();
+    expect(mockSpan.end).not.toHaveBeenCalled();
+
+    const chunks: Array<{ text: string }> = [];
+    for await (const chunk of stream) chunks.push(chunk);
+
+    expect(chunks).toEqual([{ text: 'first' }, { text: 'second' }]);
+    expect(mockSpan.addEvent).toHaveBeenCalledTimes(2);
+    expect(mockSpan.addEvent).toHaveBeenNthCalledWith(
+      2,
+      'neatlogs.stream.chunk',
+      expect.objectContaining({
+        'neatlogs.stream.chunk.index': 1,
+        'neatlogs.stream.chunk.value': '{"text":"second"}',
+      }),
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'output.value',
+      '[{"text":"first"},{"text":"second"}]',
+    );
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it('marks a partially consumed async generator as cancelled', async () => {
+    const wrapped = decorateSpan({ kind: 'CHAIN' }, async function* () {
+      yield 'first';
+      yield 'second';
+    });
+
+    for await (const _chunk of wrapped()) break;
+
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('neatlogs.stream.cancelled', true);
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('output.value', '["first"]');
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a ReadableStream span open until its reader reaches EOF', async () => {
+    const wrapped = decorateSpan(
+      { kind: 'CHAIN' },
+      () =>
+        new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue('one');
+            controller.enqueue('two');
+            controller.close();
+          },
+        }),
+    );
+
+    const reader = wrapped().getReader();
+    expect(mockSpan.end).not.toHaveBeenCalled();
+    expect(await reader.read()).toEqual({ done: false, value: 'one' });
+    expect(await reader.read()).toEqual({ done: false, value: 'two' });
+    expect(await reader.read()).toEqual({ done: true, value: undefined });
+
+    expect(mockSpan.addEvent).toHaveBeenCalledTimes(2);
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('output.value', '["one","two"]');
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it('awaits non-native thenables before ending the span', async () => {
+    const wrapped = decorateSpan({ kind: 'CHAIN' }, () => ({
+      then(resolve: (value: string) => void) {
+        queueMicrotask(() => resolve('thenable-result'));
+      },
+    }));
+
+    const result = await wrapped();
+
+    expect(result).toBe('thenable-result');
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('output.value', '"thenable-result"');
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
   it('should respect captureInput: false', () => {
     const fn = (x: number) => x;
     const wrapped = decorateSpan({ kind: 'CHAIN', captureInput: false }, fn);
@@ -299,10 +386,7 @@ describe('decorateSpan', () => {
   it('should call postprocessResult on sync success', () => {
     const postprocess = vi.fn();
     const fn = (x: number) => x + 1;
-    const wrapped = decorateSpan(
-      { kind: 'CHAIN', postprocessResult: postprocess },
-      fn,
-    );
+    const wrapped = decorateSpan({ kind: 'CHAIN', postprocessResult: postprocess }, fn);
     wrapped(5);
     expect(postprocess).toHaveBeenCalledWith(mockSpan, 6, expect.any(Object));
   });
@@ -310,10 +394,7 @@ describe('decorateSpan', () => {
   it('should call postprocessResult on async success', async () => {
     const postprocess = vi.fn();
     const fn = async (x: number) => x + 1;
-    const wrapped = decorateSpan(
-      { kind: 'CHAIN', postprocessResult: postprocess },
-      fn,
-    );
+    const wrapped = decorateSpan({ kind: 'CHAIN', postprocessResult: postprocess }, fn);
     await wrapped(5);
     expect(postprocess).toHaveBeenCalledWith(mockSpan, 6, expect.any(Object));
   });
@@ -323,10 +404,7 @@ describe('decorateSpan', () => {
       throw new Error('postprocess error');
     });
     const fn = () => 'ok';
-    const wrapped = decorateSpan(
-      { kind: 'CHAIN', postprocessResult: postprocess },
-      fn,
-    );
+    const wrapped = decorateSpan({ kind: 'CHAIN', postprocessResult: postprocess }, fn);
     // Should not throw
     expect(() => wrapped()).not.toThrow();
     expect(mockSpan.setStatus).toHaveBeenCalledWith({ code: 1 }); // Still OK
@@ -341,9 +419,7 @@ describe('span()', () => {
   });
 
   it('should throw for invalid span kind', () => {
-    expect(() => span({ kind: 'INVALID' as any }, () => {})).toThrow(
-      /Invalid span kind/,
-    );
+    expect(() => span({ kind: 'INVALID' as any }, () => {})).toThrow(/Invalid span kind/);
   });
 
   it('should wrap a WORKFLOW function', () => {
@@ -351,10 +427,7 @@ describe('span()', () => {
     const wrapped = span({ kind: 'WORKFLOW' }, fn);
     const result = wrapped();
     expect(result).toBe('result');
-    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-      'openinference.span.kind',
-      'WORKFLOW',
-    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('openinference.span.kind', 'WORKFLOW');
   });
 
   it('should set AGENT attributes', () => {
@@ -367,16 +440,10 @@ describe('span()', () => {
 
   it('should set TOOL attributes', () => {
     const fn = () => 'tool result';
-    const wrapped = span(
-      { kind: 'TOOL', toolName: 'search', parameters: { q: 'string' } },
-      fn,
-    );
+    const wrapped = span({ kind: 'TOOL', toolName: 'search', parameters: { q: 'string' } }, fn);
     wrapped();
     expect(mockSpan.setAttribute).toHaveBeenCalledWith('tool.name', 'search');
-    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-      'tool.parameters',
-      '{"q":"string"}',
-    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('tool.parameters', '{"q":"string"}');
   });
 
   it('should set EMBEDDING attributes', () => {
@@ -398,10 +465,7 @@ describe('span()', () => {
     const wrapped = span({ kind: 'CHAIN' }, fn);
     const result = wrapped();
     expect(result).toBe('chain result');
-    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-      'openinference.span.kind',
-      'CHAIN',
-    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('openinference.span.kind', 'CHAIN');
   });
 
   it('should handle GUARDRAIL kind', () => {
@@ -421,10 +485,7 @@ describe('span()', () => {
     expect(mockSpan.setAttribute).toHaveBeenCalledWith('mcp.tool.name', 'add_numbers');
     expect(mockSpan.setAttribute).toHaveBeenCalledWith('tool.name', 'add_numbers');
     // String result should be wrapped
-    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-      'output.value',
-      '{"result":"mcp result"}',
-    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('output.value', '{"result":"mcp result"}');
   });
 
   it('should handle async functions', async () => {
@@ -446,10 +507,7 @@ describe('retrieverPostprocessor', () => {
 
   it('should extract query from boundInputs', () => {
     retrieverPostprocessor(spanObj as any, [], { query: 'test query' });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.query',
-      'test query',
-    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.query', 'test query');
   });
 
   it('should prefer "query" key over "question"', () => {
@@ -464,10 +522,7 @@ describe('retrieverPostprocessor', () => {
 
   it('should use "text" when others are not present', () => {
     retrieverPostprocessor(spanObj as any, [], { text: 'some text' });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.query',
-      'some text',
-    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.query', 'some text');
   });
 
   it('should handle array of string documents', () => {
@@ -498,14 +553,8 @@ describe('retrieverPostprocessor', () => {
       'neatlogs.retriever.documents.0.content',
       'text1',
     );
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.documents.0.id',
-      '1',
-    );
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.documents.0.score',
-      0.9,
-    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.documents.0.id', '1');
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.documents.0.score', 0.9);
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
       'neatlogs.retriever.documents.0.metadata',
       '{"source":"web"}',
@@ -578,10 +627,7 @@ describe('span() with RETRIEVER', () => {
     const wrapped = span({ kind: 'RETRIEVER' }, fn);
     wrapped('my query');
     // retrieverPostprocessor should extract query and set document attrs
-    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.query',
-      'my query',
-    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.query', 'my query');
     expect(mockSpan.setAttribute).toHaveBeenCalledWith(
       'neatlogs.retriever.documents.0.content',
       'doc1',

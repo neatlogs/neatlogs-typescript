@@ -12,24 +12,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-import {
-  ROOT_CONTEXT,
-  trace as otelTrace,
-  TraceFlags,
-  SpanStatusCode,
-} from '@opentelemetry/api';
-import type {
-  Context,
-  HrTime,
-  SpanContext,
-  Tracer,
-} from '@opentelemetry/api';
+import { ROOT_CONTEXT, trace as otelTrace, TraceFlags, SpanStatusCode } from '@opentelemetry/api';
+import type { Context, HrTime, SpanContext, Tracer } from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { Span as SdkSpan, SpanProcessor } from '@opentelemetry/sdk-trace-base';
 
 import { UnifiedAttributeProcessor } from './attribute-processor.js';
 import type { SpanDict } from './attribute-processor.js';
-import { applyMask } from './mask.js';
+import { getScheduledMask, scheduleMask } from './mask.js';
 import { getLogger } from './logger.js';
 import { applySessionAttributes } from './session.js';
 import { applyEndUserAttributes } from './end-user.js';
@@ -84,10 +74,7 @@ function createLogStream(configuredPath: string): fs.WriteStream | null {
 
 const CLOSE_STREAM_TIMEOUT_MS = 5_000;
 
-async function closeLogStream(
-  stream: fs.WriteStream | null,
-  description: string,
-): Promise<void> {
+async function closeLogStream(stream: fs.WriteStream | null, description: string): Promise<void> {
   if (!stream || stream.destroyed || stream.writableEnded) {
     return;
   }
@@ -109,9 +96,7 @@ async function closeLogStream(
       settle();
     };
     const timer = setTimeout(() => {
-      logger.warn(
-        `Timed out waiting for ${description} log stream to close; destroying`,
-      );
+      logger.warn(`Timed out waiting for ${description} log stream to close; destroying`);
       stream.destroy();
       settle();
     }, CLOSE_STREAM_TIMEOUT_MS);
@@ -234,6 +219,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   private _closingReason: string | null;
   private _closed: boolean;
   private _completionEligibleRoots: WeakSet<object>;
+  private _pendingMasks: Set<Promise<unknown>>;
 
   // File logging
   private _logRawSpansEnabled: boolean;
@@ -271,6 +257,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this._closingReason = null;
     this._closed = false;
     this._completionEligibleRoots = new WeakSet<object>();
+    this._pendingMasks = new Set<Promise<unknown>>();
   }
 
   // ── File logging init ─────────────────────────────────
@@ -279,18 +266,20 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     // Raw OTel span JSON (before attribute normalization)
     this._logRawSpansEnabled =
       this.debug ||
-      ['true', '1', 'yes'].includes(
-        (process.env.NEATLOGS_LOG_RAW_SPANS ?? '').toLowerCase(),
+      ['true', '1', 'yes'].includes((process.env.NEATLOGS_LOG_RAW_SPANS ?? '').toLowerCase());
+
+    if (this._logRawSpansEnabled && this.mask) {
+      logger.warn(
+        'Raw span logging is disabled while a mask is configured because raw files bypass redaction.',
       );
+      this._logRawSpansEnabled = false;
+    }
 
     if (this._logRawSpansEnabled) {
-      const rawPath =
-        process.env.NEATLOGS_LOG_RAW_SPANS_FILE ?? 'spans_raw_optimized.log';
+      const rawPath = process.env.NEATLOGS_LOG_RAW_SPANS_FILE ?? 'spans_raw_optimized.log';
       this._rawLogStream = createLogStream(rawPath);
       if (this._rawLogStream) {
-        logger.info(
-          `Raw span logging enabled: ${resolveLogFilePath(rawPath)}`,
-        );
+        logger.info(`Raw span logging enabled: ${resolveLogFilePath(rawPath)}`);
       }
     }
 
@@ -300,13 +289,10 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     );
 
     if (this._logProcessedSpansEnabled) {
-      const processedPath =
-        process.env.NEATLOGS_LOG_SPANS_FILE ?? 'spans_optimized.log';
+      const processedPath = process.env.NEATLOGS_LOG_SPANS_FILE ?? 'spans_optimized.log';
       this._processedLogStream = createLogStream(processedPath);
       if (this._processedLogStream) {
-        logger.info(
-          `Processed span logging enabled: ${resolveLogFilePath(processedPath)}`,
-        );
+        logger.info(`Processed span logging enabled: ${resolveLogFilePath(processedPath)}`);
       }
     }
   }
@@ -325,8 +311,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       const sdkOwned =
         this.ownAllSpans ||
         scopeName.startsWith('neatlogs') ||
-        (span.parentSpanId !== undefined &&
-          this._activeSpans.has(span.parentSpanId));
+        (span.parentSpanId !== undefined && this._activeSpans.has(span.parentSpanId));
       if (sdkOwned && !isCompletionMarker) {
         this._activeSpans.set(span.spanContext().spanId, span);
         const verificationMarker = verificationMarkerFromEnv();
@@ -353,22 +338,17 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
 
       const attrs = (span as any).attributes ?? {};
       const spanKind = attrs['openinference.span.kind'] as string | undefined;
-      const spanName: string =
-        typeof (span as any).name === 'string' ? (span as any).name : '';
+      const spanName: string = typeof (span as any).name === 'string' ? (span as any).name : '';
 
-      const isLlmSpan =
-        spanKind === 'LLM' || LLM_NAME_PATTERNS.test(spanName);
+      const isLlmSpan = spanKind === 'LLM' || LLM_NAME_PATTERNS.test(spanName);
 
       if (!isLlmSpan) return;
 
       // Read context values only from the span's OWN parentContext. The global
       // OTel context belongs to another SDK and must never be consulted.
       const getFrom = (ctx: Context | undefined, key: symbol): string | undefined =>
-        typeof ctx?.getValue === 'function'
-          ? (ctx.getValue(key) as string | undefined)
-          : undefined;
-      const readValue = (key: symbol): string | undefined =>
-        getFrom(parentContext, key);
+        typeof ctx?.getValue === 'function' ? (ctx.getValue(key) as string | undefined) : undefined;
+      const readValue = (key: symbol): string | undefined => getFrom(parentContext, key);
       let variablesJson = readValue(PROMPT_VARIABLES_KEY);
       let template = readValue(PROMPT_TEMPLATE_KEY);
       const versionVal = readValue(PROMPT_VERSION_KEY);
@@ -405,16 +385,12 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       }
 
       if (this.debug) {
-        logger.debug(
-          `[SpanProcessor.onStart] LLM span '${spanName}' starting`,
-        );
+        logger.debug(`[SpanProcessor.onStart] LLM span '${spanName}' starting`);
         logger.debug(`  variables_json from context: ${variablesJson}`);
         logger.debug(`  template from context: ${template}`);
         logger.debug(`  version from context: ${versionVal}`);
         logger.debug(`  user_template from context: ${userTemplate}`);
-        logger.debug(
-          `  user_variables_json from context: ${userVariablesJson}`,
-        );
+        logger.debug(`  user_variables_json from context: ${userVariablesJson}`);
       }
 
       if (variablesJson) {
@@ -430,10 +406,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         span.setAttribute('llm.user_prompt_template', userTemplate);
       }
       if (userVariablesJson) {
-        span.setAttribute(
-          'llm.user_prompt_template_variables',
-          userVariablesJson,
-        );
+        span.setAttribute('llm.user_prompt_template_variables', userVariablesJson);
       }
     } finally {
       this.perfStats.onStartTime += performance.now() - startTime;
@@ -446,11 +419,18 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this._activeSpans.delete(span.spanContext().spanId);
     if (this._closed) return;
 
-    // Skip internal completion markers — they only need to be exported as-is
+    // Completion markers skip normalization but still cross the same global
+    // masking boundary: they carry root identity and metadata.
     if (span.name === 'neatlogs.trace.complete') {
+      const markerData = spanToDict(span, { includeScope: true });
+      markerData.resource = { attributes: markerData.resource };
+      const maskResult = scheduleMask(span as object, markerData, this.mask ?? null);
+      const pending = maskResult.finally(() => {
+        this._pendingMasks.delete(pending);
+      });
+      this._pendingMasks.add(pending);
       return;
     }
-
 
     const startTime = performance.now();
     this.perfStats.spansProcessed += 1;
@@ -463,9 +443,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       // 1. Log raw OTel span (before any processing)
       if (this._rawLogStream && !this._rawLogStream.destroyed) {
         try {
-          this._rawLogStream.write(
-            JSON.stringify(spanToDict(span)) + '\n',
-          );
+          this._rawLogStream.write(JSON.stringify(spanToDict(span)) + '\n');
         } catch (e) {
           logger.warn(`Failed to write span to raw log file: ${e}`);
         }
@@ -478,8 +456,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       // 3. Filter large tokenized arrays for EMBEDDING/VECTOR_STORE spans
       let nlKind = unifiedAttrs['neatlogs.span.kind'] as string | undefined;
       if (nlKind === 'embedding' || nlKind === 'vector_store') {
-        const skipOutput =
-          unifiedAttrs['neatlogs._skip_output_value'] === true;
+        const skipOutput = unifiedAttrs['neatlogs._skip_output_value'] === true;
         const keysToRemove: string[] = [];
 
         for (const key of Object.keys(unifiedAttrs)) {
@@ -612,6 +589,13 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
           code: SpanStatusCode[span.status.code] ?? String(span.status.code),
           description: span.status.message ?? null,
         },
+        links: span.links.map((link) => ({
+          trace_id: link.context.traceId,
+          span_id: link.context.spanId,
+          trace_flags: link.context.traceFlags,
+          trace_state: link.context.traceState?.serialize(),
+          attributes: link.attributes ? { ...link.attributes } : {},
+        })),
         events: span.events
           ? span.events.map((e) => ({
               name: e.name,
@@ -628,41 +612,21 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       spanData = results[0] ?? spanData;
       this._resolveActualModelName(spanData);
 
-      // 7b. Apply mask — if mask returns null, drop the span entirely
-      const maskedSpanData = applyMask(spanData, this.mask ?? null);
-      if (maskedSpanData === null) {
-        // Mark the OTel span so the FilteringExporter can skip it
-        try {
-          const spanAttrs = (span as any).attributes ?? (span as any)._attributes;
-          if (spanAttrs != null) {
-            spanAttrs['neatlogs.dropped'] = true;
-          }
-        } catch {
-          // Best-effort — if write-back fails, span may still export
-        }
-        return;
-      }
-      spanData = maskedSpanData;
-
-      // 7c. Write normalized neatlogs.* attributes back to the OTel span
+      // 7b. Write normalized neatlogs.* attributes back before the downstream
+      // BatchSpanProcessor snapshots the span. Masking is applied later to an
+      // exporter-owned clone, so async user callbacks never block onEnd().
       const finalAttrs = (spanData.attributes ?? {}) as Record<string, any>;
       try {
         const spanAttrs = (span as any).attributes ?? (span as any)._attributes;
         if (spanAttrs != null) {
           for (const [k, v] of Object.entries(finalAttrs)) {
-            if (
-              typeof v === 'string' ||
-              typeof v === 'number' ||
-              typeof v === 'boolean'
-            ) {
+            if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
               spanAttrs[k] = v;
             } else if (
               Array.isArray(v) &&
               v.every(
                 (i: any) =>
-                  typeof i === 'string' ||
-                  typeof i === 'number' ||
-                  typeof i === 'boolean',
+                  typeof i === 'string' || typeof i === 'number' || typeof i === 'boolean',
               )
             ) {
               spanAttrs[k] = [...v];
@@ -671,33 +635,39 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         }
       } catch (wbExc) {
         if (this.debug) {
-          logger.debug(
-            `[SpanProcessor] Attr write-back failed: ${wbExc}`,
-          );
+          logger.debug(`[SpanProcessor] Attr write-back failed: ${wbExc}`);
         }
       }
 
-      // 8. Log processed span dict (mask already applied in step 7b)
-      if (this._processedLogStream && !this._processedLogStream.destroyed) {
-        try {
-          this._processedLogStream.write(
-            JSON.stringify(spanData) + '\n',
-          );
-        } catch (e) {
-          logger.warn(`Failed to write span to processed log file: ${e}`);
-        }
-      }
+      // 7c. Mask asynchronously. FilteringExporter awaits this exact promise
+      // and exports a clone built only from the accepted result. Exceptions are
+      // fail-closed in scheduleMask/applyMask.
+      const maskResult = scheduleMask(span as object, spanData, this.mask ?? null);
+      const pending = maskResult
+        .then((maskedSpanData) => {
+          if (maskedSpanData === null) return;
 
-      this.perfStats.spansExported += 1;
+          // Processed diagnostic logs follow the same masking boundary as OTLP.
+          if (this._processedLogStream && !this._processedLogStream.destroyed) {
+            try {
+              this._processedLogStream.write(JSON.stringify(maskedSpanData) + '\n');
+            } catch (e) {
+              logger.warn(`Failed to write span to processed log file: ${e}`);
+            }
+          }
 
-      if (!span.parentSpanId) {
-        this._completionEligibleRoots.add(span as object);
-      }
-
-      // Emit completion marker when a root span ends
-      if (this.emitCompletionMarkers && !span.parentSpanId) {
-        this.emitCompletionMarker(span, traceId, resourceAttrs);
-      }
+          this.perfStats.spansExported += 1;
+          if (!span.parentSpanId) {
+            this._completionEligibleRoots.add(span as object);
+            if (this.emitCompletionMarkers) {
+              this.emitCompletionMarker(span, traceId, resourceAttrs);
+            }
+          }
+        })
+        .finally(() => {
+          this._pendingMasks.delete(pending);
+        });
+      this._pendingMasks.add(pending);
     } finally {
       this.perfStats.onEndTime += performance.now() - startTime;
     }
@@ -741,9 +711,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         span.end();
         ended += 1;
       } catch (error) {
-        logger.warn(
-          `Failed to end active span during ${cleanReason}: ${error}`,
-        );
+        logger.warn(`Failed to end active span during ${cleanReason}: ${error}`);
       }
     }
     return ended;
@@ -756,14 +724,17 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   }
 
   ownsSpan(span: ReadableSpan): boolean {
-    return (
-      this.ownAllSpans ||
-      (span.instrumentationLibrary?.name ?? '').startsWith('neatlogs')
-    );
+    return this.ownAllSpans || (span.instrumentationLibrary?.name ?? '').startsWith('neatlogs');
   }
 
   isCompletionEligible(span: ReadableSpan): boolean {
     return !this._closed && this._completionEligibleRoots.has(span as object);
+  }
+
+  async whenMaskComplete(span: ReadableSpan): Promise<boolean> {
+    const result = getScheduledMask(span as object);
+    if (!result) return false;
+    return (await result) !== null && !this._closed;
   }
 
   private _markInterrupted(span: SdkSpan, cleanReason: string): void {
@@ -803,11 +774,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       const wrappedSpan = otelTrace.wrapSpanContext(spanCtx);
       const ctx = otelTrace.setSpan(ROOT_CONTEXT, wrappedSpan);
 
-      const marker = markerTracer.startSpan(
-        'neatlogs.trace.complete',
-        undefined,
-        ctx,
-      );
+      const marker = markerTracer.startSpan('neatlogs.trace.complete', undefined, ctx);
       marker.setAttribute('neatlogs.trace.complete', true);
       marker.setAttribute('neatlogs.internal', true);
       marker.setAttribute('neatlogs.span.kind', 'Neatlogs.INTERNAL');
@@ -837,9 +804,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       marker.end();
 
       if (this.debug) {
-        logger.debug(
-          `[SpanProcessor] Emitted completion marker for trace ${traceId}`,
-        );
+        logger.debug(`[SpanProcessor] Emitted completion marker for trace ${traceId}`);
       }
     } catch (e) {
       logger.warn(`[SpanProcessor] Failed to emit completion marker: ${e}`);
@@ -848,13 +813,10 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
 
   // ── Framework span name normalization ─────────────────
 
-  private _normalizeFrameworkSpanNames(
-    spans: Record<string, any>[],
-  ): Record<string, any>[] {
+  private _normalizeFrameworkSpanNames(spans: Record<string, any>[]): Record<string, any>[] {
     for (const s of spans) {
       const name: string = s.name ?? '';
-      const kind: string =
-        s.kind ?? s.attributes?.['neatlogs.span.kind'] ?? '';
+      const kind: string = s.kind ?? s.attributes?.['neatlogs.span.kind'] ?? '';
 
       if (kind !== 'task' || !name.endsWith('.task')) {
         continue;
@@ -885,9 +847,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
 
   // ── CrewAI task template injection ────────────────────
 
-  private _injectCrewaiTaskTemplates(
-    spans: Record<string, any>[],
-  ): Record<string, any>[] {
+  private _injectCrewaiTaskTemplates(spans: Record<string, any>[]): Record<string, any>[] {
     for (const s of spans) {
       const attrs: Record<string, any> = s.attributes ?? {};
       const taskId = attrs['neatlogs.task.id'];
@@ -939,9 +899,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         if (respMeta?.model_name && respMeta.model_name !== currentModel) {
           attrs['neatlogs.llm.model_name'] = respMeta.model_name;
           if (this.debug) {
-            logger.debug(
-              `[ModelResolve] LangChain span: ${currentModel} → ${respMeta.model_name}`,
-            );
+            logger.debug(`[ModelResolve] LangChain span: ${currentModel} → ${respMeta.model_name}`);
           }
           return;
         }
@@ -951,9 +909,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       if (output?.model && output.model !== currentModel) {
         attrs['neatlogs.llm.model_name'] = output.model;
         if (this.debug) {
-          logger.debug(
-            `[ModelResolve] Direct response: ${currentModel} → ${output.model}`,
-          );
+          logger.debug(`[ModelResolve] Direct response: ${currentModel} → ${output.model}`);
         }
       }
     } catch (e: unknown) {
@@ -967,10 +923,15 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   // ── forceFlush / shutdown ─────────────────────────────
 
   async forceFlush(): Promise<void> {
-    // Flushing is handled by BatchSpanProcessor downstream.
+    // Mask completion may create a trace-completion marker, so drain until no
+    // newly-created masking work remains before transport processors flush.
+    while (this._pendingMasks.size > 0) {
+      await Promise.allSettled([...this._pendingMasks]);
+    }
   }
 
   async shutdown(): Promise<void> {
+    await this.forceFlush();
     this._closed = true;
     this._logPerformanceStats();
 
@@ -1016,7 +977,6 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   }
 }
 
-
 export function sanitizeTerminationReason(reason: unknown): string {
   const printable = String(reason || 'shutdown')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
@@ -1025,11 +985,11 @@ export function sanitizeTerminationReason(reason: unknown): string {
   return (printable || 'shutdown').slice(0, 256);
 }
 
-
 export class CompletionMarkerSpanProcessor implements SpanProcessor {
   private closed = false;
   private deferring = false;
   private readonly deferredRoots: ReadableSpan[] = [];
+  private readonly pending = new Set<Promise<void>>();
 
   constructor(
     private readonly source: NeatlogsSpanProcessor,
@@ -1040,12 +1000,18 @@ export class CompletionMarkerSpanProcessor implements SpanProcessor {
 
   onEnd(span: ReadableSpan): void {
     if (this.closed || span.name === 'neatlogs.trace.complete' || span.parentSpanId) return;
-    if (!this.source.ownsSpan(span) || !this.source.isCompletionEligible(span)) return;
-    if (this.deferring) {
-      this.deferredRoots.push(span);
-      return;
-    }
-    this.emit(span);
+    if (!this.source.ownsSpan(span)) return;
+    const task = this.source
+      .whenMaskComplete(span)
+      .then((eligible) => {
+        if (!eligible || this.closed) return;
+        if (this.deferring) this.deferredRoots.push(span);
+        else this.emit(span);
+      })
+      .finally(() => {
+        this.pending.delete(task);
+      });
+    this.pending.add(task);
   }
 
   beginShutdown(): void {
@@ -1062,16 +1028,17 @@ export class CompletionMarkerSpanProcessor implements SpanProcessor {
 
   private emit(span: ReadableSpan): void {
     const resourceAttrs = { ...span.resource.attributes };
-    this.source.emitCompletionMarker(
-      span,
-      span.spanContext().traceId,
-      resourceAttrs,
-      this.tracer,
-    );
+    this.source.emitCompletionMarker(span, span.spanContext().traceId, resourceAttrs, this.tracer);
   }
 
-  async forceFlush(): Promise<void> {}
+  async forceFlush(): Promise<void> {
+    while (this.pending.size > 0) {
+      await Promise.allSettled([...this.pending]);
+    }
+    this.emitDeferred();
+  }
   async shutdown(): Promise<void> {
+    await this.forceFlush();
     this.closed = true;
     this.deferredRoots.splice(0);
   }

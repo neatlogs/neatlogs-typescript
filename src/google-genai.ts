@@ -6,8 +6,8 @@
  * provider `google` so Gemini traffic is distinguished from Vertex AI traffic
  * (see `wrapVertexAI`, which is the same SDK in `vertexai: true` mode).
  *
- * Mirrors Python's `neatlogs.wrap(genai.Client())`. If you prefer zero-code
- * instrumentation, pass `instrumentations: ['google_genai']` to `init()` instead.
+ * Mirrors Python's `neatlogs.wrap(genai.Client())` with explicit, private-provider
+ * instrumentation.
  *
  * Usage:
  *   import { wrapGoogleGenAI } from 'neatlogs/google-genai';

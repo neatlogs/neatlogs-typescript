@@ -1,6 +1,6 @@
 /**
  * Additional edge-case tests for init.ts.
- * Covers: pii options, piiSpanTypes, endpoint parsing, userId, 
+ * Covers: pii options, piiSpanTypes, endpoint parsing, userId,
  * batchSize/flushInterval, NEATLOGS_DISABLE_EXPORT env values,
  * workflow name resolution, and captureLogs: false.
  */
@@ -55,21 +55,6 @@ vi.mock('@opentelemetry/api', async (importOriginal) => {
   };
 });
 
-vi.mock('@opentelemetry/api-logs', () => ({
-  logs: { setGlobalLoggerProvider: vi.fn() },
-}));
-
-vi.mock('@opentelemetry/sdk-metrics', () => {
-  const forceFlush = vi.fn().mockResolvedValue(undefined);
-  const shutdownFn = vi.fn().mockResolvedValue(undefined);
-  return {
-    MeterProvider: vi.fn().mockImplementation(() => ({
-      forceFlush,
-      shutdown: shutdownFn,
-    })),
-  };
-});
-
 vi.mock('@opentelemetry/sdk-logs', () => {
   const getLoggerFn = vi.fn().mockReturnValue({ emit: vi.fn() });
   const addLogRecordProcessor = vi.fn();
@@ -108,18 +93,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
 
 vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
-}));
-
-vi.mock('../../src/instrumentation/manager.js', () => ({
-  InstrumentationManager: vi.fn().mockImplementation(() => ({
-    instrumentHttp: vi.fn().mockResolvedValue(undefined),
-    instrument: vi.fn().mockResolvedValue(undefined),
-    disable: vi.fn(),
-    instrumented: [],
-  })),
-  // Pre-flight isolation gate init() calls before touching module state. Mocked
-  // to a no-op so these tests exercise the instrument() call path directly.
-  assertInstrumentationsIsolationSafe: vi.fn(),
 }));
 
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';
@@ -368,9 +341,8 @@ describe('init() edge cases', () => {
 
   it('installs parent-based trace sampling on the SDK-owned provider', async () => {
     const { NodeTracerProvider } = await import('@opentelemetry/sdk-trace-node');
-    const { ParentBasedSampler, TraceIdRatioBasedSampler } = await import(
-      '@opentelemetry/sdk-trace-base'
-    );
+    const { ParentBasedSampler, TraceIdRatioBasedSampler } =
+      await import('@opentelemetry/sdk-trace-base');
     (NodeTracerProvider as any).mockClear();
     (ParentBasedSampler as any).mockClear();
     (TraceIdRatioBasedSampler as any).mockClear();
@@ -391,9 +363,9 @@ describe('init() edge cases', () => {
   it.each([-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY])(
     'rejects invalid sampleRate %s before initialization',
     async (sampleRate) => {
-      await expect(
-        init({ apiKey: 'test-key', disableExport: true, sampleRate }),
-      ).rejects.toThrow('sampleRate must be a finite number between 0 and 1');
+      await expect(init({ apiKey: 'test-key', disableExport: true, sampleRate })).rejects.toThrow(
+        'sampleRate must be a finite number between 0 and 1',
+      );
       expect(getSessionConfig().workflowName).toBeUndefined();
     },
   );
@@ -420,33 +392,7 @@ describe('init() edge cases', () => {
       mask: maskFn,
     });
 
-    expect(NeatlogsSpanProcessor).toHaveBeenCalledWith(
-      expect.objectContaining({ mask: maskFn }),
-    );
-  });
-
-  it('calls InstrumentationManager.instrument when instrumentations provided', async () => {
-    const { InstrumentationManager } = await import('../../src/instrumentation/manager.js');
-    (InstrumentationManager as any).mockClear();
-
-    await init({
-      apiKey: 'test-key',
-      disableExport: true,
-      instrumentations: ['openai', 'anthropic'],
-    });
-
-    const instance = (InstrumentationManager as any).mock.results[0].value;
-    expect(instance.instrument).toHaveBeenCalledWith(['openai', 'anthropic']);
-  });
-
-  it('does not call instrument when no instrumentations provided', async () => {
-    const { InstrumentationManager } = await import('../../src/instrumentation/manager.js');
-    (InstrumentationManager as any).mockClear();
-
-    await init({ apiKey: 'test-key', disableExport: true });
-
-    const instance = (InstrumentationManager as any).mock.results[0].value;
-    expect(instance.instrument).not.toHaveBeenCalled();
+    expect(NeatlogsSpanProcessor).toHaveBeenCalledWith(expect.objectContaining({ mask: maskFn }));
   });
 });
 

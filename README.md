@@ -7,18 +7,15 @@ Automatically trace LLM calls, agent workflows, tool invocations, and retrieval 
 ## Quick Start
 
 ```typescript
-import { init, span, shutdown } from 'neatlogs';
+import { init, span, shutdown, wrapOpenAI } from 'neatlogs';
 import OpenAI from 'openai';
 
 async function main() {
   // 1. Initialize the SDK
-  await init({
-    apiKey: process.env.NEATLOGS_API_KEY,
-    instrumentations: ['openai'],
-  });
+  await init({ apiKey: process.env.NEATLOGS_API_KEY });
 
-  // 2. Create your LLM client AFTER init()
-  const client = new OpenAI();
+  // 2. Explicitly wrap the provider client
+  const client = wrapOpenAI(new OpenAI());
 
   // 3. Wrap functions with span() for observability
   const myWorkflow = span({ kind: 'WORKFLOW', name: 'qa-bot' }, async (query: string) => {
@@ -44,56 +41,27 @@ main().catch(console.error);
 npm install neatlogs
 ```
 
-For auto-instrumentation of specific LLM providers, install the corresponding peer dependency:
-
-```bash
-# OpenAI
-npm install @arizeai/openinference-instrumentation-openai
-
-# Anthropic
-npm install @arizeai/openinference-instrumentation-anthropic
-
-# AWS Bedrock
-npm install @arizeai/openinference-instrumentation-bedrock
-
-# LangChain
-npm install @arizeai/openinference-instrumentation-langchain
-
-# MCP (Model Context Protocol)
-npm install @arizeai/openinference-instrumentation-mcp
-
-# BeeAI
-npm install @arizeai/openinference-instrumentation-beeai
-
-# Claude Agent SDK
-npm install @arizeai/openinference-instrumentation-claude-agent-sdk
-
-# Google GenAI (@google/genai)
-npm install @google/genai
-```
+Install the provider or framework package you already use, then apply its
+documented Neatlogs wrapper, hook, processor, or telemetry helper.
 
 ## Core Concepts
 
 | Function | Purpose |
 |----------|---------|
-| `init()` | Initialize the SDK — sets up OTel providers, exporters, and instrumentation |
+| `init()` | Initialize the SDK — sets up private OTel providers and exporters |
 | `span()` | Wrap a function with observability — captures inputs, outputs, timing, and errors |
 | `trace()` | Create a manual span with prompt template tracking and multi-turn session support |
 | `log()` | Capture timestamped log steps within the active trace |
 | `shutdown()` | Flush all pending data and shut down the SDK gracefully |
 
-### Important: Initialization Order
+### Important: Explicit integration
 
-`init()` is **async** and must be called **before** creating any LLM client instances. This is because instrumentation works by monkey-patching libraries at init time.
+`init()` does not monkey-patch provider libraries. Use the documented explicit
+wrapper, hook, processor, or telemetry helper for each integration.
 
 ```typescript
-// ✅ Correct
-await init({ instrumentations: ['openai'] });
-const client = new OpenAI(); // patched
-
-// ❌ Wrong — client created before patching
-const client = new OpenAI(); // NOT patched
-await init({ instrumentations: ['openai'] });
+await init({ apiKey: process.env.NEATLOGS_API_KEY });
+const client = wrapOpenAI(new OpenAI());
 ```
 
 ### Important: No Top-Level Await
@@ -119,7 +87,6 @@ Initialize the Neatlogs SDK. Returns `Promise<void>`.
 ```typescript
 await init({
   apiKey: process.env.NEATLOGS_API_KEY,
-  instrumentations: ['openai', 'anthropic'],
   debug: true,
 });
 ```
@@ -137,7 +104,6 @@ await init({
 | `metadata` | `Record<string, any>` | — | Custom metadata attached to all spans. |
 | `debug` | `boolean` | `false` | Enable debug logging. |
 | `disableExport` | `boolean` | `false` | Disable export to Neatlogs backend. |
-| `instrumentations` | `string[]` | — | Legacy manager path. Instrumentors that depend on global OTel context are rejected; use explicit wrappers below. |
 | `tracerProvider` | `BasicTracerProvider` | Private SDK provider | Optional caller-owned private provider. It is never registered globally or shut down by Neatlogs. |
 | `registerShutdownHandlers` | `boolean` | `true` for SDK-owned provider | Register process exit/signal handlers. Set `false` when the host application owns shutdown. |
 | `mask` | `MaskFunction` | — | Global mask function applied to all spans. |
@@ -430,15 +396,21 @@ const rendered = handle.compile({ name: 'world' });
 
 ---
 
-### `flush()` / `shutdown()`
+### `flush()` / `flushAll()` / `shutdown()`
 
 ```typescript
 // Flush pending spans without shutting down
 await flush();
 
+// Flush the default pipeline and every live Neatlogs Client
+await flushAll();
+
 // Flush and shut down — call before process exit
 await shutdown();
 ```
+
+`flushAll()` only knows about Neatlogs-owned pipelines. It does not discover or
+flush Datadog, Langfuse, Braintrust, or a global OpenTelemetry provider.
 
 `shutdown()` resets all SDK state so `init()` can be called again if needed.
 
@@ -470,25 +442,10 @@ import { registerCrewaiTask } from 'neatlogs';
 registerCrewaiTask('research-task', 'Research the latest AI developments');
 ```
 
-## Supported Instrumentations
-
-### Isolation policy
-
-Neatlogs always runs on a private provider and private async context. Third-party
-auto-instrumentors that call the global OpenTelemetry context API cannot provide
-bidirectional isolation, so the manager rejects them at initialization before
-creating any provider state. Use the explicit provider/framework wrappers
-instead.
-
-### Registry Entries (not yet instrumented in TypeScript)
-
-The following libraries are registered in the instrumentation registry for future support. Passing them to `instrumentations` will log a debug message and skip gracefully:
-
-`cohere`, `groq`, `together`, `vertexai`, `google_generativeai`, `mistralai`, `ollama`, `watsonx`, `alephalpha`, `replicate`, `sagemaker`, `huggingface_hub`, `litellm`, `langgraph`, `llamaindex`, `autogen`, `haystack`, `dspy`, `chromadb`, `pinecone`, `weaviate`, `qdrant`, `milvus`, `opensearch`, `elasticsearch`, `redis`, `marqo`, `instructor`, `guardrails`, `google_adk`, `agno`, `openai_agents`, `pydantic_ai`, `smolagents`, `strands`, `pipecat`, `portkey`, `promptflow`
-
 ## Framework Integrations
 
-For frameworks that don't fit the auto-instrument-on-init pattern, use the SDK's explicit wrappers. These wrappers use Neatlogs' private context and remain isolated from other tracing SDKs:
+Use the SDK's explicit wrappers and helpers. They use Neatlogs' private context
+and remain isolated from other tracing SDKs:
 
 | Framework | Helper |
 |-----------|--------|
@@ -534,7 +491,6 @@ await init({
   userId: 'user-456',
   tags: ['production', 'v2'],
   metadata: { environment: 'prod' },
-  instrumentations: ['openai', 'anthropic'],
   sampleRate: 0.5,
   captureLogs: true,
   debug: true,
@@ -610,7 +566,7 @@ See the [`examples/`](./examples/) directory for complete, runnable examples:
 
 | File | Description |
 |------|-------------|
-| [`basic-openai.ts`](./examples/basic-openai.ts) | Basic OpenAI usage with auto-instrumentation |
+| [`basic-openai.ts`](./examples/basic-openai.ts) | Basic OpenAI usage with an explicit wrapper |
 | [`prompt-management.ts`](./examples/prompt-management.ts) | PromptTemplate + trace() for prompt versioning |
 | [`multi-agent-workflow.ts`](./examples/multi-agent-workflow.ts) | Nested spans: WORKFLOW → AGENT → TOOL |
 | [`custom-spans.ts`](./examples/custom-spans.ts) | All span kinds: WORKFLOW, CHAIN, AGENT, TOOL, RETRIEVER, EMBEDDING, GUARDRAIL |

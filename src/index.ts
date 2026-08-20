@@ -8,7 +8,7 @@
  * import { init, span, shutdown } from 'neatlogs';
  *
  * async function main() {
- *   await init({ apiKey: process.env.NEATLOGS_API_KEY, instrumentations: ['openai'] });
+ *   await init({ apiKey: process.env.NEATLOGS_API_KEY });
  *
  *   const myWorkflow = span({ kind: 'WORKFLOW' }, async (query: string) => {
  *     // your LLM code here
@@ -22,7 +22,7 @@
  */
 
 // Lifecycle
-export { init, flush, shutdown, isDebugEnabled, getSessionConfig } from './init.js';
+export { init, flush, flushAll, shutdown, isDebugEnabled, getSessionConfig } from './init.js';
 export { Client, type ClientOptions } from './core/client.js';
 
 // Instrumentation

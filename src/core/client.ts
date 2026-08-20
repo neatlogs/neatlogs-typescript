@@ -11,25 +11,22 @@ import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   BatchSpanProcessor,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanExporter,
 } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
-import {
-  BatchLogRecordProcessor,
-  LoggerProvider,
-} from '@opentelemetry/sdk-logs';
+import { BatchLogRecordProcessor, LoggerProvider } from '@opentelemetry/sdk-logs';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 
 import { runWithClient } from './active-client.js';
+import { registerClient, unregisterClient } from './client-registry.js';
 import { FilteringExporter } from './filtering-exporter.js';
 import { getLogger } from './logger.js';
 import { runWithFreshNeatlogsContext } from './provider.js';
 import { addVerificationMarkerResourceAttribute } from './resource.js';
-import {
-  CompletionMarkerSpanProcessor,
-  NeatlogsSpanProcessor,
-} from './span-processor.js';
+import { CompletionMarkerSpanProcessor, NeatlogsSpanProcessor } from './span-processor.js';
 import type { MaskFunction } from '../types.js';
 import { __version__ } from '../version.js';
 
@@ -64,12 +61,7 @@ const closedTracer: Tracer = {
     arg3?: Context | F,
     arg4?: F,
   ): ReturnType<F> {
-    const fn =
-      typeof arg2 === 'function'
-        ? arg2
-        : typeof arg3 === 'function'
-          ? arg3
-          : arg4;
+    const fn = typeof arg2 === 'function' ? arg2 : typeof arg3 === 'function' ? arg3 : arg4;
     return fn!(otelTrace.wrapSpanContext(INVALID_SPAN_CONTEXT)) as ReturnType<F>;
   },
 };
@@ -84,11 +76,7 @@ class ClientLifecycleTracer implements Tracer {
     return this.client.isRunning() ? this.tracer : closedTracer;
   }
 
-  startSpan(
-    name: string,
-    options?: SpanOptions,
-    context?: Context,
-  ): Span {
+  startSpan(name: string, options?: SpanOptions, context?: Context): Span {
     return this.current().startSpan(name, options, context);
   }
 
@@ -98,12 +86,7 @@ class ClientLifecycleTracer implements Tracer {
     arg3?: Context | F,
     arg4?: F,
   ): ReturnType<F> {
-    return (this.current().startActiveSpan as any)(
-      name,
-      arg2,
-      arg3,
-      arg4,
-    );
+    return (this.current().startActiveSpan as any)(name, arg2, arg3, arg4);
   }
 }
 
@@ -130,10 +113,13 @@ export class Client {
     }
     if (
       options.tags !== undefined &&
-      (!Array.isArray(options.tags) ||
-        !options.tags.every((tag) => typeof tag === 'string'))
+      (!Array.isArray(options.tags) || !options.tags.every((tag) => typeof tag === 'string'))
     ) {
       throw new Error('tags must be a list of strings');
+    }
+    const sampleRate = options.sampleRate ?? 1;
+    if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+      throw new RangeError('sampleRate must be a finite number between 0 and 1.');
     }
 
     this.workflowName = workflowName;
@@ -151,9 +137,11 @@ export class Client {
     this.tracerProvider = new NodeTracerProvider({
       resource,
       spanLimits: { attributeCountLimit: 10_000 },
+      sampler: new ParentBasedSampler({
+        root: new TraceIdRatioBasedSampler(sampleRate),
+      }),
     });
     this.spanProcessor = new NeatlogsSpanProcessor({
-      sampleRate: options.sampleRate ?? 1,
       debug: options.debug ?? false,
       mask: options.mask,
       emitCompletionMarkers: false,
@@ -165,9 +153,7 @@ export class Client {
     const endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     const baseUrl = new URL(endpoint).origin;
     if (!disableExport) {
-      const traceUrl = endpoint.endsWith('/v1/traces')
-        ? endpoint
-        : `${baseUrl}/v1/traces`;
+      const traceUrl = endpoint.endsWith('/v1/traces') ? endpoint : `${baseUrl}/v1/traces`;
       const exporter = new FilteringExporter(
         options.spanExporter ??
           new OTLPTraceExporter({
@@ -221,6 +207,7 @@ export class Client {
       this.logProvider = null;
     }
     this.otelLogger = this.logProvider?.getLogger('neatlogs') ?? null;
+    registerClient(this);
   }
 
   isRunning(): boolean {
@@ -230,10 +217,7 @@ export class Client {
   getTracer(scope: string): Tracer {
     let tracer = this.tracers.get(scope);
     if (!tracer) {
-      tracer = new ClientLifecycleTracer(
-        this,
-        this.tracerProvider.getTracer(scope),
-      );
+      tracer = new ClientLifecycleTracer(this, this.tracerProvider.getTracer(scope));
       this.tracers.set(scope, tracer);
     }
     return tracer;
@@ -259,6 +243,15 @@ export class Client {
         logger.error(`[Client:${this.workflowName}] Error flushing logs: ${error}`);
         success = false;
       }
+    }
+    try {
+      await this.spanProcessor.forceFlush();
+      await this.completionProcessor?.forceFlush();
+    } catch (error) {
+      logger.error(
+        `[Client:${this.workflowName}] Error completing span masking/finalization: ${error}`,
+      );
+      success = false;
     }
     try {
       await this.tracerProvider.forceFlush();
@@ -292,24 +285,30 @@ export class Client {
       try {
         await this.logProvider.shutdown();
       } catch (error) {
-        logger.error(
-          `[Client:${this.workflowName}] Error shutting down logs: ${error}`,
-        );
+        logger.error(`[Client:${this.workflowName}] Error shutting down logs: ${error}`);
         success = false;
       }
     }
     this.spanProcessor.endActiveSpans(reason);
     this.completionProcessor?.emitDeferred();
     try {
-      await this.tracerProvider.shutdown();
+      await this.spanProcessor.forceFlush();
+      await this.completionProcessor?.forceFlush();
     } catch (error) {
       logger.error(
-        `[Client:${this.workflowName}] Error shutting down traces: ${error}`,
+        `[Client:${this.workflowName}] Error completing span masking/finalization: ${error}`,
       );
+      success = false;
+    }
+    try {
+      await this.tracerProvider.shutdown();
+    } catch (error) {
+      logger.error(`[Client:${this.workflowName}] Error shutting down traces: ${error}`);
       success = false;
     }
     this.tracers.clear();
     this.state = 'closed';
+    unregisterClient(this);
     return success;
   }
 }

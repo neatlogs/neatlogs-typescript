@@ -1,20 +1,16 @@
 /**
- * Basic OpenAI usage with neatlogs auto-instrumentation.
+ * Basic OpenAI usage with explicit Neatlogs instrumentation.
  *
  * Run:
  *   NEATLOGS_API_KEY=... OPENAI_API_KEY=... npx tsx examples/basic-openai.ts
  */
-import { init, span, shutdown } from 'neatlogs';
+import { init, span, shutdown, wrapOpenAI } from 'neatlogs';
 import OpenAI from 'openai';
 
 async function main() {
-  await init({
-    apiKey: process.env.NEATLOGS_API_KEY,
-    instrumentations: ['openai'],
-  });
+  await init({ apiKey: process.env.NEATLOGS_API_KEY });
 
-  // IMPORTANT: Create client AFTER init() so instrumentation patches it
-  const client = new OpenAI();
+  const client = wrapOpenAI(new OpenAI());
 
   const myWorkflow = span({ kind: 'WORKFLOW', name: 'qa-bot' }, async (query: string) => {
     const response = await client.chat.completions.create({
