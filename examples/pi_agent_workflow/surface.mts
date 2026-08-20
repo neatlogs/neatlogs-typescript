@@ -30,7 +30,7 @@ import {
   userMessage,
 } from './tools.mjs';
 
-const workflowName = process.env.NEATLOGS_WORKFLOW_NAME ?? 'pi-agent-current-surface';
+const workflowName = 'pi-agent-current-surface';
 const streamFn = models.streamSimple.bind(models);
 const convertToLlm = (messages: AgentMessage[]) => messages as any;
 
