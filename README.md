@@ -402,8 +402,9 @@ const rendered = handle.compile({ name: 'world' });
 // Flush pending spans without shutting down
 await flush();
 
-// Flush the default pipeline and every live Neatlogs Client
-await flushAll();
+// Flush the default pipeline and every live Neatlogs Client under one deadline
+const result = await flushAll(30_000);
+if (!result.success) console.error(result.outcomes);
 
 // Flush and shut down — call before process exit
 await shutdown();

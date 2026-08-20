@@ -27,7 +27,7 @@
  *   t.finish({ output: full, tokens: { prompt, completion } });
  */
 
-const DEFAULT_ENDPOINT = "https://ingest.neatlogs.com";
+import { DEFAULT_INGEST_ENDPOINT } from './constants.js';
 
 // Canonical identity attribute keys (inlined — this file stays dependency-free).
 const END_USER_ID_KEY = "neatlogs.end_user.id";
@@ -185,8 +185,8 @@ export class Neatlogs {
     this.project = opts.project;
     // Use the origin of the configured endpoint (same convention as the Node SDK),
     // so passing a full /v1/traces URL or a bare host both work.
-    const endpoint = opts.endpoint || DEFAULT_ENDPOINT;
-    this.baseUrl = safeOrigin(endpoint) || DEFAULT_ENDPOINT;
+    const endpoint = opts.endpoint || DEFAULT_INGEST_ENDPOINT;
+    this.baseUrl = safeOrigin(endpoint) || DEFAULT_INGEST_ENDPOINT;
     this.enabled = opts.enabled !== false;
     this.endUserId = opts.endUserId;
     this.endUserMetadata = opts.endUserMetadata;

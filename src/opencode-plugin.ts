@@ -49,8 +49,7 @@ import {
   attrInt,
   attrDouble,
 } from './opencode-trace-shipper.js';
-
-const DEFAULT_ENDPOINT = 'https://ingest.neatlogs.com';
+import { DEFAULT_INGEST_ENDPOINT } from './constants.js';
 
 /** A span being built incrementally — ended (and shipped) later. */
 interface OpenSpan {
@@ -77,7 +76,7 @@ interface SessionState {
   processed: Set<string>;
   /** Current user prompt (this turn's input). */
   currentInput: string;
-  /** Captured system prompt (if enabled). */
+  /** Captured system prompt. */
   systemPrompt?: string;
   /** Latest assistant text — the AGENT root's output on close. */
   lastAssistantText: string;
@@ -85,7 +84,7 @@ interface SessionState {
 
 export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, any>> => {
   const apiKey = (process.env.NEATLOGS_API_KEY ?? '').trim();
-  const endpoint = (process.env.NEATLOGS_ENDPOINT ?? DEFAULT_ENDPOINT).trim();
+  const endpoint = (process.env.NEATLOGS_ENDPOINT ?? DEFAULT_INGEST_ENDPOINT).trim();
   const workflowName = 'opencode';
   const debug = String(process.env.NEATLOGS_DEBUG || '').toLowerCase() === 'true';
 

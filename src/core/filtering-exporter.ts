@@ -11,6 +11,7 @@ import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { Resource } from '@opentelemetry/resources';
 import type { SpanExporter, ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { getScheduledMask } from './mask.js';
+import type { DeliveryDiagnostics } from './delivery-diagnostics.js';
 
 function toHrTime(nanos: unknown, fallback: HrTime): HrTime {
   if (typeof nanos !== 'number' || !Number.isFinite(nanos)) return fallback;
@@ -120,7 +121,10 @@ function maskedReadableSpan(span: ReadableSpan, data: Record<string, any>): Read
 }
 
 export class FilteringExporter implements SpanExporter {
-  constructor(private readonly _delegate: SpanExporter) {}
+  constructor(
+    private readonly _delegate: SpanExporter,
+    private readonly diagnostics?: DeliveryDiagnostics,
+  ) {}
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     void Promise.all(
@@ -134,6 +138,7 @@ export class FilteringExporter implements SpanExporter {
     ).then(
       (prepared) => {
         const filtered = prepared.filter((span): span is ReadableSpan => span !== null);
+        this.diagnostics?.recordMaskedDrop('span', prepared.length - filtered.length);
         if (filtered.length === 0) {
           resultCallback({ code: ExportResultCode.SUCCESS });
           return;

@@ -10,10 +10,6 @@
  * init() call is needed here. Every opencode session then produces a trace with
  * LLM spans (per assistant turn) and TOOL spans (per tool execution), keyed by
  * the opencode session id as neatlogs.conversation.id.
- *
- * Optional env:
- *   NEATLOGS_WORKFLOW_NAME           logical grouping (default: "opencode")
- *   NEATLOGS_CAPTURE_SYSTEM_PROMPT   "true" to capture the system prompt
  */
 
 export { NeatlogsOpencodePlugin as default } from 'neatlogs/opencode';

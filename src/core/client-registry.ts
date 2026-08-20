@@ -1,4 +1,5 @@
 export interface FlushableNeatlogsClient {
+  readonly workflowName?: string;
   flush(): Promise<boolean>;
 }
 

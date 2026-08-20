@@ -158,18 +158,29 @@ describe('init()', () => {
     expect(config._apiKey).toBe('disabled');
   });
 
-  it('double init() is a no-op (no error)', async () => {
+  it('rejects conflicting initialization with a stable typed error', async () => {
     await init({ apiKey: 'key1', disableExport: true });
-    // Second call should silently skip
-    await expect(init({ apiKey: 'key2', disableExport: true })).resolves.not.toThrow();
+    await expect(init({ apiKey: 'key2', disableExport: true })).rejects.toMatchObject({
+      name: 'NeatlogsConfigurationError',
+      code: 'CONFLICTING_INIT',
+      option: 'init',
+    });
   });
 
   it('coalesces overlapping initialization calls', async () => {
     const first = init({ apiKey: 'key1', disableExport: true });
-    const second = init({ apiKey: 'key2', disableExport: true });
+    const second = init({ apiKey: 'key1', disableExport: true });
     expect(second).toBe(first);
     await first;
     expect(getSessionConfig()._apiKey).toBe('key1');
+  });
+
+  it('rejects conflicting overlapping initialization', async () => {
+    const first = init({ apiKey: 'key1', disableExport: true });
+    await expect(init({ apiKey: 'key2', disableExport: true })).rejects.toMatchObject({
+      code: 'CONFLICTING_INIT',
+    });
+    await first;
   });
 
   it('with disableExport: true skips OTLP exporter', async () => {
@@ -281,6 +292,7 @@ describe('init()', () => {
     expect(OTLPLogExporter).toHaveBeenCalledWith({
       url: 'https://ingest.neatlogs.com/v1/logs',
       headers: { 'x-api-key': 'test-key' },
+      compression: 'gzip',
     });
     expect(BatchLogRecordProcessor).toHaveBeenCalledTimes(1);
     expect(SimpleLogRecordProcessor).not.toHaveBeenCalled();
@@ -364,6 +376,7 @@ describe('shutdown()', () => {
     await closing;
     await restarting;
     expect(getSessionConfig()._apiKey).toBe('second');
+    await shutdown();
   });
 
   it('returns true on successful shutdown', async () => {
