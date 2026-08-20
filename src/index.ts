@@ -89,6 +89,13 @@ export { NeatlogsOpencodePlugin } from './opencode-plugin.js';
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';
 export { registerCrewaiTask } from './core/crewai-task-registry.js';
+export {
+  TELEMETRY_CONTRACT_VERSION,
+  TELEMETRY_SCHEMA_VERSION,
+  TELEMETRY_SCHEMA_SHA256,
+  TELEMETRY_SCHEMA_V2,
+  TELEMETRY_CONFLICT_PRECEDENCE,
+} from './schema-v2.js';
 
 // Types
 export type {
