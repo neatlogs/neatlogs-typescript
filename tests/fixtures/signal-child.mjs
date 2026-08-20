@@ -4,11 +4,18 @@ async function main() {
   const mode = process.argv[2];
   let hostCalls = 0;
 
-  if (mode === 'host') {
-    process.on('SIGTERM', () => {
+  if (mode === 'host' || mode === 'host-once' || mode === 'host-once-removed') {
+    const hostHandler = () => {
       hostCalls += 1;
       process.stdout.write(`host:${hostCalls}\n`);
-    });
+    };
+    if (mode === 'host-once-removed') {
+      process.once('SIGTERM', hostHandler);
+      process.removeListener('SIGTERM', hostHandler);
+    } else {
+      const register = mode === 'host-once' ? process.once.bind(process) : process.on.bind(process);
+      register('SIGTERM', hostHandler);
+    }
   }
 
   await init({
@@ -19,7 +26,7 @@ async function main() {
 
   setTimeout(() => process.kill(process.pid, 'SIGTERM'), 10);
 
-  if (mode === 'host') {
+  if (mode === 'host' || mode === 'host-once') {
     setTimeout(() => {
       process.stdout.write(`done:${hostCalls}\n`);
       process.exit(hostCalls === 1 ? 0 : 2);

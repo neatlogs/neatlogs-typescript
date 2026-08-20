@@ -9,7 +9,9 @@ interface ChildResult {
   stderr: string;
 }
 
-function runChild(mode: 'host' | 'sdk-only'): Promise<ChildResult> {
+function runChild(
+  mode: 'host' | 'host-once' | 'host-once-removed' | 'sdk-only',
+): Promise<ChildResult> {
   return new Promise((resolveResult, reject) => {
     const child = spawn(
       process.execPath,
@@ -36,6 +38,20 @@ describe('signal coexistence', () => {
     expect(result).toMatchObject({ code: 0, signal: null });
     expect(result.stdout.match(/host:/g)).toHaveLength(1);
     expect(result.stdout).toContain('done:1');
+  });
+
+  it('preserves ownership of a one-shot host listener registered before init', async () => {
+    const result = await runChild('host-once');
+    expect(result).toMatchObject({ code: 0, signal: null });
+    expect(result.stdout.match(/host:/g)).toHaveLength(1);
+    expect(result.stdout).toContain('done:1');
+  });
+
+  it('restores default termination when a pre-init host listener was removed', async () => {
+    const result = await runChild('host-once-removed');
+    expect(result.code).toBeNull();
+    expect(result.signal).toBe('SIGTERM');
+    expect(result.stdout).not.toContain('host:');
   });
 
   it('restores default termination when the SDK owns the signal', async () => {

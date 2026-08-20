@@ -400,8 +400,10 @@ async function _performInit(options: InitOptions): Promise<void> {
     options.registerShutdownHandlers ?? _ownsTracerProvider;
   if (registerShutdownHandlers && !_sigHandlersRegistered) {
     process.on('beforeExit', _shutdownBeforeExit);
-    process.on('SIGTERM', _shutdownOnSignal);
-    process.on('SIGINT', _shutdownOnSignal);
+    // Run before pre-existing one-shot host listeners so ownership is observed
+    // before EventEmitter removes them for their invocation.
+    process.prependListener('SIGTERM', _shutdownOnSignal);
+    process.prependListener('SIGINT', _shutdownOnSignal);
     _sigHandlersRegistered = true;
   }
 
