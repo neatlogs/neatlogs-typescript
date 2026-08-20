@@ -590,6 +590,26 @@ describe('wrapClaudeAgentSDK', () => {
     expect(agent!.status.code).toBe(2); // ERROR
     expect(attr(agent!, 'neatlogs.agent.is_error')).toBe(true);
   });
+
+  it('records AGENT output when the Claude subprocess fails before emitting a result', async () => {
+    async function* failedQuery() {
+      throw new Error('spawn EFTYPE');
+    }
+    const { query } = wrapClaudeAgentSDK({ query: () => failedQuery() } as any);
+    await expect(async () => {
+      for await (const _message of query({ prompt: 'instrument this project' })) {
+        // The generator fails before yielding.
+      }
+    }).rejects.toThrow('spawn EFTYPE');
+
+    const agent = getSpans().find((s) => s.attributes['neatlogs.span.kind'] === 'AGENT');
+    expect(agent).toBeDefined();
+    expect(attr(agent!, 'input.value')).toBe('instrument this project');
+    expect(attr(agent!, 'output.value')).toBe(
+      JSON.stringify({ status: 'error', error: 'spawn EFTYPE' }),
+    );
+    expect(agent!.status.code).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
