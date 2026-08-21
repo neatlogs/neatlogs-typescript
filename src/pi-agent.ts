@@ -402,9 +402,9 @@ export function tracePiAgentEvents(
   getTranscript?: () => any[] | undefined,
 ): (event: unknown) => void {
   const state: PerAgentState = { toolSpans: new Map(), inputMessages: [], turnIndex: 0 };
-  const tracer = getNeatlogsTracer(TRACER_NAME);
   return (event: unknown) => {
     try {
+      const tracer = getNeatlogsTracer(TRACER_NAME);
       handleEvent(tracer, state, event as PiAgentEvent, getTranscript);
     } catch {
       // never let tracing break the agent run
@@ -435,8 +435,8 @@ export function tracePiAgentEvents(
 export function tracePiStream<
   F extends (model: any, context: any, options?: any) => any,
 >(streamFn: F): F {
-  const tracer = getNeatlogsTracer(TRACER_NAME);
   return ((model: any, context: any, options?: any) => {
+    const tracer = getNeatlogsTracer(TRACER_NAME);
     let llm: LlmInFlight | undefined;
     let root: Span | undefined;
     try {

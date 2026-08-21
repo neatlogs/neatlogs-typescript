@@ -18,7 +18,12 @@ import {
   TraceFlags,
   SpanStatusCode,
 } from '@opentelemetry/api';
-import type { Context, HrTime, SpanContext } from '@opentelemetry/api';
+import type {
+  Context,
+  HrTime,
+  SpanContext,
+  Tracer,
+} from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { Span as SdkSpan, SpanProcessor } from '@opentelemetry/sdk-trace-base';
 
@@ -40,6 +45,7 @@ import { popEntry } from './crewai-task-registry.js';
 import type { MaskFunction } from '../types.js';
 import { AttributeMapper } from '../config/attribute-mapper.js';
 import { getNeatlogsTracer } from './provider.js';
+import { verificationMarkerFromEnv } from './resource.js';
 
 const logger = getLogger();
 
@@ -207,6 +213,9 @@ export interface NeatlogsSpanProcessorOptions {
   mask?: MaskFunction;
   /** Pre-built AttributeMapper. If not supplied, a default mapper is created. */
   mapper?: AttributeMapper;
+  emitCompletionMarkers?: boolean;
+  /** Treat every span on this processor's private provider as SDK-owned. */
+  ownAllSpans?: boolean;
 }
 
 // ────────────────────────────────────────────────────────
@@ -218,9 +227,15 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   private readonly debug: boolean;
   private readonly mask: MaskFunction | undefined;
   private readonly unifiedProcessor: UnifiedAttributeProcessor;
+  private readonly emitCompletionMarkers: boolean;
+  private readonly ownAllSpans: boolean;
 
   private perfStats: PerfStats;
   private _retrieversToSuppress: Set<string>;
+  private _activeSpans: Map<string, SdkSpan>;
+  private _closingReason: string | null;
+  private _closed: boolean;
+  private _completionEligibleRoots: WeakSet<object>;
 
   // File logging
   private _logRawSpansEnabled: boolean;
@@ -232,6 +247,8 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this.sampleRate = opts.sampleRate ?? 1.0;
     this.debug = opts.debug ?? false;
     this.mask = opts.mask;
+    this.emitCompletionMarkers = opts.emitCompletionMarkers ?? true;
+    this.ownAllSpans = opts.ownAllSpans ?? false;
 
     this.unifiedProcessor = new UnifiedAttributeProcessor(
       opts.mapper ?? new AttributeMapper(),
@@ -253,6 +270,10 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     };
 
     this._retrieversToSuppress = new Set<string>();
+    this._activeSpans = new Map<string, SdkSpan>();
+    this._closingReason = null;
+    this._closed = false;
+    this._completionEligibleRoots = new WeakSet<object>();
   }
 
   // ── File logging init ─────────────────────────────────
@@ -296,8 +317,32 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   // ── SpanProcessor.onStart ─────────────────────────────
 
   onStart(span: SdkSpan, parentContext: Context): void {
+    if (this._closed) return;
     const startTime = performance.now();
     try {
+      const scopeName = span.instrumentationLibrary?.name ?? '';
+      const isCompletionMarker = span.name === 'neatlogs.trace.complete';
+      // Auto-instrumented framework children retain their own scope name. An
+      // active Neatlogs parent makes them part of the SDK-owned trace, while a
+      // foreign root on a caller-supplied provider remains untouched.
+      const sdkOwned =
+        this.ownAllSpans ||
+        scopeName.startsWith('neatlogs') ||
+        (span.parentSpanId !== undefined &&
+          this._activeSpans.has(span.parentSpanId));
+      if (sdkOwned && !isCompletionMarker) {
+        this._activeSpans.set(span.spanContext().spanId, span);
+        const verificationMarker = verificationMarkerFromEnv();
+        if (verificationMarker) {
+          span.setAttribute('neatlogs.verification.marker', verificationMarker);
+        }
+      }
+      if (sdkOwned && !isCompletionMarker && this._closingReason) {
+        this._markInterrupted(span, this._closingReason);
+        span.end();
+        return;
+      }
+
       // Stamp request-scoped identity (identify()) onto ANY root span as a
       // fallback. trace()/span() set it explicitly (overriding this); direct
       // wrappers' auto-roots stamp it themselves. This catch-all is what lets
@@ -401,6 +446,9 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   // ── SpanProcessor.onEnd ───────────────────────────────
 
   onEnd(span: ReadableSpan): void {
+    this._activeSpans.delete(span.spanContext().spanId);
+    if (this._closed) return;
+
     // Skip internal completion markers — they only need to be exported as-is
     if (span.name === 'neatlogs.trace.complete') {
       return;
@@ -650,21 +698,106 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
 
       this.perfStats.spansExported += 1;
 
-      // Emit completion marker when a root span ends
       if (!span.parentSpanId) {
-        this._emitCompletionMarker(span, traceId, resourceAttrs);
+        this._completionEligibleRoots.add(span as object);
+      }
+
+      // Emit completion marker when a root span ends
+      if (this.emitCompletionMarkers && !span.parentSpanId) {
+        this.emitCompletionMarker(span, traceId, resourceAttrs);
       }
     } finally {
       this.perfStats.onEndTime += performance.now() - startTime;
     }
   }
 
+  /**
+   * End active Neatlogs-owned spans child-first before provider shutdown.
+   * Ending the actual root through the normal lifecycle emits the completion
+   * marker; interruption attributes keep the termination explicit.
+   */
+  endActiveSpans(reason = 'shutdown'): number {
+    // Claim the current registry synchronously before ending anything. Span
+    // end calls onEnd synchronously, and shutdown can be entered again from a
+    // host callback; swapping the map first makes those paths idempotent.
+    const cleanReason = this.beginShutdown(reason);
+    const activeById = this._activeSpans;
+    this._activeSpans = new Map<string, SdkSpan>();
+    const active = [...activeById.values()];
+    if (active.length === 0) return 0;
+
+    const activeIds = new Set(active.map((span) => span.spanContext().spanId));
+    const depth = (span: SdkSpan): number => {
+      let current: SdkSpan | undefined = span;
+      const seen = new Set<string>();
+      let value = 0;
+      while (current?.parentSpanId && activeIds.has(current.parentSpanId)) {
+        const parentId = current.parentSpanId;
+        if (seen.has(parentId)) break;
+        seen.add(parentId);
+        value += 1;
+        current = activeById.get(parentId);
+      }
+      return value;
+    };
+
+    let ended = 0;
+    for (const span of active.sort((a, b) => depth(b) - depth(a))) {
+      try {
+        if (!span.isRecording()) continue;
+        this._markInterrupted(span, cleanReason);
+        span.end();
+        ended += 1;
+      } catch (error) {
+        logger.warn(
+          `Failed to end active span during ${cleanReason}: ${error}`,
+        );
+      }
+    }
+    return ended;
+  }
+
+  beginShutdown(reason = 'shutdown'): string {
+    const cleanReason = sanitizeTerminationReason(reason);
+    this._closingReason ??= cleanReason;
+    return this._closingReason;
+  }
+
+  ownsSpan(span: ReadableSpan): boolean {
+    return (
+      this.ownAllSpans ||
+      (span.instrumentationLibrary?.name ?? '').startsWith('neatlogs')
+    );
+  }
+
+  isCompletionEligible(span: ReadableSpan): boolean {
+    return !this._closed && this._completionEligibleRoots.has(span as object);
+  }
+
+  private _markInterrupted(span: SdkSpan, cleanReason: string): void {
+    span.setAttribute('neatlogs.trace.interrupted', true);
+    span.setAttribute('neatlogs.trace.termination.reason', cleanReason);
+    // Preserve an explicit OK set by application/framework code. An interrupted
+    // span that never reached a terminal status is an OTel ERROR; a completed
+    // span remains OK and carries the interruption metadata/event separately.
+    if (span.status.code === SpanStatusCode.UNSET) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: `Interrupted during ${cleanReason}`,
+      });
+    }
+    span.addEvent('neatlogs.trace.interrupted', {
+      'neatlogs.trace.termination.reason': cleanReason,
+    });
+  }
+
   // ── Completion marker ─────────────────────────────────
 
-  private _emitCompletionMarker(
+  emitCompletionMarker(
     rootSpan: ReadableSpan,
     traceId: string,
     resourceAttrs: Record<string, any>,
+    markerTracer: Tracer = getNeatlogsTracer('neatlogs.internal'),
   ): void {
     try {
       const spanCtx: SpanContext = {
@@ -678,8 +811,11 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       const wrappedSpan = otelTrace.wrapSpanContext(spanCtx);
       const ctx = otelTrace.setSpan(ROOT_CONTEXT, wrappedSpan);
 
-      const tracer = getNeatlogsTracer('neatlogs.internal');
-      const marker = tracer.startSpan('neatlogs.trace.complete', undefined, ctx);
+      const marker = markerTracer.startSpan(
+        'neatlogs.trace.complete',
+        undefined,
+        ctx,
+      );
       marker.setAttribute('neatlogs.trace.complete', true);
       marker.setAttribute('neatlogs.internal', true);
       marker.setAttribute('neatlogs.span.kind', 'Neatlogs.INTERNAL');
@@ -843,6 +979,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   }
 
   async shutdown(): Promise<void> {
+    this._closed = true;
     this._logPerformanceStats();
 
     await closeLogStream(this._rawLogStream, 'raw');
@@ -884,5 +1021,66 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   /** @internal — exposed for testing */
   get _suppressedRetrievers(): Set<string> {
     return this._retrieversToSuppress;
+  }
+}
+
+
+export function sanitizeTerminationReason(reason: unknown): string {
+  const printable = String(reason || 'shutdown')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (printable || 'shutdown').slice(0, 256);
+}
+
+
+export class CompletionMarkerSpanProcessor implements SpanProcessor {
+  private closed = false;
+  private deferring = false;
+  private readonly deferredRoots: ReadableSpan[] = [];
+
+  constructor(
+    private readonly source: NeatlogsSpanProcessor,
+    private readonly tracer: Tracer,
+  ) {}
+
+  onStart(_span: SdkSpan, _parentContext: Context): void {}
+
+  onEnd(span: ReadableSpan): void {
+    if (this.closed || span.name === 'neatlogs.trace.complete' || span.parentSpanId) return;
+    if (!this.source.ownsSpan(span) || !this.source.isCompletionEligible(span)) return;
+    if (this.deferring) {
+      this.deferredRoots.push(span);
+      return;
+    }
+    this.emit(span);
+  }
+
+  beginShutdown(): void {
+    this.deferring = true;
+  }
+
+  emitDeferred(): void {
+    const roots = this.deferredRoots.splice(0);
+    // The log-drain boundary has passed. Roots ending after this point must
+    // emit immediately rather than being stranded in a second deferred batch.
+    this.deferring = false;
+    for (const span of roots) this.emit(span);
+  }
+
+  private emit(span: ReadableSpan): void {
+    const resourceAttrs = { ...span.resource.attributes };
+    this.source.emitCompletionMarker(
+      span,
+      span.spanContext().traceId,
+      resourceAttrs,
+      this.tracer,
+    );
+  }
+
+  async forceFlush(): Promise<void> {}
+  async shutdown(): Promise<void> {
+    this.closed = true;
+    this.deferredRoots.splice(0);
   }
 }

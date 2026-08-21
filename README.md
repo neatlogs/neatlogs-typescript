@@ -129,7 +129,6 @@ await init({
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `apiKey` | `string` | `process.env.NEATLOGS_API_KEY` | Neatlogs API key. Export disabled if not set. |
-| `baseUrl` | `string` | `'https://app.neatlogs.com'` | Base URL for the Neatlogs API. |
 | `workflowName` | `string` | Derived from `process.argv[1]` | Name of the workflow being traced. |
 | `sessionId` | `string` | — | Explicit session ID for grouping traces. |
 | `autoSession` | `boolean` | `false` | Auto-generate a session ID if none provided. |
@@ -151,6 +150,37 @@ await init({
 | `flushInterval` | `number` | `5` | Seconds between batch flushes. |
 | `piiEnabled` | `boolean` | — | Override team-level PII redaction toggle. |
 | `piiSpanTypes` | `string[]` | — | Override which span types have server-side PII redaction. |
+
+---
+
+### Independent `Client` pipelines
+
+Use `Client` when one process must send different executions to different
+Neatlogs projects. Each Client owns an isolated provider/export queue; the
+active Client is scoped to its synchronous or asynchronous `activate()` call.
+
+```typescript
+import { Client, trace, wrapOpenAI } from 'neatlogs';
+
+const project = new Client({
+  apiKey: process.env.NEATLOGS_API_KEY!,
+  workflowName: 'support-agent',
+  captureLogs: true,
+});
+const openai = wrapOpenAI(rawOpenAI); // reusable; routing occurs at invocation
+
+await project.activate(async () => {
+  await trace({ name: 'answer', kind: 'WORKFLOW' }, async () => {
+    return openai.responses.create({ model: 'gpt-5', input: 'Hello' });
+  });
+});
+
+await project.shutdown();
+```
+
+Do not share one activation across unrelated concurrent jobs. Create one Client
+per destination, use `activate()` around each execution, and always await
+`shutdown()` when that Client is no longer needed.
 
 ---
 
@@ -345,7 +375,7 @@ Server-side prompt management for storing, versioning, and retrieving prompts fr
 import { PromptClient } from 'neatlogs';
 
 const client = new PromptClient({
-  baseUrl: 'https://app.neatlogs.com',
+  baseUrl: 'https://ingest.neatlogs.com',
   apiKey: process.env.NEATLOGS_API_KEY!,
 });
 

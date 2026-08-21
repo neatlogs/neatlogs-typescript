@@ -12,7 +12,7 @@
  */
 
 import { SpanStatusCode, type Span, type Tracer } from '@opentelemetry/api';
-import { getNeatlogsTracer, getNeatlogsParentContext, isolateTracer, withNeatlogsSpan } from './core/provider.js';
+import { getNeatlogsTracer, getNeatlogsParentContext, getRoutingNeatlogsTracer, withNeatlogsSpan } from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.ai-sdk';
 
@@ -42,7 +42,7 @@ export function createAITelemetry(
     // internally, which would otherwise parent its native spans from the foreign
     // global context AND push them onto it (so a co-tenant's next span inherits
     // ours). The facade routes both through the private Neatlogs context.
-    tracer: isolateTracer(getNeatlogsTracer(TRACER_NAME)),
+    tracer: getRoutingNeatlogsTracer(TRACER_NAME),
     metadata: { ...userMeta, neatlogsWrapped: true },
   };
 }

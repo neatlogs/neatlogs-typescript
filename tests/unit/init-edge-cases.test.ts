@@ -12,10 +12,12 @@ vi.mock('@opentelemetry/sdk-trace-node', () => {
   const register = vi.fn();
   const forceFlush = vi.fn().mockResolvedValue(undefined);
   const shutdownFn = vi.fn().mockResolvedValue(undefined);
+  const getTracer = vi.fn().mockReturnValue({ startSpan: vi.fn() });
   return {
     NodeTracerProvider: vi.fn().mockImplementation(() => ({
       addSpanProcessor,
       register,
+      getTracer,
       forceFlush,
       shutdown: shutdownFn,
     })),
@@ -84,9 +86,19 @@ vi.mock('@opentelemetry/sdk-logs', () => {
 });
 
 vi.mock('../../src/core/span-processor.js', () => ({
+  CompletionMarkerSpanProcessor: vi.fn().mockImplementation(() => ({
+    onStart: vi.fn(),
+    onEnd: vi.fn(),
+    beginShutdown: vi.fn(),
+    emitDeferred: vi.fn(),
+    forceFlush: vi.fn().mockResolvedValue(undefined),
+    shutdown: vi.fn().mockResolvedValue(undefined),
+  })),
   NeatlogsSpanProcessor: vi.fn().mockImplementation(() => ({
     onStart: vi.fn(),
     onEnd: vi.fn(),
+    beginShutdown: vi.fn().mockReturnValue('shutdown'),
+    endActiveSpans: vi.fn().mockReturnValue(0),
     forceFlush: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
   })),

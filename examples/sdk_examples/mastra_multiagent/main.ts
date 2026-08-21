@@ -113,8 +113,8 @@ async function main() {
 
   async function retrieveStrategies(query: string, topK: number = 3): Promise<Array<{ id: string; title: string; content: string; score: number }>> {
     return trace({ name: 'strategy_search', kind: 'RETRIEVER' as any }, async (s) => {
-      s.setAttribute('neatlogs.retrieval.query', query);
-      s.setAttribute('neatlogs.retrieval.top_k', topK);
+      s.setAttribute('neatlogs.retriever.query', query);
+      s.setAttribute('neatlogs.retriever.top_k', topK);
 
       const qResp = await openaiClient.embeddings.create({
         model: 'text-embedding-3-small',
@@ -132,7 +132,7 @@ async function main() {
         content: STRATEGIES[r.idx].content,
         score: Math.round(r.score * 10000) / 10000,
       }));
-      s.setAttribute('neatlogs.retrieval.documents', JSON.stringify(docs));
+      s.setAttribute('neatlogs.retriever.documents', JSON.stringify(docs));
 
       log('retrieved {count} strategies for: {query}', { count: results.length, query });
       return docs;

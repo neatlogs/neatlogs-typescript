@@ -99,7 +99,7 @@ function _embeddingPostprocessor(options: SpanOptions) {
  * RETRIEVER postprocessor: extract documents from result.
  * Looks for query in 'query', 'question', 'text' keys.
  * Extracts documents from list results or dict with 'documents'/'docs'/'results' keys.
- * Sets retrieval.documents.N.document.* attributes (up to 20 docs).
+ * Sets canonical neatlogs.retriever.documents.N.* attributes for every document.
  */
 export function retrieverPostprocessor(
   span: OtelSpan,
@@ -109,7 +109,7 @@ export function retrieverPostprocessor(
   // Extract query
   for (const key of ['query', 'question', 'text']) {
     if (key in boundInputs && typeof boundInputs[key] === 'string') {
-      span.setAttribute('retrieval.query', boundInputs[key]);
+      span.setAttribute('neatlogs.retriever.query', boundInputs[key]);
       break;
     }
   }
@@ -130,11 +130,10 @@ export function retrieverPostprocessor(
 
   if (!docs) return;
 
-  // Set document attributes (up to 20)
-  const maxDocs = Math.min(docs.length, 20);
-  for (let i = 0; i < maxDocs; i++) {
+  // Preserve every document; backend ingestion owns payload-size limits.
+  for (let i = 0; i < docs.length; i++) {
     const doc = docs[i];
-    const prefix = `retrieval.documents.${i}.document`;
+    const prefix = `neatlogs.retriever.documents.${i}`;
 
     if (typeof doc === 'string') {
       span.setAttribute(`${prefix}.content`, doc);

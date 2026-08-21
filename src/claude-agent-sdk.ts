@@ -659,11 +659,16 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  span.setAttribute(
+    'output.value',
+    JSON.stringify({ status: 'error', error: message }),
+  );
   if (err instanceof Error) {
     span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
     span.recordException(err);
   } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+    span.setStatus({ code: SpanStatusCode.ERROR, message });
   }
   span.end();
 }

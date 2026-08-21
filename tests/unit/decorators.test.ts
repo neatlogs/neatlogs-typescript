@@ -493,37 +493,43 @@ describe('retrieverPostprocessor', () => {
 
   it('should extract query from boundInputs', () => {
     retrieverPostprocessor(spanObj as any, [], { query: 'test query' });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith('retrieval.query', 'test query');
+    expect(spanObj.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.retriever.query',
+      'test query',
+    );
   });
 
   it('should prefer "query" key over "question"', () => {
     retrieverPostprocessor(spanObj as any, [], { query: 'q1', question: 'q2' });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith('retrieval.query', 'q1');
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.query', 'q1');
   });
 
   it('should use "question" when "query" is not present', () => {
     retrieverPostprocessor(spanObj as any, [], { question: 'q2' });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith('retrieval.query', 'q2');
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.query', 'q2');
   });
 
   it('should use "text" when others are not present', () => {
     retrieverPostprocessor(spanObj as any, [], { text: 'some text' });
-    expect(spanObj.setAttribute).toHaveBeenCalledWith('retrieval.query', 'some text');
+    expect(spanObj.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.retriever.query',
+      'some text',
+    );
   });
 
   it('should handle array of string documents', () => {
     const docs = ['doc1', 'doc2', 'doc3'];
     retrieverPostprocessor(spanObj as any, docs, {});
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.documents.0.content',
       'doc1',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.1.document.content',
+      'neatlogs.retriever.documents.1.content',
       'doc2',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.2.document.content',
+      'neatlogs.retriever.documents.2.content',
       'doc3',
     );
   });
@@ -536,27 +542,27 @@ describe('retrieverPostprocessor', () => {
     ];
     retrieverPostprocessor(spanObj as any, docs, {});
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.documents.0.content',
       'text1',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.id',
+      'neatlogs.retriever.documents.0.id',
       '1',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.score',
+      'neatlogs.retriever.documents.0.score',
       0.9,
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.metadata',
+      'neatlogs.retriever.documents.0.metadata',
       '{"source":"web"}',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.1.document.content',
+      'neatlogs.retriever.documents.1.content',
       'text2',
     );
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.2.document.content',
+      'neatlogs.retriever.documents.2.content',
       'text3',
     );
   });
@@ -565,7 +571,7 @@ describe('retrieverPostprocessor', () => {
     const result = { documents: ['doc1'] };
     retrieverPostprocessor(spanObj as any, result, {});
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.documents.0.content',
       'doc1',
     );
   });
@@ -574,7 +580,7 @@ describe('retrieverPostprocessor', () => {
     const result = { docs: ['doc1'] };
     retrieverPostprocessor(spanObj as any, result, {});
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.documents.0.content',
       'doc1',
     );
   });
@@ -583,7 +589,7 @@ describe('retrieverPostprocessor', () => {
     const result = { results: ['doc1'] };
     retrieverPostprocessor(spanObj as any, result, {});
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.documents.0.content',
       'doc1',
     );
   });
@@ -593,13 +599,17 @@ describe('retrieverPostprocessor', () => {
     expect(() => retrieverPostprocessor(spanObj as any, undefined, {})).not.toThrow();
   });
 
-  it('should limit documents to 20', () => {
-    const docs = Array.from({ length: 25 }, (_, i) => `doc${i}`);
+  it('should preserve every document without truncating content', () => {
+    const docs = Array.from({ length: 25 }, (_, i) => `doc${i}-${'x'.repeat(12_000)}`);
     retrieverPostprocessor(spanObj as any, docs, {});
     const contentCalls = spanObj.setAttribute.mock.calls.filter(
       ([key]: [string]) => typeof key === 'string' && key.endsWith('.content'),
     );
-    expect(contentCalls).toHaveLength(20);
+    expect(contentCalls).toHaveLength(25);
+    expect(spanObj.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.retriever.documents.24.content',
+      docs[24],
+    );
   });
 });
 
@@ -616,9 +626,12 @@ describe('span() with RETRIEVER', () => {
     const wrapped = span({ kind: 'RETRIEVER' }, fn);
     wrapped('my query');
     // retrieverPostprocessor should extract query and set document attrs
-    expect(mockSpan.setAttribute).toHaveBeenCalledWith('retrieval.query', 'my query');
     expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-      'retrieval.documents.0.document.content',
+      'neatlogs.retriever.query',
+      'my query',
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.retriever.documents.0.content',
       'doc1',
     );
   });

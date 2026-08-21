@@ -206,14 +206,14 @@ async function main() {
 
   async function retrievePlaybooks(query: string, topK: number = 4): Promise<Array<{ id: string; title: string; content: string; score: number }>> {
     return trace({ name: 'playbook_search', kind: 'RETRIEVER' as any }, async (s) => {
-      s.setAttribute('neatlogs.retrieval.query', query);
-      s.setAttribute('neatlogs.retrieval.top_k', topK);
+      s.setAttribute('neatlogs.retriever.query', query);
+      s.setAttribute('neatlogs.retriever.top_k', topK);
       const qResp = await openaiClient.embeddings.create({ model: 'text-embedding-3-small', input: [query] });
       const qVec = qResp.data[0].embedding;
       const scores = playbookEmbeddings!.map((emb, i) => ({ idx: i, score: cosine(qVec, emb) }));
       scores.sort((a, b) => b.score - a.score);
       const docs = scores.slice(0, topK).map(r => ({ id: PLAYBOOKS[r.idx].id, title: PLAYBOOKS[r.idx].title, content: PLAYBOOKS[r.idx].content, score: Math.round(r.score * 10000) / 10000 }));
-      s.setAttribute('neatlogs.retrieval.documents', JSON.stringify(docs));
+      s.setAttribute('neatlogs.retriever.documents', JSON.stringify(docs));
       log('retrieved {count} playbooks for: {query}', { count: docs.length, query });
       return docs;
     });

@@ -31,8 +31,6 @@ export interface PromptMessage {
 export interface InitOptions {
   /** Neatlogs API key. Falls back to NEATLOGS_API_KEY env var. */
   apiKey?: string;
-  /** Base URL for the Neatlogs API. Defaults to https://app.neatlogs.com */
-  baseUrl?: string;
   /** Name of the workflow being traced. Defaults to process.argv[1]. */
   workflowName?: string;
   /**

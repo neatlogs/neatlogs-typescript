@@ -135,8 +135,8 @@ async function main(): Promise<void> {
       const query = (input as { query: string }).query;
       // Wrap in a RETRIEVER trace for span topology
       return trace({ name: 'knowledge_base_retriever', kind: 'RETRIEVER' }, async (span) => {
-        span.setAttribute('neatlogs.retrieval.query', query);
-        span.setAttribute('neatlogs.retrieval.top_k', 4);
+        span.setAttribute('neatlogs.retriever.query', query);
+        span.setAttribute('neatlogs.retriever.top_k', 4);
         const queryLower = query.toLowerCase();
         const docs: Array<{ content: string; source: string }> = [];
 
@@ -149,7 +149,7 @@ async function main(): Promise<void> {
           docs.push(...KNOWLEDGE_BASE.default.map(p => ({ content: p, source: 'kb_default' })));
         }
         const sliced = docs.slice(0, 4);
-        span.setAttribute('neatlogs.retrieval.documents', JSON.stringify(sliced));
+        span.setAttribute('neatlogs.retriever.documents', JSON.stringify(sliced));
         return `Knowledge base results for '${query}':\n` + sliced.map(d => `- ${d.content}`).join('\n');
       });
     },

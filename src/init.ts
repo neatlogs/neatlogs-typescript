@@ -16,12 +16,17 @@ import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   BatchSpanProcessor,
   type BasicTracerProvider,
+  type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { LoggerProvider, BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 
-import { NeatlogsSpanProcessor } from './core/span-processor.js';
+import {
+  CompletionMarkerSpanProcessor,
+  NeatlogsSpanProcessor,
+} from './core/span-processor.js';
+import { addVerificationMarkerResourceAttribute } from './core/resource.js';
 import { FilteringExporter } from './core/filtering-exporter.js';
 import { _setOtelLogger } from './core/log.js';
 import { _setSessionConfig } from './core/context.js';
@@ -43,10 +48,15 @@ const logger = getLogger();
 // ---------------------------------------------------------------------------
 
 let _initialized = false;
+type LifecycleState = 'uninitialized' | 'initializing' | 'running' | 'closing';
+let _lifecycleState: LifecycleState = 'uninitialized';
+let _initPromise: Promise<void> | null = null;
 let _tracerProvider: BasicTracerProvider | null = null;
 let _ownsTracerProvider = false;
 let _logProvider: LoggerProvider | null = null;
 let _spanProcessor: NeatlogsSpanProcessor | null = null;
+let _transportSpanProcessors: SpanProcessor[] = [];
+let _completionProcessor: CompletionMarkerSpanProcessor | null = null;
 let _debugMode = false;
 // Retained so shutdown() can disable the instrumentors it installed; otherwise a
 // stale instrumentor stays bound to the shut-down provider after reinit.
@@ -54,8 +64,34 @@ let _instrumentationManager: InstrumentationManager | null = null;
 
 // Track signal handlers so we can remove them in shutdown()
 let _sigHandlersRegistered = false;
-const _shutdownOnSignal = () => {
-  shutdown().catch(() => {});
+let _signalShutdownStarted = false;
+let _shutdownPromise: Promise<boolean> | null = null;
+const _shutdownBeforeExit = () => {
+  void shutdown('beforeExit').catch((error) => {
+    logger.error(`Error shutting down before exit: ${error}`);
+  });
+};
+const _shutdownOnSignal = (signal: NodeJS.Signals) => {
+  if (_signalShutdownStarted) return;
+  _signalShutdownStarted = true;
+  // Node delivered this original signal to every registered listener. If the
+  // host has one, it owns termination; re-sending would look like a second
+  // signal. Only restore default signal semantics when Neatlogs was alone.
+  const hostOwnsSignal = process
+    .listeners(signal)
+    .some((listener) => listener !== _shutdownOnSignal);
+  void shutdown(signal)
+    .catch((error) => {
+      logger.error(`Error shutting down after ${signal}: ${error}`);
+    })
+    .finally(() => {
+      if (hostOwnsSignal || process.listenerCount(signal) > 0) return;
+      try {
+        process.kill(process.pid, signal);
+      } catch {
+        process.exitCode = signal === 'SIGINT' ? 130 : 143;
+      }
+    });
 };
 
 // ---------------------------------------------------------------------------
@@ -94,12 +130,33 @@ function _resolveWorkflowName(workflowName?: string): string {
  * exporters and auto-instrumentation. Returns a Promise because library
  * instrumentation uses dynamic `import()`.
  */
-export async function init(options: InitOptions = {}): Promise<void> {
-  // 1. Guard double-init
-  if (_initialized) {
-    logger.warn('Neatlogs already initialized, skipping re-initialization');
-    return;
+export function init(options: InitOptions = {}): Promise<void> {
+  if (_lifecycleState === 'initializing' && _initPromise) return _initPromise;
+  if (_lifecycleState === 'closing' && _shutdownPromise) {
+    return _shutdownPromise.then(() => init(options));
   }
+  if (_lifecycleState === 'running' || _initialized) {
+    logger.warn('Neatlogs already initialized, skipping re-initialization');
+    return Promise.resolve();
+  }
+
+  _lifecycleState = 'initializing';
+  const current = Promise.resolve().then(() => _performInit(options));
+  _initPromise = current;
+  void current.then(
+    () => {
+      if (_initPromise === current) _initPromise = null;
+      if (_lifecycleState === 'initializing') _lifecycleState = 'running';
+    },
+    () => {
+      if (_initPromise === current) _initPromise = null;
+      if (_lifecycleState === 'initializing') _lifecycleState = 'uninitialized';
+    },
+  );
+  return current;
+}
+
+async function _performInit(options: InitOptions): Promise<void> {
 
   // 1b. Validate the requested instrumentations against the isolation policy
   // BEFORE touching any module state (debug flag, session config, provider, …).
@@ -174,6 +231,7 @@ export async function init(options: InitOptions = {}): Promise<void> {
     'service.version': __version__,
     'neatlogs.workflow_name': resolvedWorkflowName,
   };
+  addVerificationMarkerResourceAttribute(resourceAttrs);
   // Operator identity only — whoever RUNS the SDK. Session & end-user identity
   // are per-request (trace()/span()/identify()), never resource attributes.
   if (options.userId) resourceAttrs['user.id'] = options.userId;
@@ -214,6 +272,8 @@ export async function init(options: InitOptions = {}): Promise<void> {
     sampleRate: options.sampleRate ?? 1.0,
     debug: options.debug ?? false,
     mask: options.mask,
+    emitCompletionMarkers: false,
+    ownAllSpans: _ownsTracerProvider,
   });
   provider.addSpanProcessor(_spanProcessor);
 
@@ -234,7 +294,14 @@ export async function init(options: InitOptions = {}): Promise<void> {
       maxExportBatchSize: options.batchSize ?? 100,
       scheduledDelayMillis: (options.flushInterval ?? 5) * 1000,
     });
+    const completionProcessor = new CompletionMarkerSpanProcessor(
+      _spanProcessor,
+      provider.getTracer('neatlogs.internal'),
+    );
     provider.addSpanProcessor(batchProcessor);
+    provider.addSpanProcessor(completionProcessor);
+    _transportSpanProcessors = [batchProcessor, completionProcessor];
+    _completionProcessor = completionProcessor;
 
     if (options.debug) {
       logger.debug(`OTLP trace exporter configured: ${tracesEndpoint}`);
@@ -332,9 +399,11 @@ export async function init(options: InitOptions = {}): Promise<void> {
   const registerShutdownHandlers =
     options.registerShutdownHandlers ?? _ownsTracerProvider;
   if (registerShutdownHandlers && !_sigHandlersRegistered) {
-    process.on('beforeExit', _shutdownOnSignal);
-    process.on('SIGTERM', _shutdownOnSignal);
-    process.on('SIGINT', _shutdownOnSignal);
+    process.on('beforeExit', _shutdownBeforeExit);
+    // Run before pre-existing one-shot host listeners so ownership is observed
+    // before EventEmitter removes them for their invocation.
+    process.prependListener('SIGTERM', _shutdownOnSignal);
+    process.prependListener('SIGINT', _shutdownOnSignal);
     _sigHandlersRegistered = true;
   }
 
@@ -369,17 +438,8 @@ export async function flush(): Promise<boolean> {
   // Flush regardless of ownership: our processors are attached to the provider
   // (owned or caller-supplied), so draining them is always ours to do. Shutdown
   // is what's ownership-gated — we never shut down a provider we didn't create.
-  if (_tracerProvider) {
-    try {
-      logger.debug('Flushing tracer provider...');
-      await _tracerProvider.forceFlush();
-      logger.debug('Tracer provider flushed successfully');
-    } catch (e) {
-      logger.error(`Error flushing spans: ${e}`);
-      success = false;
-    }
-  }
-
+  // Logs must drain before spans: the trace flush can export the root and its
+  // completion marker, which may make the backend finalize the trace.
   if (_logProvider) {
     try {
       logger.debug('Flushing log provider...');
@@ -387,6 +447,17 @@ export async function flush(): Promise<boolean> {
       logger.debug('Log provider flushed successfully');
     } catch (e) {
       logger.error(`Error flushing logs: ${e}`);
+      success = false;
+    }
+  }
+
+  if (_tracerProvider) {
+    try {
+      logger.debug('Flushing tracer provider...');
+      await _tracerProvider.forceFlush();
+      logger.debug('Tracer provider flushed successfully');
+    } catch (e) {
+      logger.error(`Error flushing spans: ${e}`);
       success = false;
     }
   }
@@ -405,10 +476,44 @@ export async function flush(): Promise<boolean> {
  *
  * @returns true if all providers shut down successfully
  */
-export async function shutdown(): Promise<boolean> {
+export function shutdown(terminationReason = 'shutdown'): Promise<boolean> {
+  if (_shutdownPromise) return _shutdownPromise;
+
+  const initialization =
+    _lifecycleState === 'initializing' ? _initPromise : null;
+  _lifecycleState = 'closing';
+  _completionProcessor?.beginShutdown();
+  _spanProcessor?.beginShutdown(terminationReason);
+  _setOtelLogger(null, false);
+
+  // Defer all shutdown work until the shared promise has been installed.
+  // endActiveSpans() synchronously invokes onEnd(), and a host processor may
+  // re-enter shutdown() from there.
+  const currentShutdown = Promise.resolve().then(async () => {
+    if (initialization) {
+      try {
+        await initialization;
+      } catch {
+        // Teardown any partial state left by a failed initialization.
+      }
+    }
+    return _performShutdown(terminationReason);
+  });
+  _shutdownPromise = currentShutdown;
+  const clearCurrentShutdown = () => {
+    if (_shutdownPromise === currentShutdown) {
+      _shutdownPromise = null;
+      _lifecycleState = 'uninitialized';
+    }
+  };
+  void currentShutdown.then(clearCurrentShutdown, clearCurrentShutdown);
+  return currentShutdown;
+}
+
+async function _performShutdown(terminationReason: string): Promise<boolean> {
   // Remove signal handlers
   if (_sigHandlersRegistered) {
-    process.removeListener('beforeExit', _shutdownOnSignal);
+    process.removeListener('beforeExit', _shutdownBeforeExit);
     process.removeListener('SIGTERM', _shutdownOnSignal);
     process.removeListener('SIGINT', _shutdownOnSignal);
     _sigHandlersRegistered = false;
@@ -422,6 +527,31 @@ export async function shutdown(): Promise<boolean> {
   _instrumentationManager?.disable();
   _instrumentationManager = null;
   _resetMastraCache();
+
+  // LOG records must drain before trace completion. The trace provider carries
+  // neatlogs.trace.complete, which can trigger server-side finalization.
+  if (_logProvider) {
+    try {
+      logger.debug('Shutting down log provider...');
+      await _logProvider.shutdown();
+      logger.debug('Log provider shut down successfully');
+    } catch (e) {
+      logger.error(`Error shutting down log provider: ${e}`);
+      success = false;
+    }
+  }
+
+  // Ending the root creates the trace-completion marker. Do this only after
+  // buffered logs have drained so finalization cannot overtake them.
+  if (_spanProcessor) {
+    const ended = _spanProcessor.endActiveSpans(terminationReason);
+    if (ended > 0) {
+      logger.info(
+        `Ended ${ended} active Neatlogs span(s) during ${terminationReason}`,
+      );
+    }
+  }
+  _completionProcessor?.emitDeferred();
 
   // Only shut down a provider we created. A caller-supplied provider is flushed
   // (above / in flush()) but never shut down — its owner controls its lifecycle,
@@ -444,15 +574,22 @@ export async function shutdown(): Promise<boolean> {
       logger.error(`Error flushing caller-owned tracer provider: ${e}`);
       success = false;
     }
-  }
-
-  if (_logProvider) {
+    // The provider is caller-owned, but these processors/exporters are ours.
+    // SDKs cannot detach processors in OTel JS 1.x; shut every instance down
+    // independently so one exporter failure cannot leave another active.
+    const transportResults = await Promise.allSettled(
+      [..._transportSpanProcessors].reverse().map((processor) =>
+        processor.shutdown(),
+      ),
+    );
+    if (transportResults.some((result) => result.status === 'rejected')) {
+      logger.error('One or more Neatlogs transport processors failed to shut down');
+      success = false;
+    }
     try {
-      logger.debug('Shutting down log provider...');
-      await _logProvider.shutdown();
-      logger.debug('Log provider shut down successfully');
+      await _spanProcessor?.shutdown();
     } catch (e) {
-      logger.error(`Error shutting down log provider: ${e}`);
+      logger.error(`Error disabling Neatlogs span processor: ${e}`);
       success = false;
     }
   }
@@ -464,7 +601,10 @@ export async function shutdown(): Promise<boolean> {
   _setNeatlogsProvider(null);
   _logProvider = null;
   _spanProcessor = null;
+  _transportSpanProcessors = [];
+  _completionProcessor = null;
   _debugMode = false;
+  _signalShutdownStarted = false;
 
   // Reset session config
   _setSessionConfig({});
