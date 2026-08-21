@@ -922,6 +922,26 @@ function healthyTrace(fw: Framework): SpanDict[] {
       'neatlogs.instrumentation.name': 'neatlogs.core.context',
     },
   });
+  // PR #21: a "healthy" trace must include BOTH neatlogs attrs AND the
+  // OTel GenAI attrs (gen_ai.operation.name, provider, model, usage
+  // tokens, finish_reasons) on the LLM span. A trace that only has
+  // neatlogs attrs will correctly fire `otel-genai-missing`.
+  const childAttrs: Record<string, unknown> = {
+    'neatlogs.span.kind': fw.instrumentedKind,
+    'neatlogs.instrumentation.name': 'neatlogs.core.context',
+    'neatlogs.llm.input_messages.0.content': 'hello',
+    'neatlogs.llm.output_messages.0.content': 'world',
+    'neatlogs.tool.input': '{"x":1}',
+    'neatlogs.tool.output': '{"y":2}',
+  };
+  if (fw.instrumentedKind === 'llm') {
+    childAttrs['gen_ai.operation.name'] = 'chat';
+    childAttrs['gen_ai.provider.name'] = fw.name;
+    childAttrs['gen_ai.request.model'] = `${fw.name}-model-1`;
+    childAttrs['gen_ai.usage.input_tokens'] = 10;
+    childAttrs['gen_ai.usage.output_tokens'] = 5;
+    childAttrs['gen_ai.response.finish_reasons'] = ['stop'];
+  }
   const child = makeSpan({
     trace_id: 't1',
     span_id: 'c',
@@ -929,14 +949,7 @@ function healthyTrace(fw: Framework): SpanDict[] {
     name: `${fw.name}.child`,
     kind: fw.instrumentedKind,
     instrumentation_scope: { name: 'neatlogs.core.context', version: '1.0.0' },
-    attributes: {
-      'neatlogs.span.kind': fw.instrumentedKind,
-      'neatlogs.instrumentation.name': 'neatlogs.core.context',
-      'neatlogs.llm.input_messages.0.content': 'hello',
-      'neatlogs.llm.output_messages.0.content': 'world',
-      'neatlogs.tool.input': '{"x":1}',
-      'neatlogs.tool.output': '{"y":2}',
-    },
+    attributes: childAttrs,
   });
   return [root, child];
 }
@@ -1017,4 +1030,364 @@ describe('framework coverage (17 × 3 = 51 tests)', () => {
       });
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 11. PR #21 — OTel GenAI semconv validation
+// ---------------------------------------------------------------------------
+
+describe('otel-genai-missing (PR #21)', () => {
+  it('fires when an LLM span has no gen_ai.operation.name', () => {
+    const file = writeLog([
+      makeSpan({
+        trace_id: 't1',
+        span_id: 'r',
+        parent_span_id: null,
+        kind: 'workflow',
+        name: 'root',
+        attributes: { 'neatlogs.span.kind': 'workflow' },
+      }),
+      makeSpan({
+        trace_id: 't1',
+        span_id: 'l',
+        parent_span_id: 'r',
+        kind: 'llm',
+        name: 'chat',
+        // No gen_ai.* attrs.
+        attributes: { 'neatlogs.span.kind': 'llm' },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'otel-genai-missing');
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe('warning');
+    expect(f!.fixClass).toBe('config');
+  });
+
+  it('does NOT fire when gen_ai.operation.name is present', () => {
+    const file = writeLog([
+      makeSpan({
+        trace_id: 't1',
+        span_id: 'l',
+        parent_span_id: null,
+        kind: 'llm',
+        name: 'chat',
+        attributes: {
+          'neatlogs.span.kind': 'llm',
+          'gen_ai.operation.name': 'chat',
+        },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'otel-genai-missing');
+    expect(f).toBeUndefined();
+  });
+
+  it('does NOT fire when no spans are LLM-kind', () => {
+    const file = writeLog([
+      makeSpan({ kind: 'tool', name: 't', attributes: { 'neatlogs.span.kind': 'tool' } }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'otel-genai-missing');
+    expect(f).toBeUndefined();
+  });
+});
+
+describe('otel-genai-inconsistent (PR #21)', () => {
+  it('fires when kind=llm but gen_ai op is embeddings', () => {
+    const file = writeLog([
+      makeSpan({
+        kind: 'llm',
+        name: 'mismatch',
+        attributes: {
+          'neatlogs.span.kind': 'llm',
+          'gen_ai.operation.name': 'embeddings',
+        },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'otel-genai-inconsistent');
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe('info');
+    expect(f!.evidence).toContain("neatlogs.span.kind='llm'");
+    expect(f!.evidence).toContain("gen_ai.operation.name='embeddings'");
+  });
+
+  // §12.8.2 (PR #21 review): the walker must check isLlmKind() BEFORE
+  // looking at op-name. A tool span with chat op-name is still a tool span.
+  it('does NOT fire on a tool span with chat op-name', () => {
+    const file = writeLog([
+      makeSpan({
+        kind: 'tool',
+        name: 'my-tool',
+        attributes: {
+          'neatlogs.span.kind': 'tool',
+          'gen_ai.operation.name': 'chat',
+        },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'otel-genai-inconsistent');
+    expect(f).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. PR #21 — token-waste findings
+// ---------------------------------------------------------------------------
+
+describe('oversized-prompt (PR #21)', () => {
+  it('fires when an LLM span has > 50K chars of prompt content', () => {
+    const big = 'x'.repeat(50_001);
+    const file = writeLog([
+      makeSpan({
+        kind: 'llm',
+        name: 'huge',
+        attributes: {
+          'neatlogs.span.kind': 'llm',
+          'neatlogs.llm.system': big,
+        },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'oversized-prompt');
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe('warning');
+  });
+
+  it('does NOT fire on small prompts', () => {
+    const file = writeLog([
+      makeSpan({
+        kind: 'llm',
+        name: 'small',
+        attributes: {
+          'neatlogs.span.kind': 'llm',
+          'neatlogs.llm.system': 'You are a helpful assistant.',
+        },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'oversized-prompt');
+    expect(f).toBeUndefined();
+  });
+});
+
+describe('repeated-system-prompt (PR #21, PII-gated)', () => {
+  it('does NOT fire when read_prompt_content is false (default)', () => {
+    const sys = 'You are a helpful assistant.';
+    const spans: SpanDict[] = [];
+    for (let i = 0; i < 15; i++) {
+      spans.push(
+        makeSpan({
+          trace_id: 't1',
+          span_id: `s${i}`,
+          parent_span_id: null,
+          kind: 'llm',
+          name: `call-${i}`,
+          attributes: {
+            'neatlogs.span.kind': 'llm',
+            'neatlogs.llm.system': sys,
+          },
+        }),
+      );
+    }
+    const r = diagnose(writeLog(spans));
+    const f = r.findings.find((x) => x.code === 'repeated-system-prompt');
+    expect(f).toBeUndefined();
+  });
+
+  it('fires when read_prompt_content is true and same sys prompt 10+ times', () => {
+    const sys = 'You are a helpful assistant.';
+    const spans: SpanDict[] = [];
+    for (let i = 0; i < 12; i++) {
+      spans.push(
+        makeSpan({
+          trace_id: 't1',
+          span_id: `s${i}`,
+          parent_span_id: null,
+          kind: 'llm',
+          name: `call-${i}`,
+          attributes: {
+            'neatlogs.span.kind': 'llm',
+            'neatlogs.llm.system': sys,
+          },
+        }),
+      );
+    }
+    const r = diagnose(writeLog(spans), { readPromptContent: true });
+    const f = r.findings.find((x) => x.code === 'repeated-system-prompt');
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe('info');
+    expect(f!.evidence).toContain('12 times');
+  });
+});
+
+describe('unused-tool-definition (PR #21)', () => {
+  it('fires when a tool is defined but never called', () => {
+    const file = writeLog([
+      makeSpan({
+        kind: 'llm',
+        name: 'with-tools',
+        attributes: {
+          'neatlogs.span.kind': 'llm',
+          'gen_ai.operation.name': 'chat',
+          'gen_ai.tool.definitions': [
+            { name: 'get_weather' },
+            { name: 'get_news' },
+          ],
+          'gen_ai.output.messages': [
+            { finish_reason: 'stop', tool_calls: [] },
+          ],
+        },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'unused-tool-definition');
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe('info');
+    expect(f!.evidence).toContain('get_weather');
+    expect(f!.evidence).toContain('get_news');
+  });
+
+  it('does NOT fire when every defined tool is called', () => {
+    const file = writeLog([
+      makeSpan({
+        kind: 'llm',
+        name: 'all-used',
+        attributes: {
+          'neatlogs.span.kind': 'llm',
+          'gen_ai.operation.name': 'chat',
+          'gen_ai.tool.definitions': [{ name: 'get_weather' }],
+          'gen_ai.output.messages': [
+            {
+              tool_calls: [{ function: { name: 'get_weather' } }],
+            },
+          ],
+        },
+      }),
+    ]);
+    const r = diagnose(file);
+    const f = r.findings.find((x) => x.code === 'unused-tool-definition');
+    expect(f).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. PR #21 — Manual-fix snippets (--emit-fix)
+// ---------------------------------------------------------------------------
+
+import { FIX_SNIPPETS, renderFixSnippet } from '../../../src/doctor/fix-snippets.js';
+
+describe('renderFixSnippet (PR #21)', () => {
+  it('returns plain text for each registered code', () => {
+    for (const code of Object.keys(FIX_SNIPPETS)) {
+      const snippet = renderFixSnippet(code);
+      expect(snippet).not.toBeNull();
+      // §12.8.3: snippet is plain text, not JSON-escaped. Must contain
+      // a newline literal, not '\\n'.
+      expect(snippet).toContain('\n');
+      expect(snippet).toContain(`# Finding: ${code}`);
+      expect(snippet).toContain('# BEFORE:');
+      expect(snippet).toContain('# AFTER:');
+    }
+  });
+
+  it('returns null for unknown codes', () => {
+    expect(renderFixSnippet('not-a-real-code')).toBeNull();
+    expect(renderFixSnippet('init-after-client-typo')).toBeNull();
+  });
+
+  it('snippet body does NOT contain JSON-escaped newlines', () => {
+    const snippet = renderFixSnippet('init-after-client')!;
+    // The Python reference renders the raw `\n` separator in the strings
+    // and the result is plain text. No JSON-stringified `\n` allowed.
+    expect(snippet).not.toContain('\\n');
+  });
+});
+
+describe('CLI --emit-fix (PR #21)', () => {
+  it('prints snippet on stdout and exits 0 for known code', () => {
+    const captured: { stdout: string; stderr: string; code: number } = {
+      stdout: '',
+      stderr: '',
+      code: -1,
+    };
+    const origWrite = process.stdout.write;
+    const origErrWrite = process.stderr.write;
+    try {
+      process.stdout.write = ((s: string) => {
+        captured.stdout += s;
+        return true;
+      }) as typeof process.stdout.write;
+      process.stderr.write = ((s: string) => {
+        captured.stderr += s;
+        return true;
+      }) as typeof process.stderr.write;
+      captured.code = main(['--emit-fix', 'init-after-client']);
+      expect(captured.code).toBe(0);
+      expect(captured.stdout).toContain('# Finding: init-after-client');
+      expect(captured.stdout).toContain('neatlogs.init()');
+      expect(captured.stderr).toBe('');
+    } finally {
+      process.stdout.write = origWrite;
+      process.stderr.write = origErrWrite;
+    }
+  });
+
+  it('exits 2 with stderr listing known codes for unknown code', () => {
+    const captured: { stdout: string; stderr: string; code: number } = {
+      stdout: '',
+      stderr: '',
+      code: -1,
+    };
+    const origWrite = process.stdout.write;
+    const origErrWrite = process.stderr.write;
+    try {
+      process.stdout.write = ((s: string) => {
+        captured.stdout += s;
+        return true;
+      }) as typeof process.stdout.write;
+      process.stderr.write = ((s: string) => {
+        captured.stderr += s;
+        return true;
+      }) as typeof process.stderr.write;
+      captured.code = main(['--emit-fix', 'unknown-code']);
+      expect(captured.code).toBe(2);
+      expect(captured.stderr).toContain("Unknown finding code: 'unknown-code'");
+      expect(captured.stderr).toContain('init-after-client');
+      expect(captured.stdout).toBe('');
+    } finally {
+      process.stdout.write = origWrite;
+      process.stderr.write = origErrWrite;
+    }
+  });
+
+  it('does NOT require a path when --emit-fix is set', () => {
+    const captured: { stdout: string; code: number } = { stdout: '', code: -1 };
+    const origWrite = process.stdout.write;
+    try {
+      process.stdout.write = ((s: string) => {
+        captured.stdout += s;
+        return true;
+      }) as typeof process.stdout.write;
+      // Pass only --emit-fix, no path → must not throw "no path provided".
+      captured.code = main(['--emit-fix', 'missing-span-kind']);
+      expect(captured.code).toBe(0);
+      expect(captured.stdout).toContain('# Finding: missing-span-kind');
+    } finally {
+      process.stdout.write = origWrite;
+    }
+  });
+});
+
+describe('CLI --read-prompt-content (PR #21)', () => {
+  it('parses --read-prompt-content as a boolean flag', () => {
+    const o = parseArgs(['./spans.log', '--read-prompt-content']);
+    expect(o.readPromptContent).toBe(true);
+  });
+
+  it('defaults readPromptContent to false', () => {
+    const o = parseArgs(['./spans.log']);
+    expect(o.readPromptContent).toBe(false);
+  });
 });

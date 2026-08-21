@@ -6,9 +6,12 @@
  *   neatlogs-doctor ./spans.log --json
  *   neatlogs-doctor ./spans.log --run-id abc123
  *   neatlogs-doctor ./spans.log --foreign-only
+ *   neatlogs-doctor ./spans.log --read-prompt-content
+ *   neatlogs-doctor --emit-fix init-after-client
  *   cat spans.log | neatlogs-doctor -
  *
- * Exit code: 0 if no error-severity findings, 1 otherwise.
+ * Exit code: 0 if no error-severity findings (or --emit-fix success),
+ * 1 if there are error findings, 2 for argument errors.
  */
 
 import * as fs from 'node:fs';
@@ -17,12 +20,17 @@ import * as path from 'node:path';
 
 import { DoctorFinding, DoctorReport, type SpanDict } from './types.js';
 import { diagnose, formatReport } from './index.js';
+import { FIX_SNIPPETS, renderFixSnippet } from './fix-snippets.js';
 
 export interface CliOptions {
-  path: string;
+  /** Path to the log file, `'-'` for stdin, or `undefined` when --emit-fix is set. */
+  path?: string;
   json: boolean;
   runId?: string;
   foreignOnly: boolean;
+  readPromptContent: boolean;
+  /** When set, the CLI prints the fix snippet for this code and exits. */
+  emitFix?: string;
 }
 
 export class CliParseError extends Error {
@@ -41,6 +49,8 @@ export function parseArgs(argv: string[]): CliOptions {
   let json = false;
   let runId: string | undefined;
   let foreignOnly = false;
+  let readPromptContent = false;
+  let emitFix: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -49,6 +59,17 @@ export function parseArgs(argv: string[]): CliOptions {
       json = true;
     } else if (arg === '--foreign-only') {
       foreignOnly = true;
+    } else if (arg === '--read-prompt-content') {
+      readPromptContent = true;
+    } else if (arg === '--emit-fix') {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) {
+        throw new CliParseError('--emit-fix requires a value');
+      }
+      emitFix = next;
+      i += 1;
+    } else if (arg.startsWith('--emit-fix=')) {
+      emitFix = arg.slice('--emit-fix='.length);
     } else if (arg === '--run-id') {
       const next = argv[i + 1];
       if (next === undefined || next.startsWith('--')) {
@@ -65,21 +86,35 @@ export function parseArgs(argv: string[]): CliOptions {
     }
   }
 
-  let pathArg: string | undefined = positional[0];
-  if (pathArg === undefined) {
-    const env = process.env['NEATLOGS_LOG_SPANS_FILE'];
-    pathArg = env;
+  // When --emit-fix is set, the path is OPTIONAL — the snippet doesn't
+  // read the log file. The CLI bypasses the path requirement in that case.
+  if (emitFix === undefined) {
+    let pathArg: string | undefined = positional[0];
+    if (pathArg === undefined) {
+      const env = process.env['NEATLOGS_LOG_SPANS_FILE'];
+      pathArg = env;
+    }
+    if (pathArg === undefined || pathArg === '') {
+      throw new CliParseError(
+        'no path provided; pass it as an argument, set NEATLOGS_LOG_SPANS_FILE, or use --emit-fix <code>',
+      );
+    }
+    return {
+      path: pathArg,
+      json,
+      ...(runId !== undefined ? { runId } : {}),
+      foreignOnly,
+      readPromptContent,
+    };
   }
-  if (pathArg === undefined || pathArg === '') {
-    throw new CliParseError(
-      'no path provided; pass it as an argument or set NEATLOGS_LOG_SPANS_FILE',
-    );
-  }
+
   return {
-    path: pathArg,
+    ...(positional[0] !== undefined ? { path: positional[0] } : {}),
     json,
     ...(runId !== undefined ? { runId } : {}),
     foreignOnly,
+    readPromptContent,
+    emitFix,
   };
 }
 
@@ -139,7 +174,7 @@ function parseJsonl(content: string): { spans: SpanDict[]; invalidLines: number[
 export function diagnoseFromString(
   content: string,
   sourceLabel: string,
-  options: { runId?: string; foreignOnly?: boolean } = {},
+  options: { runId?: string; foreignOnly?: boolean; readPromptContent?: boolean } = {},
 ): DoctorReport {
   const { spans, invalidLines } = parseJsonl(content);
 
@@ -210,7 +245,12 @@ export function diagnoseFromString(
 }
 
 /**
- * Main CLI entry point. Returns the exit code (0 or 1).
+ * Main CLI entry point. Returns the exit code (0, 1, or 2).
+ *
+ * Exit code matrix:
+ * - 0: no error-severity findings, OR --emit-fix succeeded.
+ * - 1: one or more error-severity findings.
+ * - 2: argument error (missing path, unknown flag, unknown --emit-fix code).
  */
 export function main(argv: string[] = process.argv.slice(2)): number {
   let opts: CliOptions;
@@ -221,18 +261,39 @@ export function main(argv: string[] = process.argv.slice(2)): number {
     return 2;
   }
 
+  // --emit-fix is a special path: it does NOT read the log file, prints
+  // the snippet to stdout, and exits. Unknown code → exit 2 with stderr.
+  if (opts.emitFix !== undefined) {
+    const snippet = renderFixSnippet(opts.emitFix);
+    if (snippet === null) {
+      process.stderr.write(
+        `Unknown finding code: '${opts.emitFix}'. Known codes: ${Object.keys(FIX_SNIPPETS).sort().join(', ')}\n`,
+      );
+      return 2;
+    }
+    process.stdout.write(snippet);
+    return 0;
+  }
+
+  // After parseArgs, when --emit-fix is unset, `path` is guaranteed to be
+  // defined (parseArgs throws otherwise). The non-null assertion here is
+  // safe and lets TS narrow the type for the rest of main().
+  const pathArg = opts.path!;
+
   let report: DoctorReport;
   try {
-    if (opts.path === '-') {
+    if (pathArg === '-') {
       const content = readStdin();
       report = diagnoseFromString(content, '<stdin>', {
         ...(opts.runId !== undefined ? { runId: opts.runId } : {}),
         foreignOnly: opts.foreignOnly,
+        readPromptContent: opts.readPromptContent,
       });
     } else {
-      report = diagnose(opts.path, {
+      report = diagnose(pathArg, {
         ...(opts.runId !== undefined ? { runId: opts.runId } : {}),
         foreignOnly: opts.foreignOnly,
+        readPromptContent: opts.readPromptContent,
       });
     }
   } catch (e) {

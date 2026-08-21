@@ -13,8 +13,9 @@
  * checks within a single trace run in this order:
  *
  *   1. Build child map, span_id set, duplicate list.
- *   2. NEW DIMENSIONS (always run, even on unusual traces):
- *      init-order, attribute-completeness, data-integrity.
+ *   2. PRE-LAUNCH RELIABILITY DIMENSIONS (always run, even on unusual traces):
+ *      init-order, attribute-completeness, data-integrity,
+ *      OTel GenAI semconv, token-waste.
  *   3. rootless-http-only → if true, append + return immediately.
  *   4. missing-root-kind.
  *   5. hierarchy pathologies (orphan, self, duplicate-id, multi-root, cycle).
@@ -23,7 +24,8 @@
  *
  * Pre-PR-#20, the rootless-http-only early-return caused the 4 new
  * dimensions to be silently skipped on rootless HTTP traces (bug 12.1).
- * The new dimensions now run first.
+ * The new dimensions now run first. PR #21 added the OTel GenAI and
+ * token-waste dimensions (steps 3d and 3e), all before the early-return.
  */
 
 import {
@@ -60,6 +62,7 @@ import {
   dataIntegrityFindings,
   initOrderFindings,
 } from './dimensions.js';
+import { otelGenaiFindings, tokenWasteFindings } from './otel.js';
 import { pipelineStageRunFinding } from './pipeline-summary.js';
 
 export interface DiagnoseOptions {
@@ -67,6 +70,13 @@ export interface DiagnoseOptions {
   runId?: string;
   /** Only return foreign-instrumentation findings. */
   foreignOnly?: boolean;
+  /**
+   * If True, the doctor reads LLM prompt contents (PII concern) to detect
+   * the `repeated-system-prompt` pattern. Default is False. Pass
+   * `--read-prompt-content` on the CLI to enable. The other token-waste
+   * checks (oversized-prompt, unused-tool-definition) run regardless.
+   */
+  readPromptContent?: boolean;
 }
 
 export interface FormatReportOptions {
@@ -158,11 +168,12 @@ export function diagnose(path: string, options: DiagnoseOptions = {}): DoctorRep
     );
   }
 
+  const readPromptContent = options.readPromptContent ?? false;
   let anyScopeSeen = false;
   for (const [rid, runSpans] of runs) {
     const traces = groupByTrace(runSpans);
     for (const [tid, traceSpans] of traces) {
-      findings.push(...diagnoseTrace(tid, traceSpans, rid));
+      findings.push(...diagnoseTrace(tid, traceSpans, rid, { readPromptContent }));
     }
     const { findings: scopeFindings, scopesSeen } = foreignInstrumentationFindings(
       runSpans,
@@ -231,14 +242,29 @@ function finalizeReport(
 }
 
 /**
+ * Options for `diagnoseTrace`. Lets the caller opt in to PII-sensitive
+ * checks without polluting the trace-level signature.
+ */
+export interface DiagnoseTraceOptions {
+  /**
+   * If True, read LLM prompt contents to detect `repeated-system-prompt`.
+   * Default false. The other token-waste checks always run.
+   */
+  readPromptContent?: boolean;
+}
+
+/**
  * Run all per-trace checks in the exact order specified by Section 6.1
- * of the handoff. The 4 new-dimension checks run FIRST (before the
- * early-return checks), so they fire on every trace shape.
+ * of the handoff. The 5 pre-launch reliability dimensions (init-order,
+ * attribute-completeness, data-integrity, OTel GenAI, token-waste) run
+ * FIRST (before the early-return checks), so they fire on every trace
+ * shape. PR #21 added steps 3d and 3e.
  */
 export function diagnoseTrace(
   traceId: string,
   spans: readonly SpanDict[],
   runId: string,
+  options: DiagnoseTraceOptions = {},
 ): DoctorFinding[] {
   const visible = spans.filter((s) => !isInternal(s));
   if (visible.length === 0) return [];
@@ -249,14 +275,18 @@ export function diagnoseTrace(
   // (0) Build child map, span_id set, duplicate list. Used by checks below.
   const { childMap, spanIds, duplicateSpanIds } = buildTraceIndex(visible);
 
-  // (1, 2, 3) NEW DIMENSIONS run FIRST, before any early-return. Per
-  // Section 12.1 of the handoff, the previous version ran them AFTER
-  // rootless-http-only, which caused them to be silently skipped on
-  // rootless HTTP traces. Fixed in commit 9669556.
+  // (1, 2, 3) PRE-LAUNCH RELIABILITY DIMENSIONS run FIRST, before any
+  // early-return. Per Section 12.1 of the handoff, the previous version ran
+  // them AFTER rootless-http-only, which caused them to be silently skipped
+  // on rootless HTTP traces. Fixed in commit 9669556. PR #21 added the
+  // OTel GenAI (3d) and token-waste (3e) dimensions.
+  const readPromptContent = options.readPromptContent ?? false;
   const findings: DoctorFinding[] = [];
   findings.push(...initOrderFindings(visible, traceId, runId));
   findings.push(...attributeCompletenessFindings(visible, traceId, runId));
   findings.push(...dataIntegrityFindings(visible, traceId, runId));
+  findings.push(...otelGenaiFindings(visible, traceId, runId));
+  findings.push(...tokenWasteFindings(visible, traceId, runId, readPromptContent));
 
   // (4) rootless-http-only → early return. Only the new dimensions have
   // already run by this point.

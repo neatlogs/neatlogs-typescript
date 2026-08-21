@@ -41,6 +41,42 @@ export const INIT_MARKER_KEYS = [
   'neatlogs.workflow_name',
 ] as const;
 
+// ---------------------------------------------------------------------------
+// PR #21: OTel GenAI semantic-convention attribute keys.
+// Reference: https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md
+// ---------------------------------------------------------------------------
+
+export const OTEL_GENAI_OPERATION_NAME = 'gen_ai.operation.name';
+export const OTEL_GENAI_PROVIDER_NAME = 'gen_ai.provider.name';
+export const OTEL_GENAI_REQUEST_MODEL = 'gen_ai.request.model';
+export const OTEL_GENAI_USAGE_INPUT_TOKENS = 'gen_ai.usage.input_tokens';
+export const OTEL_GENAI_USAGE_OUTPUT_TOKENS = 'gen_ai.usage.output_tokens';
+export const OTEL_GENAI_RESPONSE_FINISH_REASONS = 'gen_ai.response.finish_reasons';
+
+/**
+ * OTel GenAI operation-name values that correspond to an "llm" kind span
+ * (per the semconv, these are the chat-style operations).
+ */
+export const OTEL_GENAI_LLM_OPERATIONS: ReadonlySet<string> = new Set([
+  'chat',
+  'text_completion',
+  'generate_content',
+]);
+
+/**
+ * Threshold for `oversized-prompt` — anything over this many characters in
+ * a single LLM span's prompt content is almost certainly a bug (forgot to
+ * truncate retrieved documents, leaked a long CSV, etc.).
+ */
+export const OVERSIZED_PROMPT_CHAR_THRESHOLD = 50_000;
+
+/**
+ * Threshold for `repeated-system-prompt` — the same system prompt content
+ * appearing this many times in the run suggests the user is sending a static
+ * prefix without leveraging prompt caching.
+ */
+export const REPEATED_SYSTEM_PROMPT_THRESHOLD = 10;
+
 /** A severity tag for a finding. */
 export type DoctorSeverity = 'error' | 'warning' | 'info';
 
