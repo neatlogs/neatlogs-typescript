@@ -955,7 +955,7 @@ function healthyTrace(fw: Framework): SpanDict[] {
 }
 
 function foreignTrace(fw: Framework): SpanDict[] {
-  // Root is foreign (so foreign detection fires); child carries neatlogs markers.
+  // Root is foreign (so foreign detection fires).
   const root = makeSpan({
     trace_id: 't1',
     span_id: 'r',
