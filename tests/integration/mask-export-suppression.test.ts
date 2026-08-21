@@ -39,6 +39,62 @@ function makeIsolatedProvider(mask?: MaskFunction) {
 }
 
 describe('MaskFunction null-return: "drop span" behaviour', () => {
+  it('awaits async masking and applies it to events and resource attributes', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const asyncMask: MaskFunction = async (spanData) => {
+      await gate;
+      return {
+        ...spanData,
+        name: `masked:${spanData.name}`,
+        attributes: { visible: 'yes' },
+        resource: { attributes: { 'service.name': 'redacted-service' } },
+        events: spanData.events.map((event: Record<string, any>) => ({
+          ...event,
+          attributes: { redacted: true },
+        })),
+      };
+    };
+    const { provider, exporter } = makeIsolatedProvider(asyncMask);
+    const tracer = provider.getTracer('tc-mask-async');
+    const span = tracer.startSpan('sensitive-span');
+    span.setAttribute('secret', 'do-not-export');
+    span.addEvent('chunk', { secret: 'event-secret' });
+    span.end();
+
+    // Ending application work is not blocked by the unresolved masking task.
+    expect(exporter.getFinishedSpans()).toEqual([]);
+    release();
+    await provider.forceFlush();
+
+    const exported = exporter
+      .getFinishedSpans()
+      .find((item) => item.name === 'masked:sensitive-span');
+    expect(exported?.attributes).toEqual({ visible: 'yes' });
+    expect(exported?.events[0].attributes).toEqual({ redacted: true });
+    expect(exported?.resource.attributes).toEqual({
+      'service.name': 'redacted-service',
+    });
+    await provider.shutdown();
+    _clearMaskRegistry();
+  });
+
+  it('drops a span when an async mask rejects', async () => {
+    const failingMask: MaskFunction = async () => {
+      throw new Error('redactor unavailable');
+    };
+    const { provider, exporter } = makeIsolatedProvider(failingMask);
+    provider.getTracer('tc-mask-failure').startSpan('must-not-leak').end();
+
+    await provider.forceFlush();
+
+    expect(exporter.getFinishedSpans().some((span) => span.name === 'must-not-leak')).toBe(false);
+    await provider.shutdown();
+    _clearMaskRegistry();
+  });
+
   /**
    * TC-MASK-1: Global mask returning null suppresses span export.
    */
@@ -54,6 +110,7 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
         resolve();
       });
     });
+    await provider.forceFlush();
 
     const spans = exporter.getFinishedSpans();
     // Mask returned null → span should be dropped entirely
@@ -82,9 +139,10 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
         resolve();
       });
     });
+    await provider.forceFlush();
 
     const spans = exporter.getFinishedSpans();
-    const target = spans.find(s => s.name === 'modify-span');
+    const target = spans.find((s) => s.name === 'modify-span');
     expect(target).toBeDefined();
     // Mask modifications are written back to the OTel span attributes
     expect(target!.attributes['masked.was.applied']).toBe('yes');
@@ -111,6 +169,7 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
         resolve();
       });
     });
+    await provider.forceFlush();
 
     const spans = exporter.getFinishedSpans();
     // Per-span mask returned null → span should be dropped
@@ -138,6 +197,7 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
         resolve();
       });
     });
+    await provider.forceFlush();
 
     const spans = exporter.getFinishedSpans();
     // Span is exported — mask modified but did not drop it

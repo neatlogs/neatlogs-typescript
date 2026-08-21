@@ -20,6 +20,8 @@ vi.mock('@opentelemetry/sdk-trace-node', () => {
 
 vi.mock('@opentelemetry/sdk-trace-base', () => ({
   BatchSpanProcessor: vi.fn().mockImplementation(() => ({})),
+  ParentBasedSampler: vi.fn().mockImplementation((options) => ({ options })),
+  TraceIdRatioBasedSampler: vi.fn().mockImplementation((rate) => ({ rate })),
 }));
 
 vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
@@ -44,21 +46,6 @@ vi.mock('@opentelemetry/api', async (importOriginal) => {
     ...actual,
     trace: { ...actual.trace, setGlobalTracerProvider: vi.fn() },
     metrics: { ...actual.metrics, setGlobalMeterProvider: vi.fn() },
-  };
-});
-
-vi.mock('@opentelemetry/api-logs', () => ({
-  logs: { setGlobalLoggerProvider: vi.fn() },
-}));
-
-vi.mock('@opentelemetry/sdk-metrics', () => {
-  const forceFlush = vi.fn().mockResolvedValue(undefined);
-  const shutdownFn = vi.fn().mockResolvedValue(undefined);
-  return {
-    MeterProvider: vi.fn().mockImplementation(() => ({
-      forceFlush,
-      shutdown: shutdownFn,
-    })),
   };
 });
 
@@ -103,19 +90,9 @@ vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
 }));
 
-vi.mock('../../src/instrumentation/manager.js', () => ({
-  InstrumentationManager: vi.fn().mockImplementation(() => ({
-    instrumentHttp: vi.fn().mockResolvedValue(undefined),
-    instrument: vi.fn().mockResolvedValue(undefined),
-    disable: vi.fn(),
-    instrumented: [],
-  })),
-  // Pre-flight isolation gate init() calls before touching module state.
-  assertInstrumentationsIsolationSafe: vi.fn(),
-}));
-
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';
 import { _setSessionConfig } from '../../src/core/context.js';
+import { NeatlogsConfigurationError } from '../../src/errors.js';
 
 describe('init()', () => {
   beforeEach(() => {
@@ -132,6 +109,26 @@ describe('init()', () => {
     await init({ apiKey: 'test-key', disableExport: true });
     // Calling init again should be a no-op (no error)
     await init({ apiKey: 'test-key', disableExport: true });
+  });
+
+  it('rejects the removed instrumentations option with a typed error', async () => {
+    await expect(
+      init({ instrumentations: ['openai'] } as any),
+    ).rejects.toMatchObject({
+      name: 'NeatlogsConfigurationError',
+      code: 'UNSUPPORTED_INSTRUMENTATIONS',
+      option: 'instrumentations',
+    });
+    await expect(init({ instrumentations: [] } as any)).rejects.toBeInstanceOf(
+      NeatlogsConfigurationError,
+    );
+  });
+
+  it('rejects unknown init options instead of silently ignoring typos', async () => {
+    await expect(init({ sampleRtae: 0.5 } as any)).rejects.toMatchObject({
+      code: 'UNKNOWN_INIT_OPTION',
+      option: 'sampleRtae',
+    });
   });
 
   it('does not register its tracer or meter globally', async () => {
@@ -197,7 +194,11 @@ describe('init()', () => {
 
   it('with invalid tags throws', async () => {
     await expect(
-      init({ apiKey: 'test-key', disableExport: true, tags: [1 as any, 2 as any] }),
+      init({
+        apiKey: 'test-key',
+        disableExport: true,
+        tags: [1 as any, 2 as any],
+      }),
     ).rejects.toThrow('tags must be a list of strings');
   });
 
@@ -263,11 +264,8 @@ describe('init()', () => {
   });
 
   it('sets up OTLP log export when captureLogs: true', async () => {
-    const {
-      LoggerProvider,
-      BatchLogRecordProcessor,
-      SimpleLogRecordProcessor,
-    } = await import('@opentelemetry/sdk-logs');
+    const { LoggerProvider, BatchLogRecordProcessor, SimpleLogRecordProcessor } =
+      await import('@opentelemetry/sdk-logs');
     const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
     const { _setOtelLogger } = await import('../../src/core/log.js');
 
@@ -293,11 +291,8 @@ describe('init()', () => {
   });
 
   it('keeps the log provider local when captureLogs is enabled but export is disabled', async () => {
-    const {
-      LoggerProvider,
-      BatchLogRecordProcessor,
-      SimpleLogRecordProcessor,
-    } = await import('@opentelemetry/sdk-logs');
+    const { LoggerProvider, BatchLogRecordProcessor, SimpleLogRecordProcessor } =
+      await import('@opentelemetry/sdk-logs');
     const { OTLPLogExporter } = await import('@opentelemetry/exporter-logs-otlp-proto');
     const { _setOtelLogger } = await import('../../src/core/log.js');
 
@@ -418,9 +413,7 @@ describe('shutdown()', () => {
       registerShutdownHandlers: true,
     });
     const spanProcessor = (NeatlogsSpanProcessor as any).mock.results.at(-1).value;
-    const handler = process
-      .listeners('SIGTERM')
-      .find((listener) => !listenersBefore.has(listener));
+    const handler = process.listeners('SIGTERM').find((listener) => !listenersBefore.has(listener));
     expect(handler).toBeDefined();
 
     (handler as (signal: NodeJS.Signals) => void)('SIGTERM');

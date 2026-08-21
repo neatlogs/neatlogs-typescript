@@ -344,7 +344,6 @@ async function main() {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: `${workflowPrefix}reasoning-model-verification`,
     tags: ['reasoning', 'openai', 'anthropic', 'params-verification'],
-    instrumentations: ['openai', 'anthropic', 'langchain', 'google_genai'],
     debug: true,
   });
 

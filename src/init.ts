@@ -4,7 +4,7 @@
  * Port of Python neatlogs/init.py to TypeScript.
  *
  * `init()` sets up the OTel TracerProvider, MeterProvider, LoggerProvider,
- * span processors, exporters, and instrumentation.
+ * span processors, and exporters.
  * `flush()` and `shutdown()` handle graceful cleanup.
  */
 
@@ -15,6 +15,8 @@ import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   BatchSpanProcessor,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
@@ -22,23 +24,18 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { LoggerProvider, BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 
-import {
-  CompletionMarkerSpanProcessor,
-  NeatlogsSpanProcessor,
-} from './core/span-processor.js';
+import { CompletionMarkerSpanProcessor, NeatlogsSpanProcessor } from './core/span-processor.js';
 import { addVerificationMarkerResourceAttribute } from './core/resource.js';
+import { getRegisteredClients } from './core/client-registry.js';
 import { FilteringExporter } from './core/filtering-exporter.js';
 import { _setOtelLogger } from './core/log.js';
 import { _setSessionConfig } from './core/context.js';
 import { _setNeatlogsProvider } from './core/provider.js';
 import { getLogger, enableDebugLogging } from './core/logger.js';
-import {
-  InstrumentationManager,
-  assertInstrumentationsIsolationSafe,
-} from './instrumentation/manager.js';
 import { PromptClient, setSharedClient } from './prompt/client.js';
 import { _resetMastraCache } from './mastra.js';
 import { __version__ } from './version.js';
+import { NeatlogsConfigurationError } from './errors.js';
 import type { InitOptions } from './types.js';
 
 const logger = getLogger();
@@ -58,9 +55,6 @@ let _spanProcessor: NeatlogsSpanProcessor | null = null;
 let _transportSpanProcessors: SpanProcessor[] = [];
 let _completionProcessor: CompletionMarkerSpanProcessor | null = null;
 let _debugMode = false;
-// Retained so shutdown() can disable the instrumentors it installed; otherwise a
-// stale instrumentor stays bound to the shut-down provider after reinit.
-let _instrumentationManager: InstrumentationManager | null = null;
 
 // Track signal handlers so we can remove them in shutdown()
 let _sigHandlersRegistered = false;
@@ -119,6 +113,49 @@ function _resolveWorkflowName(workflowName?: string): string {
   return 'neatlogs-app';
 }
 
+const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
+  'apiKey',
+  'workflowName',
+  'userId',
+  'tags',
+  'metadata',
+  'debug',
+  'disableExport',
+  'tracerProvider',
+  'registerShutdownHandlers',
+  'mask',
+  'sampleRate',
+  'captureLogs',
+  'pii',
+  'version',
+  'endpoint',
+  'batchSize',
+  'flushInterval',
+  'piiEnabled',
+  'piiSpanTypes',
+]);
+
+function validateInitOptions(options: InitOptions): void {
+  const raw = options as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(raw, 'instrumentations')) {
+    throw new NeatlogsConfigurationError(
+      'UNSUPPORTED_INSTRUMENTATIONS',
+      'instrumentations',
+      'The instrumentations option was removed. Use an explicit Neatlogs wrapper, handler, hook, processor, or plugin for the library instance.',
+    );
+  }
+  const unknown = Object.keys(raw).find(
+    (key) => !INIT_OPTION_KEYS.has(key as keyof InitOptions),
+  );
+  if (unknown) {
+    throw new NeatlogsConfigurationError(
+      'UNKNOWN_INIT_OPTION',
+      unknown,
+      `Unknown Neatlogs init option: ${unknown}`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // init()
 // ---------------------------------------------------------------------------
@@ -127,10 +164,15 @@ function _resolveWorkflowName(workflowName?: string): string {
  * Initialise the Neatlogs SDK.
  *
  * Sets up OTel TracerProvider, MeterProvider, LoggerProvider, span processors,
- * exporters and auto-instrumentation. Returns a Promise because library
- * instrumentation uses dynamic `import()`.
+ * and exporters. It returns a Promise so initialization remains lifecycle-safe
+ * across concurrent callers and future asynchronous transports.
  */
 export function init(options: InitOptions = {}): Promise<void> {
+  try {
+    validateInitOptions(options);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   if (_lifecycleState === 'initializing' && _initPromise) return _initPromise;
   if (_lifecycleState === 'closing' && _shutdownPromise) {
     return _shutdownPromise.then(() => init(options));
@@ -157,16 +199,14 @@ export function init(options: InitOptions = {}): Promise<void> {
 }
 
 async function _performInit(options: InitOptions): Promise<void> {
-
-  // 1b. Validate the requested instrumentations against the isolation policy
-  // BEFORE touching any module state (debug flag, session config, provider, …).
-  // The check is a pure function of the registry + the requested set, so failing
-  // here keeps init() atomic: a rejected init leaves no half-installed provider
-  // or stale state behind, and the next init() starts clean. Neatlogs always
-  // uses a private provider, so this rejects any instrumentor that would drive
-  // the global OTel context.
-  if (options.instrumentations?.length) {
-    assertInstrumentationsIsolationSafe(options.instrumentations);
+  const sampleRate = options.sampleRate ?? 1.0;
+  if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+    throw new RangeError('sampleRate must be a finite number between 0 and 1.');
+  }
+  if (options.tracerProvider && options.sampleRate !== undefined) {
+    throw new Error(
+      'sampleRate cannot configure a caller-owned tracerProvider; configure its sampler directly.',
+    );
   }
 
   // 2. Resolve API key
@@ -180,9 +220,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   // 3. Resolve disableExport
   let disableExportResolved =
     !!options.disableExport ||
-    ['true', '1', 'yes'].includes(
-      (process.env.NEATLOGS_DISABLE_EXPORT ?? '').toLowerCase(),
-    );
+    ['true', '1', 'yes'].includes((process.env.NEATLOGS_DISABLE_EXPORT ?? '').toLowerCase());
 
   if (!resolvedKey) {
     disableExportResolved = true;
@@ -205,9 +243,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   const resolvedWorkflowName = _resolveWorkflowName(options.workflowName);
 
   // 6. Parse base URL from endpoint
-  const endpoint =
-    options.endpoint ??
-    'https://ingest.neatlogs.com';
+  const endpoint = options.endpoint ?? 'https://ingest.neatlogs.com';
   const baseUrl = new URL(endpoint).origin;
 
   // 7. Set session config. Session & end-user identity are PER-REQUEST (set via
@@ -245,8 +281,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   }
 
   if (options.pii !== undefined) {
-    resourceAttrs['neatlogs.pii.enabled'] =
-      options.pii === false ? 'false' : 'true';
+    resourceAttrs['neatlogs.pii.enabled'] = options.pii === false ? 'false' : 'true';
   }
 
   if (options.piiSpanTypes !== undefined) {
@@ -264,12 +299,14 @@ async function _performInit(options: InitOptions): Promise<void> {
     new NodeTracerProvider({
       resource,
       spanLimits: { attributeCountLimit: 10_000 },
+      sampler: new ParentBasedSampler({
+        root: new TraceIdRatioBasedSampler(sampleRate),
+      }),
     });
   _ownsTracerProvider = options.tracerProvider === undefined;
 
   // 11. Add NeatlogsSpanProcessor
   _spanProcessor = new NeatlogsSpanProcessor({
-    sampleRate: options.sampleRate ?? 1.0,
     debug: options.debug ?? false,
     mask: options.mask,
     emitCompletionMarkers: false,
@@ -279,9 +316,7 @@ async function _performInit(options: InitOptions): Promise<void> {
 
   // 12. Add BatchSpanProcessor + OTLPSpanExporter (if export enabled)
   if (!disableExportResolved) {
-    const tracesEndpoint = endpoint.endsWith('/v1/traces')
-      ? endpoint
-      : `${baseUrl}/v1/traces`;
+    const tracesEndpoint = endpoint.endsWith('/v1/traces') ? endpoint : `${baseUrl}/v1/traces`;
 
     const otlpExporter = new FilteringExporter(
       new OTLPTraceExporter({
@@ -330,9 +365,7 @@ async function _performInit(options: InitOptions): Promise<void> {
 
     // OTLP log export to /v1/logs (same pattern as Python SDK)
     if (!disableExportResolved) {
-      const logsEndpoint = endpoint.endsWith('/v1/logs')
-        ? endpoint
-        : `${baseUrl}/v1/logs`;
+      const logsEndpoint = endpoint.endsWith('/v1/logs') ? endpoint : `${baseUrl}/v1/logs`;
       const otlpLogExporter = new OTLPLogExporter({
         url: logsEndpoint,
         headers: resolvedKey ? { 'x-api-key': resolvedKey } : undefined,
@@ -376,28 +409,10 @@ async function _performInit(options: InitOptions): Promise<void> {
     logger.debug('Log capture disabled (pass captureLogs: true to enable)');
   }
 
-  // 16. Instrument libraries. Retained in module state so shutdown() can disable
-  // the instrumentors it installed. The manager rejects any requested library
-  // whose auto-instrumentor drives the global OTel context.
-  _instrumentationManager = new InstrumentationManager({
-    provider,
-    debug: options.debug,
-  });
-
-  if (options.instrumentations?.length) {
-    await _instrumentationManager.instrument(options.instrumentations);
-    if (options.debug) {
-      logger.debug(
-        `Instrumented libraries: ${_instrumentationManager.instrumented.join(', ')}`,
-      );
-    }
-  }
-
-  // 17. Register shutdown handlers. Default to flushing on exit whenever we own
+  // 16. Register shutdown handlers. Default to flushing on exit whenever we own
   // the private provider so standalone scripts drain their spans;
   // only a caller-supplied provider defaults off (its owner controls shutdown).
-  const registerShutdownHandlers =
-    options.registerShutdownHandlers ?? _ownsTracerProvider;
+  const registerShutdownHandlers = options.registerShutdownHandlers ?? _ownsTracerProvider;
   if (registerShutdownHandlers && !_sigHandlersRegistered) {
     process.on('beforeExit', _shutdownBeforeExit);
     // Run before pre-existing one-shot host listeners so ownership is observed
@@ -407,7 +422,7 @@ async function _performInit(options: InitOptions): Promise<void> {
     _sigHandlersRegistered = true;
   }
 
-  // 18. Mark as initialised
+  // 17. Mark as initialised
   _initialized = true;
 
   if (options.debug) {
@@ -416,10 +431,7 @@ async function _performInit(options: InitOptions): Promise<void> {
     logger.info(`Workflow: ${resolvedWorkflowName}`);
     logger.info(`User: ${options.userId ?? '(none)'}`);
     logger.info(`Tags: ${tags ?? []}`);
-    logger.info(
-      `Instrumentations: ${_instrumentationManager.instrumented.join(', ') || '(none)'}`,
-    );
-    logger.info(`Sample Rate: ${options.sampleRate ?? 1.0}`);
+    logger.info(`Sample Rate: ${sampleRate}`);
   }
 }
 
@@ -451,6 +463,14 @@ export async function flush(): Promise<boolean> {
     }
   }
 
+  try {
+    await _spanProcessor?.forceFlush();
+    await _completionProcessor?.forceFlush();
+  } catch (e) {
+    logger.error(`Error completing span masking/finalization: ${e}`);
+    success = false;
+  }
+
   if (_tracerProvider) {
     try {
       logger.debug('Flushing tracer provider...');
@@ -463,6 +483,18 @@ export async function flush(): Promise<boolean> {
   }
 
   return success;
+}
+
+/**
+ * Flush the module-level SDK pipeline and every live Neatlogs `Client` in this
+ * process. Foreign OpenTelemetry providers are never discovered or flushed.
+ */
+export async function flushAll(): Promise<boolean> {
+  const results = await Promise.allSettled([
+    flush(),
+    ...getRegisteredClients().map((client) => client.flush()),
+  ]);
+  return results.every((result) => result.status === 'fulfilled' && result.value === true);
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +511,7 @@ export async function flush(): Promise<boolean> {
 export function shutdown(terminationReason = 'shutdown'): Promise<boolean> {
   if (_shutdownPromise) return _shutdownPromise;
 
-  const initialization =
-    _lifecycleState === 'initializing' ? _initPromise : null;
+  const initialization = _lifecycleState === 'initializing' ? _initPromise : null;
   _lifecycleState = 'closing';
   _completionProcessor?.beginShutdown();
   _spanProcessor?.beginShutdown(terminationReason);
@@ -521,11 +552,8 @@ async function _performShutdown(terminationReason: string): Promise<boolean> {
 
   let success = true;
 
-  // Disable instrumentors BEFORE tearing down the provider so they stop emitting
-  // spans against it, and clear the Mastra bridge cache so a subsequent init()
-  // rebinds to the fresh provider instead of a stale one.
-  _instrumentationManager?.disable();
-  _instrumentationManager = null;
+  // Clear the Mastra bridge cache so a subsequent init() rebinds to the fresh
+  // provider instead of a stale one.
   _resetMastraCache();
 
   // LOG records must drain before trace completion. The trace provider carries
@@ -546,12 +574,17 @@ async function _performShutdown(terminationReason: string): Promise<boolean> {
   if (_spanProcessor) {
     const ended = _spanProcessor.endActiveSpans(terminationReason);
     if (ended > 0) {
-      logger.info(
-        `Ended ${ended} active Neatlogs span(s) during ${terminationReason}`,
-      );
+      logger.info(`Ended ${ended} active Neatlogs span(s) during ${terminationReason}`);
     }
   }
   _completionProcessor?.emitDeferred();
+  try {
+    await _spanProcessor?.forceFlush();
+    await _completionProcessor?.forceFlush();
+  } catch (e) {
+    logger.error(`Error completing span masking/finalization: ${e}`);
+    success = false;
+  }
 
   // Only shut down a provider we created. A caller-supplied provider is flushed
   // (above / in flush()) but never shut down — its owner controls its lifecycle,
@@ -578,9 +611,7 @@ async function _performShutdown(terminationReason: string): Promise<boolean> {
     // SDKs cannot detach processors in OTel JS 1.x; shut every instance down
     // independently so one exporter failure cannot leave another active.
     const transportResults = await Promise.allSettled(
-      [..._transportSpanProcessors].reverse().map((processor) =>
-        processor.shutdown(),
-      ),
+      [..._transportSpanProcessors].reverse().map((processor) => processor.shutdown()),
     );
     if (transportResults.some((result) => result.status === 'rejected')) {
       logger.error('One or more Neatlogs transport processors failed to shut down');

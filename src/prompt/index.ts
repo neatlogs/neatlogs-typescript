@@ -16,4 +16,6 @@ export {
   setSharedClient,
   getSharedClient,
   renderTemplate,
+  type GetPromptOptions,
+  type PromptClientOptions,
 } from './client.js';

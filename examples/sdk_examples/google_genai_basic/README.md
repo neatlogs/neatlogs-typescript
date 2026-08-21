@@ -6,8 +6,8 @@ mode), producing a Neatlogs trace with a WORKFLOW parent plus LLM and EMBEDDING
 child spans (`provider=google`, `system=google_genai`).
 
 This mirrors Python's `neatlogs.wrap(genai.Client())`. For Vertex mode use
-[`wrapVertexAI`](../vertex_ai_basic/); for zero-code tracing pass
-`instrumentations: ['google_genai']` to `init()` instead of wrapping.
+[`wrapVertexAI`](../vertex_ai_basic/). TypeScript provider integrations are
+explicit so the SDK can keep its OpenTelemetry provider isolated.
 
 ## Run
 

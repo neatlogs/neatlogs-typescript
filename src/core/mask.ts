@@ -12,6 +12,7 @@ const logger = getLogger();
 
 /** Module-level registry: key -> mask function */
 const _MASK_REGISTRY = new Map<string, MaskFunction>();
+const _MASK_RESULTS = new WeakMap<object, Promise<Record<string, any> | null>>();
 
 let _nextId = 0;
 
@@ -30,10 +31,10 @@ export function registerMask(fn: MaskFunction): string {
  * Per-span mask (stored in attributes["neatlogs.mask_id"]) takes
  * precedence over the global mask. Returns the (possibly modified) dict.
  */
-export function applyMask(
+function effectiveMask(
   spanData: Record<string, any>,
   globalMask: MaskFunction | null | undefined,
-): Record<string, any> | null {
+): MaskFunction | null {
   const maskId = spanData?.attributes?.['neatlogs.mask_id'];
   let maskFn: MaskFunction | undefined | null = null;
 
@@ -45,21 +46,45 @@ export function applyMask(
     maskFn = globalMask ?? null;
   }
 
-  if (!maskFn) {
-    return spanData;
-  }
+  return maskFn;
+}
+
+export async function applyMask(
+  spanData: Record<string, any>,
+  globalMask: MaskFunction | null | undefined,
+): Promise<Record<string, any> | null> {
+  const maskFn = effectiveMask(spanData, globalMask);
+  if (!maskFn) return spanData;
 
   try {
-    const result = maskFn(spanData);
+    // Run user masking outside SpanProcessor.onEnd() so a slow callback does
+    // not block application request completion.
+    const result = await Promise.resolve().then(() => maskFn(spanData));
     // null means "drop this span entirely"; undefined means "keep original"
     if (result === null) return null;
     return result !== undefined ? result : spanData;
   } catch (exc) {
-    logger.warn(
-      `mask callable raised an exception for span '${spanData?.name}': ${exc} — original span data will be exported unchanged.`,
+    logger.error(
+      `mask callable failed for span '${spanData?.name}': ${exc} — dropping the span to prevent unmasked export.`,
     );
-    return spanData;
+    return null;
   }
+}
+
+/** Schedule and retain one masking result for the exporter that receives span. */
+export function scheduleMask(
+  span: object,
+  spanData: Record<string, any>,
+  globalMask: MaskFunction | null | undefined,
+): Promise<Record<string, any> | null> {
+  const result = applyMask(spanData, globalMask);
+  _MASK_RESULTS.set(span, result);
+  return result;
+}
+
+/** Return the result scheduled by NeatlogsSpanProcessor for this snapshot. */
+export function getScheduledMask(span: object): Promise<Record<string, any> | null> | undefined {
+  return _MASK_RESULTS.get(span);
 }
 
 /**

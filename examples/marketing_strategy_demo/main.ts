@@ -227,11 +227,10 @@ async function main(): Promise<void> {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: `${workflowPrefix}Marketing Strategy Demo`,
     tags: ['demo', 'marketing-strategy'],
-    instrumentations: ['openai'],
     debug: true,
   });
 
-  // Lazy imports after init for instrumentation
+  // Lazy imports after SDK initialization.
   const { AzureOpenAI } = await import('openai');
   const { GoogleGenAI } = await import('@google/genai');
 

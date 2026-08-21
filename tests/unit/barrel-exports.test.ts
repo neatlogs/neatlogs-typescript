@@ -12,6 +12,18 @@ describe('barrel exports (src/index.ts)', () => {
     expect(typeof mod.shutdown).toBe('function');
   });
 
+  it('should export typed configuration errors', async () => {
+    const mod = await import('../../src/index.js');
+    const error = new mod.NeatlogsConfigurationError(
+      'UNKNOWN_INIT_OPTION',
+      'typo',
+      'bad option',
+    );
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error.code).toBe('UNKNOWN_INIT_OPTION');
+    expect(error.option).toBe('typo');
+  });
+
   it('should export instrumentation functions', async () => {
     const mod = await import('../../src/index.js');
     expect(typeof mod.span).toBe('function');

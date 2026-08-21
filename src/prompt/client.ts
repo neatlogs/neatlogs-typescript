@@ -109,7 +109,17 @@ export function normalizePromptObject(raw: Record<string, any>): CachedPrompt {
     type = 'chat';
   }
 
-  return { id, name, version, content, messages, config, labels, updatedAt, type };
+  return {
+    id,
+    name,
+    version,
+    content,
+    messages,
+    config,
+    labels,
+    updatedAt,
+    type,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +218,22 @@ export class PromptHandle {
 export interface PromptClientOptions {
   baseUrl: string;
   apiKey: string;
+  /** Default stale-while-revalidate lifetime. Defaults to 60 seconds. */
+  cacheTtlMs?: number;
+}
+
+export interface GetPromptOptions {
+  version?: number;
+  label?: string;
+  /** Override the client's cache lifetime for this prompt lookup. */
+  cacheTtlMs?: number;
+}
+
+const DEFAULT_PROMPT_CACHE_TTL_MS = 60_000;
+
+interface PromptCacheEntry {
+  prompt: CachedPrompt;
+  fetchedAtMs: number;
 }
 
 /**
@@ -219,11 +245,18 @@ export interface PromptClientOptions {
 export class PromptClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
-  private readonly _cache: Map<string, CachedPrompt> = new Map();
+  private readonly cacheTtlMs: number;
+  private readonly _cache: Map<string, PromptCacheEntry> = new Map();
+  private readonly _inflight: Map<string, Promise<PromptHandle>> = new Map();
+  private readonly _inflightPromptNames: Map<string, string> = new Map();
+  private readonly _promptGenerations: Map<string, number> = new Map();
 
   constructor(options: PromptClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.apiKey = options.apiKey;
+    this.cacheTtlMs = PromptClient.validateCacheTtl(
+      options.cacheTtlMs ?? DEFAULT_PROMPT_CACHE_TTL_MS,
+    );
   }
 
   // ---- public API ----------------------------------------------------------
@@ -232,10 +265,7 @@ export class PromptClient {
    * Get a prompt by name, optionally pinned to a version or label.
    * Results are cached in memory by cache key.
    */
-  async getPrompt(
-    name: string,
-    options?: { version?: number; label?: string },
-  ): Promise<PromptHandle> {
+  async getPrompt(name: string, options?: GetPromptOptions): Promise<PromptHandle> {
     const version = options?.version;
     const label = options?.label;
 
@@ -243,14 +273,35 @@ export class PromptClient {
       throw new PromptClientError('Cannot specify both label and version.');
     }
 
-    const cacheKey = `${name}:${label ?? ''}:${version ?? ''}`;
+    const cacheKey = JSON.stringify([name, label ?? null, version ?? null]);
+    const ttlMs = PromptClient.validateCacheTtl(options?.cacheTtlMs ?? this.cacheTtlMs);
     const cached = this._cache.get(cacheKey);
     if (cached) {
-      return new PromptHandle(cached);
+      const isPinnedVersion = version != null;
+      const isFresh = Date.now() - cached.fetchedAtMs < ttlMs;
+      if (isPinnedVersion || isFresh) {
+        return new PromptHandle(cached.prompt);
+      }
+
+      // Stale-while-revalidate: callers keep a usable prompt while one shared
+      // request refreshes the cache. A failed refresh leaves the stale entry in
+      // place and the next lookup can try again.
+      this.revalidatePrompt(cacheKey, name, { version, label });
+      return new PromptHandle(cached.prompt);
     }
 
-    const handle = await this.fetchPrompt(name, options);
-    this._cache.set(cacheKey, {
+    return this.fetchAndCache(cacheKey, name, { version, label });
+  }
+
+  private static validateCacheTtl(ttlMs: number): number {
+    if (!Number.isFinite(ttlMs) || ttlMs < 0) {
+      throw new PromptClientError('cacheTtlMs must be a finite number greater than or equal to 0.');
+    }
+    return ttlMs;
+  }
+
+  private snapshotPrompt(handle: PromptHandle): CachedPrompt {
+    return {
       id: handle.id,
       name: handle.name,
       version: handle.version,
@@ -260,8 +311,65 @@ export class PromptClient {
       labels: handle.labels,
       updatedAt: handle.updatedAt,
       type: handle.type as 'text' | 'chat',
+    };
+  }
+
+  private cachePrompt(cacheKey: string, handle: PromptHandle): void {
+    this._cache.set(cacheKey, {
+      prompt: this.snapshotPrompt(handle),
+      fetchedAtMs: Date.now(),
     });
-    return handle;
+  }
+
+  private fetchAndCache(
+    cacheKey: string,
+    name: string,
+    options: { version?: number; label?: string },
+  ): Promise<PromptHandle> {
+    const existing = this._inflight.get(cacheKey);
+    if (existing) return existing;
+
+    const generation = this._promptGenerations.get(name) ?? 0;
+    const request = this.fetchPrompt(name, options)
+      .then((handle) => {
+        if ((this._promptGenerations.get(name) ?? 0) === generation) {
+          this.cachePrompt(cacheKey, handle);
+        }
+        return handle;
+      })
+      .finally(() => {
+        if (this._inflight.get(cacheKey) === request) {
+          this._inflight.delete(cacheKey);
+          this._inflightPromptNames.delete(cacheKey);
+        }
+      });
+    this._inflight.set(cacheKey, request);
+    this._inflightPromptNames.set(cacheKey, name);
+    return request;
+  }
+
+  private revalidatePrompt(
+    cacheKey: string,
+    name: string,
+    options: { version?: number; label?: string },
+  ): void {
+    if (this._inflight.has(cacheKey)) return;
+    void this.fetchAndCache(cacheKey, name, options).catch(() => {
+      // Stale-while-revalidate deliberately preserves the last known prompt.
+      // The in-flight entry is cleared in finally so a later lookup retries.
+    });
+  }
+
+  private invalidatePrompt(name: string): void {
+    this._promptGenerations.set(name, (this._promptGenerations.get(name) ?? 0) + 1);
+    for (const [cacheKey, entry] of this._cache) {
+      if (entry.prompt.name === name) this._cache.delete(cacheKey);
+    }
+    for (const [cacheKey, promptName] of this._inflightPromptNames) {
+      if (promptName !== name) continue;
+      this._inflight.delete(cacheKey);
+      this._inflightPromptNames.delete(cacheKey);
+    }
   }
 
   /**
@@ -344,6 +452,7 @@ export class PromptClient {
     });
 
     const promptData = payload['prompt'] ?? payload;
+    this.invalidatePrompt(data.name);
     return new PromptHandle(normalizePromptObject(promptData));
   }
 
@@ -371,6 +480,7 @@ export class PromptClient {
     });
 
     const promptData = payload['prompt'] ?? payload;
+    this.invalidatePrompt(name);
     return new PromptHandle(normalizePromptObject(promptData));
   }
 
@@ -381,6 +491,7 @@ export class PromptClient {
     await this._request(`/api/managed-prompts/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     });
+    this.invalidatePrompt(name);
   }
 
   /**
@@ -391,15 +502,13 @@ export class PromptClient {
       method: 'DELETE',
       body: JSON.stringify({ tag }),
     });
+    this.invalidatePrompt(name);
   }
 
   /**
    * Save the current prompt content as a new version, optionally with a label.
    */
-  async saveAsVersion(
-    name: string,
-    options?: { label?: string },
-  ): Promise<PromptHandle> {
+  async saveAsVersion(name: string, options?: { label?: string }): Promise<PromptHandle> {
     const body: Record<string, any> = { promptName: name };
     if (options?.label) body['labels'] = [options.label];
 
@@ -409,6 +518,7 @@ export class PromptClient {
     });
 
     const promptData = payload['prompt'] ?? payload;
+    this.invalidatePrompt(name);
     return new PromptHandle(normalizePromptObject(promptData));
   }
 
@@ -484,10 +594,7 @@ export function getSharedClient(): PromptClient {
 // Module-level convenience functions that delegate to shared client
 // ---------------------------------------------------------------------------
 
-export async function getPrompt(
-  name: string,
-  options?: { version?: number; label?: string },
-): Promise<PromptHandle> {
+export async function getPrompt(name: string, options?: GetPromptOptions): Promise<PromptHandle> {
   return getSharedClient().getPrompt(name, options);
 }
 

@@ -35,7 +35,6 @@ async function main() {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: 'anthropic-code-review',
     tags: ['anthropic', 'code-review', 'python'],
-    instrumentations: ['anthropic', 'openai'],
     captureLogs: true,
     disableExport: true,
     debug: true,
