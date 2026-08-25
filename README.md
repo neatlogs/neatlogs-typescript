@@ -7,18 +7,15 @@ Automatically trace LLM calls, agent workflows, tool invocations, and retrieval 
 ## Quick Start
 
 ```typescript
-import { init, span, shutdown } from 'neatlogs';
+import { init, span, shutdown, wrapOpenAI } from 'neatlogs';
 import OpenAI from 'openai';
 
 async function main() {
   // 1. Initialize the SDK
-  await init({
-    apiKey: process.env.NEATLOGS_API_KEY,
-    instrumentations: ['openai'],
-  });
+  await init({ apiKey: process.env.NEATLOGS_API_KEY });
 
   // 2. Create your LLM client AFTER init()
-  const client = new OpenAI();
+  const client = wrapOpenAI(new OpenAI());
 
   // 3. Wrap functions with span() for observability
   const myWorkflow = span({ kind: 'WORKFLOW', name: 'qa-bot' }, async (query: string) => {
@@ -44,57 +41,22 @@ main().catch(console.error);
 npm install neatlogs
 ```
 
-For auto-instrumentation of specific LLM providers, install the corresponding peer dependency:
-
-```bash
-# OpenAI
-npm install @arizeai/openinference-instrumentation-openai
-
-# Anthropic
-npm install @arizeai/openinference-instrumentation-anthropic
-
-# AWS Bedrock
-npm install @arizeai/openinference-instrumentation-bedrock
-
-# LangChain
-npm install @arizeai/openinference-instrumentation-langchain
-
-# MCP (Model Context Protocol)
-npm install @arizeai/openinference-instrumentation-mcp
-
-# BeeAI
-npm install @arizeai/openinference-instrumentation-beeai
-
-# Claude Agent SDK
-npm install @arizeai/openinference-instrumentation-claude-agent-sdk
-
-# Google GenAI (@google/genai)
-npm install @google/genai
-```
+Install the provider package you use and apply its documented explicit Neatlogs wrapper.
 
 ## Core Concepts
 
 | Function | Purpose |
 |----------|---------|
-| `init()` | Initialize the SDK — sets up OTel providers, exporters, and instrumentation |
+| `init()` | Initialize the SDK — sets up private OTel providers and exporters |
+| `doctor()` | Produce a credential-safe, network-free `neatlogs.doctor/v1` readiness report without initializing |
 | `span()` | Wrap a function with observability — captures inputs, outputs, timing, and errors |
 | `trace()` | Create a manual span with prompt template tracking and multi-turn session support |
 | `log()` | Capture timestamped log steps within the active trace |
 | `shutdown()` | Flush all pending data and shut down the SDK gracefully |
 
-### Important: Initialization Order
+### Explicit integrations
 
-`init()` is **async** and must be called **before** creating any LLM client instances. This is because instrumentation works by monkey-patching libraries at init time.
-
-```typescript
-// ✅ Correct
-await init({ instrumentations: ['openai'] });
-const client = new OpenAI(); // patched
-
-// ❌ Wrong — client created before patching
-const client = new OpenAI(); // NOT patched
-await init({ instrumentations: ['openai'] });
-```
+The SDK does not monkey-patch provider libraries. Initialize it, then use the documented wrapper, hook, processor, or telemetry helper for your provider.
 
 ### Important: No Top-Level Await
 
@@ -119,7 +81,6 @@ Initialize the Neatlogs SDK. Returns `Promise<void>`.
 ```typescript
 await init({
   apiKey: process.env.NEATLOGS_API_KEY,
-  instrumentations: ['openai', 'anthropic'],
   debug: true,
 });
 ```
@@ -137,13 +98,11 @@ await init({
 | `metadata` | `Record<string, any>` | — | Custom metadata attached to all spans. |
 | `debug` | `boolean` | `false` | Enable debug logging. |
 | `disableExport` | `boolean` | `false` | Disable export to Neatlogs backend. |
-| `instrumentations` | `string[]` | — | Legacy manager path. Instrumentors that depend on global OTel context are rejected; use explicit wrappers below. |
 | `tracerProvider` | `BasicTracerProvider` | Private SDK provider | Optional caller-owned private provider. It is never registered globally or shut down by Neatlogs. |
 | `registerShutdownHandlers` | `boolean` | `true` for SDK-owned provider | Register process exit/signal handlers. Set `false` when the host application owns shutdown. |
 | `mask` | `MaskFunction` | — | Global mask function applied to all spans. |
 | `sampleRate` | `number` | `1.0` | Sampling rate (0.0 to 1.0). |
 | `captureLogs` | `boolean` | `false` | Capture log records via OTel LoggerProvider. |
-| `traceContent` | `boolean` | `true` | Capture input/output content on spans. |
 | `pii` | `'redact' &#124; 'hash' &#124; false` | — | PII detection mode. |
 | `endpoint` | `string` | `'https://ingest.neatlogs.com'` | Base ingest endpoint. The SDK sends traces to `/v1/traces` and logs to `/v1/logs`. |
 | `batchSize` | `number` | `100` | Maximum spans per export batch. |
@@ -377,6 +336,10 @@ import { PromptClient } from 'neatlogs';
 const client = new PromptClient({
   baseUrl: 'https://ingest.neatlogs.com',
   apiKey: process.env.NEATLOGS_API_KEY!,
+  cacheTtlMs: 60_000,
+  staleWhileRevalidateMs: 300_000,
+  maxCacheEntries: 100,
+  requestTimeoutMs: 10_000,
 });
 
 // Create a prompt
@@ -392,6 +355,7 @@ const handle = await client.getPrompt('qa-system');
 // Fetch by label or version
 const prod = await client.getPrompt('qa-system', { label: 'production' });
 const v2 = await client.getPrompt('qa-system', { version: 2 });
+const fresh = await client.getPrompt('qa-system', { forceRefresh: true });
 
 // Compile with variables
 const rendered = handle.compile({ role: 'helpful', company: 'Acme' });
@@ -411,6 +375,8 @@ await client.saveAsVersion('qa-system', { label: 'v2' });
 // Delete a prompt
 await client.deletePrompt('qa-system');
 ```
+
+Fresh entries use the in-memory LRU cache. During the stale-while-revalidate window, callers receive the stale value while exactly one background request refreshes it. Concurrent misses are deduplicated. Pass `signal` or `timeoutMs` per request when the defaults are unsuitable. Cache contents are cleared when the shared SDK client is replaced, shut down, or reinitialized. Prompt credentials are sent only in the `x-api-key` header.
 
 Module-level convenience functions are also available after `init()`:
 
@@ -465,21 +431,9 @@ import { registerCrewaiTask } from 'neatlogs';
 registerCrewaiTask('research-task', 'Research the latest AI developments');
 ```
 
-## Supported Instrumentations
+## Integration migration
 
-### Isolation policy
-
-Neatlogs always runs on a private provider and private async context. Third-party
-auto-instrumentors that call the global OpenTelemetry context API cannot provide
-bidirectional isolation, so the manager rejects them at initialization before
-creating any provider state. Use the explicit provider/framework wrappers
-instead.
-
-### Registry Entries (not yet instrumented in TypeScript)
-
-The following libraries are registered in the instrumentation registry for future support. Passing them to `instrumentations` will log a debug message and skip gracefully:
-
-`cohere`, `groq`, `together`, `vertexai`, `google_generativeai`, `mistralai`, `ollama`, `watsonx`, `alephalpha`, `replicate`, `sagemaker`, `huggingface_hub`, `litellm`, `langgraph`, `llamaindex`, `autogen`, `haystack`, `dspy`, `chromadb`, `pinecone`, `weaviate`, `qdrant`, `milvus`, `opensearch`, `elasticsearch`, `redis`, `marqo`, `instructor`, `guardrails`, `google_adk`, `agno`, `openai_agents`, `pydantic_ai`, `smolagents`, `strands`, `pipecat`, `portkey`, `promptflow`
+The removed `instrumentations` init option was never isolation-safe. Migrate to the explicit provider wrappers exported by the corresponding package entry points. This removal is a semver-major API change; no automatic fallback is performed.
 
 ## Framework Integrations
 
@@ -529,7 +483,6 @@ await init({
   userId: 'user-456',
   tags: ['production', 'v2'],
   metadata: { environment: 'prod' },
-  instrumentations: ['openai', 'anthropic'],
   sampleRate: 0.5,
   captureLogs: true,
   debug: true,
@@ -540,7 +493,7 @@ await init({
 
 ### Global Mask
 
-Apply a mask function to all spans:
+Apply a synchronous or asynchronous mask function to all Neatlogs exports:
 
 ```typescript
 await init({
@@ -556,6 +509,12 @@ await init({
   },
 });
 ```
+
+Masking is enforced at the final Neatlogs exporter boundary and for Neatlogs processed-span diagnostic logs. It does not mutate application values. A per-span or per-trace mask takes precedence over the global mask. Returning `null` drops the span; throwing, rejecting, or exceeding the masking timeout also drops it (fail closed).
+
+If you supply your own tracer provider, unrelated processors/exporters attached to that provider receive OpenTelemetry's original span snapshot. They are not Neatlogs sinks and are outside this masking guarantee; configure equivalent privacy controls on those exporters.
+
+Streaming spans remain active until the iterator or stream completes, errors, is cancelled, is explicitly returned, or its reader lock is released. Early consumer termination records `consumer_cancelled` with partial output; provider failures record `provider_error`. Shutdown ends any still-active spans at its cutoff, so results consumed afterward cannot reopen or mutate an ended span. Use `flushAll()` to flush the module SDK plus every live `Client`; it has a bounded five-second default and returns `false` on timeout or any unhealthy pipeline.
 
 ### Per-Span Mask
 

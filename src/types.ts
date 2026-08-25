@@ -12,10 +12,17 @@ export type SpanKind =
   | 'GUARDRAIL';
 
 /**
- * A mask function that can redact or transform span data before export.
- * Return null to drop the span entirely.
+ * Redacts or transforms span data at Neatlogs export boundaries. May be async.
+ * Return null to drop the span. Throw/reject/timeout also fails closed.
+ * This does not mask unrelated exporters on a caller-owned tracer provider.
  */
-export type MaskFunction = (spanData: Record<string, any>) => Record<string, any> | null;
+export type MaskFunction = (
+  spanData: Record<string, any>,
+) =>
+  | Record<string, any>
+  | null
+  | undefined
+  | Promise<Record<string, any> | null | undefined>;
 
 /**
  * A prompt message with role and content.
@@ -51,8 +58,6 @@ export interface InitOptions {
   debug?: boolean;
   /** Disable export to Neatlogs backend. Defaults to false. */
   disableExport?: boolean;
-  /** Libraries to auto-instrument (e.g., ['openai', 'anthropic']). */
-  instrumentations?: string[];
   /**
    * Optional caller-owned private provider. Neatlogs never registers it
    * globally. The SDK adds its processors and flushes it, but never shuts it
@@ -73,8 +78,6 @@ export interface InitOptions {
   sampleRate?: number;
   /** Whether to capture log records. Defaults to false. */
   captureLogs?: boolean;
-  /** Whether to capture input/output content. Defaults to true. */
-  traceContent?: boolean;
   /** PII detection settings. */
   pii?: 'redact' | 'hash' | false;
   /** SDK version override. */
@@ -221,6 +224,5 @@ export interface SessionConfig {
   workflowName: string;
   tags: string[];
   metadata: Record<string, any>;
-  traceContent: boolean;
   pii: 'redact' | 'hash' | false;
 }
