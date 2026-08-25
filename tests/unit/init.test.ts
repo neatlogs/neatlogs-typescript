@@ -20,6 +20,8 @@ vi.mock('@opentelemetry/sdk-trace-node', () => {
 
 vi.mock('@opentelemetry/sdk-trace-base', () => ({
   BatchSpanProcessor: vi.fn().mockImplementation(() => ({})),
+  ParentBasedSampler: vi.fn().mockImplementation((options) => options),
+  TraceIdRatioBasedSampler: vi.fn().mockImplementation((rate) => ({ rate })),
 }));
 
 vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
@@ -101,17 +103,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
 
 vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
-}));
-
-vi.mock('../../src/instrumentation/manager.js', () => ({
-  InstrumentationManager: vi.fn().mockImplementation(() => ({
-    instrumentHttp: vi.fn().mockResolvedValue(undefined),
-    instrument: vi.fn().mockResolvedValue(undefined),
-    disable: vi.fn(),
-    instrumented: [],
-  })),
-  // Pre-flight isolation gate init() calls before touching module state.
-  assertInstrumentationsIsolationSafe: vi.fn(),
 }));
 
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';

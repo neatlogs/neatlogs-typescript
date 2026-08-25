@@ -26,6 +26,8 @@ vi.mock('@opentelemetry/sdk-trace-node', () => {
 
 vi.mock('@opentelemetry/sdk-trace-base', () => ({
   BatchSpanProcessor: vi.fn().mockImplementation(() => ({})),
+  ParentBasedSampler: vi.fn().mockImplementation((options) => ({ options })),
+  TraceIdRatioBasedSampler: vi.fn().mockImplementation((rate) => ({ rate })),
 }));
 
 vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
@@ -106,18 +108,6 @@ vi.mock('../../src/core/span-processor.js', () => ({
 
 vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
-}));
-
-vi.mock('../../src/instrumentation/manager.js', () => ({
-  InstrumentationManager: vi.fn().mockImplementation(() => ({
-    instrumentHttp: vi.fn().mockResolvedValue(undefined),
-    instrument: vi.fn().mockResolvedValue(undefined),
-    disable: vi.fn(),
-    instrumented: [],
-  })),
-  // Pre-flight isolation gate init() calls before touching module state. Mocked
-  // to a no-op so these tests exercise the instrument() call path directly.
-  assertInstrumentationsIsolationSafe: vi.fn(),
 }));
 
 import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';
@@ -364,19 +354,41 @@ describe('init() edge cases', () => {
     expect(resourceCall['session.id']).toBeUndefined();
   });
 
-  it('creates NeatlogsSpanProcessor with sampleRate', async () => {
-    const { NeatlogsSpanProcessor } = await import('../../src/core/span-processor.js');
-    (NeatlogsSpanProcessor as any).mockClear();
-
+  it('installs parent-based trace sampling on the SDK-owned provider', async () => {
+    const { NodeTracerProvider } = await import('@opentelemetry/sdk-trace-node');
+    const { ParentBasedSampler, TraceIdRatioBasedSampler } = await import(
+      '@opentelemetry/sdk-trace-base'
+    );
     await init({
       apiKey: 'test-key',
       disableExport: true,
       sampleRate: 0.5,
     });
-
-    expect(NeatlogsSpanProcessor).toHaveBeenCalledWith(
-      expect.objectContaining({ sampleRate: 0.5 }),
+    expect(TraceIdRatioBasedSampler).toHaveBeenCalledWith(0.5);
+    expect(ParentBasedSampler).toHaveBeenCalled();
+    expect(NodeTracerProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ sampler: expect.anything() }),
     );
+  });
+
+  it.each([-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid sampleRate %s before initialization',
+    async (sampleRate) => {
+      await expect(init({ apiKey: 'test-key', disableExport: true, sampleRate })).rejects.toThrow(
+        'sampleRate must be a finite number between 0 and 1',
+      );
+    },
+  );
+
+  it('rejects sampleRate with a caller-owned provider instead of ignoring it', async () => {
+    await expect(
+      init({
+        apiKey: 'test-key',
+        disableExport: true,
+        sampleRate: 0.5,
+        tracerProvider: {} as any,
+      }),
+    ).rejects.toThrow('sampleRate cannot configure a caller-owned tracerProvider');
   });
 
   it('creates NeatlogsSpanProcessor with mask function', async () => {
@@ -395,29 +407,6 @@ describe('init() edge cases', () => {
     );
   });
 
-  it('calls InstrumentationManager.instrument when instrumentations provided', async () => {
-    const { InstrumentationManager } = await import('../../src/instrumentation/manager.js');
-    (InstrumentationManager as any).mockClear();
-
-    await init({
-      apiKey: 'test-key',
-      disableExport: true,
-      instrumentations: ['openai', 'anthropic'],
-    });
-
-    const instance = (InstrumentationManager as any).mock.results[0].value;
-    expect(instance.instrument).toHaveBeenCalledWith(['openai', 'anthropic']);
-  });
-
-  it('does not call instrument when no instrumentations provided', async () => {
-    const { InstrumentationManager } = await import('../../src/instrumentation/manager.js');
-    (InstrumentationManager as any).mockClear();
-
-    await init({ apiKey: 'test-key', disableExport: true });
-
-    const instance = (InstrumentationManager as any).mock.results[0].value;
-    expect(instance.instrument).not.toHaveBeenCalled();
-  });
 });
 
 describe('flush() edge cases', () => {

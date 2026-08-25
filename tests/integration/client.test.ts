@@ -10,6 +10,7 @@ import {
 } from '@opentelemetry/sdk-logs';
 
 import { Client } from '../../src/core/client.js';
+import { flushAll } from '../../src/init.js';
 import { trace } from '../../src/core/context.js';
 import { _setOtelLogger, captureStdout, log } from '../../src/core/log.js';
 import { wrapOpenAI } from '../../src/openai.js';
@@ -17,6 +18,27 @@ import { createAITelemetry } from '../../src/ai-sdk.js';
 import { tracePiStream } from '../../src/pi-agent.js';
 
 const clients: Client[] = [];
+
+describe('flushAll live Client registry', () => {
+  it('flushes every live client and excludes clients after shutdown', async () => {
+    const client = new Client({ workflowName: 'flush-all', disableExport: true });
+    clients.push(client);
+    const flushSpy = vi.spyOn(client, 'flush');
+    expect(await flushAll(1_000)).toBe(true);
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    await client.shutdown();
+    flushSpy.mockClear();
+    expect(await flushAll(1_000)).toBe(true);
+    expect(flushSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns false when a live client reports an unhealthy flush', async () => {
+    const client = new Client({ workflowName: 'flush-unhealthy', disableExport: true });
+    clients.push(client);
+    vi.spyOn(client, 'flush').mockResolvedValue(false);
+    expect(await flushAll(1_000)).toBe(false);
+  });
+});
 
 class RetainingSpanExporter implements SpanExporter {
   private readonly spans: ReadableSpan[] = [];
@@ -55,6 +77,38 @@ afterEach(async () => {
 });
 
 describe('Client', () => {
+  it.each([-0.1, 1.1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid sampleRate %s before creating a provider',
+    (sampleRate) => {
+      expect(
+        () =>
+          new Client({
+            apiKey: 'unused',
+            workflowName: 'invalid-sampling',
+            sampleRate,
+          }),
+      ).toThrow('sampleRate must be a finite number between 0 and 1');
+    },
+  );
+
+  it('samples complete traces at the private provider instead of individual exports', async () => {
+    const exporter = new RetainingSpanExporter();
+    const client = new Client({
+      apiKey: 'unused',
+      workflowName: 'never-sampled',
+      sampleRate: 0,
+      spanExporter: exporter,
+    });
+    clients.push(client);
+
+    await client.activate(() =>
+      trace({ name: 'unsampled-root', kind: 'WORKFLOW' }, () => 'done'),
+    );
+    await client.flush();
+
+    expect(exporter.getFinishedSpans()).toEqual([]);
+  });
+
   it('routes concurrent trace calls to independent providers', async () => {
     const first = makeClient('first');
     const second = makeClient('second');

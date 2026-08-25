@@ -11,6 +11,8 @@ import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   BatchSpanProcessor,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanExporter,
 } from '@opentelemetry/sdk-trace-base';
@@ -22,6 +24,7 @@ import {
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 
 import { runWithClient } from './active-client.js';
+import { registerClient, unregisterClient } from './client-registry.js';
 import { FilteringExporter } from './filtering-exporter.js';
 import { getLogger } from './logger.js';
 import { runWithFreshNeatlogsContext } from './provider.js';
@@ -135,6 +138,10 @@ export class Client {
     ) {
       throw new Error('tags must be a list of strings');
     }
+    const sampleRate = options.sampleRate ?? 1;
+    if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+      throw new RangeError('sampleRate must be a finite number between 0 and 1.');
+    }
 
     this.workflowName = workflowName;
     const resourceAttributes: Record<string, string | number | boolean> = {
@@ -151,9 +158,11 @@ export class Client {
     this.tracerProvider = new NodeTracerProvider({
       resource,
       spanLimits: { attributeCountLimit: 10_000 },
+      sampler: new ParentBasedSampler({
+        root: new TraceIdRatioBasedSampler(sampleRate),
+      }),
     });
     this.spanProcessor = new NeatlogsSpanProcessor({
-      sampleRate: options.sampleRate ?? 1,
       debug: options.debug ?? false,
       mask: options.mask,
       emitCompletionMarkers: false,
@@ -221,6 +230,7 @@ export class Client {
       this.logProvider = null;
     }
     this.otelLogger = this.logProvider?.getLogger('neatlogs') ?? null;
+    registerClient(this);
   }
 
   isRunning(): boolean {
@@ -261,6 +271,8 @@ export class Client {
       }
     }
     try {
+      await this.spanProcessor.forceFlush();
+      await this.completionProcessor?.forceFlush();
       await this.tracerProvider.forceFlush();
     } catch (error) {
       logger.error(`[Client:${this.workflowName}] Error flushing spans: ${error}`);
@@ -301,6 +313,8 @@ export class Client {
     this.spanProcessor.endActiveSpans(reason);
     this.completionProcessor?.emitDeferred();
     try {
+      await this.spanProcessor.forceFlush();
+      await this.completionProcessor?.forceFlush();
       await this.tracerProvider.shutdown();
     } catch (error) {
       logger.error(
@@ -310,6 +324,7 @@ export class Client {
     }
     this.tracers.clear();
     this.state = 'closed';
+    unregisterClient(this);
     return success;
   }
 }

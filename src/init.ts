@@ -15,6 +15,8 @@ import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   BatchSpanProcessor,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
@@ -27,15 +29,12 @@ import {
   NeatlogsSpanProcessor,
 } from './core/span-processor.js';
 import { addVerificationMarkerResourceAttribute } from './core/resource.js';
+import { getRegisteredClients } from './core/client-registry.js';
 import { FilteringExporter } from './core/filtering-exporter.js';
 import { _setOtelLogger } from './core/log.js';
 import { _setSessionConfig } from './core/context.js';
 import { _setNeatlogsProvider } from './core/provider.js';
 import { getLogger, enableDebugLogging } from './core/logger.js';
-import {
-  InstrumentationManager,
-  assertInstrumentationsIsolationSafe,
-} from './instrumentation/manager.js';
 import { PromptClient, setSharedClient } from './prompt/client.js';
 import { _resetMastraCache } from './mastra.js';
 import { __version__ } from './version.js';
@@ -57,10 +56,10 @@ let _logProvider: LoggerProvider | null = null;
 let _spanProcessor: NeatlogsSpanProcessor | null = null;
 let _transportSpanProcessors: SpanProcessor[] = [];
 let _completionProcessor: CompletionMarkerSpanProcessor | null = null;
+let _filteringExporter: FilteringExporter | null = null;
 let _debugMode = false;
 // Retained so shutdown() can disable the instrumentors it installed; otherwise a
 // stale instrumentor stays bound to the shut-down provider after reinit.
-let _instrumentationManager: InstrumentationManager | null = null;
 
 // Track signal handlers so we can remove them in shutdown()
 let _sigHandlersRegistered = false;
@@ -158,15 +157,14 @@ export function init(options: InitOptions = {}): Promise<void> {
 
 async function _performInit(options: InitOptions): Promise<void> {
 
-  // 1b. Validate the requested instrumentations against the isolation policy
-  // BEFORE touching any module state (debug flag, session config, provider, …).
-  // The check is a pure function of the registry + the requested set, so failing
-  // here keeps init() atomic: a rejected init leaves no half-installed provider
-  // or stale state behind, and the next init() starts clean. Neatlogs always
-  // uses a private provider, so this rejects any instrumentor that would drive
-  // the global OTel context.
-  if (options.instrumentations?.length) {
-    assertInstrumentationsIsolationSafe(options.instrumentations);
+  const sampleRate = options.sampleRate ?? 1.0;
+  if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+    throw new RangeError('sampleRate must be a finite number between 0 and 1.');
+  }
+  if (options.tracerProvider && options.sampleRate !== undefined) {
+    throw new Error(
+      'sampleRate cannot configure a caller-owned tracerProvider; configure its sampler directly.',
+    );
   }
 
   // 2. Resolve API key
@@ -264,12 +262,14 @@ async function _performInit(options: InitOptions): Promise<void> {
     new NodeTracerProvider({
       resource,
       spanLimits: { attributeCountLimit: 10_000 },
+      sampler: new ParentBasedSampler({
+        root: new TraceIdRatioBasedSampler(sampleRate),
+      }),
     });
   _ownsTracerProvider = options.tracerProvider === undefined;
 
   // 11. Add NeatlogsSpanProcessor
   _spanProcessor = new NeatlogsSpanProcessor({
-    sampleRate: options.sampleRate ?? 1.0,
     debug: options.debug ?? false,
     mask: options.mask,
     emitCompletionMarkers: false,
@@ -289,6 +289,7 @@ async function _performInit(options: InitOptions): Promise<void> {
         headers: { 'x-api-key': resolvedKey },
       }),
     );
+    _filteringExporter = otlpExporter;
 
     const batchProcessor = new BatchSpanProcessor(otlpExporter, {
       maxExportBatchSize: options.batchSize ?? 100,
@@ -376,23 +377,6 @@ async function _performInit(options: InitOptions): Promise<void> {
     logger.debug('Log capture disabled (pass captureLogs: true to enable)');
   }
 
-  // 16. Instrument libraries. Retained in module state so shutdown() can disable
-  // the instrumentors it installed. The manager rejects any requested library
-  // whose auto-instrumentor drives the global OTel context.
-  _instrumentationManager = new InstrumentationManager({
-    provider,
-    debug: options.debug,
-  });
-
-  if (options.instrumentations?.length) {
-    await _instrumentationManager.instrument(options.instrumentations);
-    if (options.debug) {
-      logger.debug(
-        `Instrumented libraries: ${_instrumentationManager.instrumented.join(', ')}`,
-      );
-    }
-  }
-
   // 17. Register shutdown handlers. Default to flushing on exit whenever we own
   // the private provider so standalone scripts drain their spans;
   // only a caller-supplied provider defaults off (its owner controls shutdown).
@@ -416,10 +400,7 @@ async function _performInit(options: InitOptions): Promise<void> {
     logger.info(`Workflow: ${resolvedWorkflowName}`);
     logger.info(`User: ${options.userId ?? '(none)'}`);
     logger.info(`Tags: ${tags ?? []}`);
-    logger.info(
-      `Instrumentations: ${_instrumentationManager.instrumented.join(', ') || '(none)'}`,
-    );
-    logger.info(`Sample Rate: ${options.sampleRate ?? 1.0}`);
+    logger.info(`Sample Rate: ${sampleRate}`);
   }
 }
 
@@ -454,6 +435,8 @@ export async function flush(): Promise<boolean> {
   if (_tracerProvider) {
     try {
       logger.debug('Flushing tracer provider...');
+      await _spanProcessor?.forceFlush();
+      await _completionProcessor?.forceFlush();
       await _tracerProvider.forceFlush();
       logger.debug('Tracer provider flushed successfully');
     } catch (e) {
@@ -463,6 +446,25 @@ export async function flush(): Promise<boolean> {
   }
 
   return success;
+}
+
+/** Flush the module SDK and every live Neatlogs Client, with a bounded wait. */
+export async function flushAll(timeoutMs = 5_000): Promise<boolean> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError('flushAll timeoutMs must be a finite positive number.');
+  }
+  const targets = [flush(), ...getRegisteredClients().map((client) => client.flush())];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    const health = Promise.allSettled(targets).then((results) =>
+      results.every((result) => result.status === 'fulfilled' && result.value === true));
+    return await Promise.race([health, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -524,8 +526,6 @@ async function _performShutdown(terminationReason: string): Promise<boolean> {
   // Disable instrumentors BEFORE tearing down the provider so they stop emitting
   // spans against it, and clear the Mastra bridge cache so a subsequent init()
   // rebinds to the fresh provider instead of a stale one.
-  _instrumentationManager?.disable();
-  _instrumentationManager = null;
   _resetMastraCache();
 
   // LOG records must drain before trace completion. The trace provider carries
@@ -552,6 +552,8 @@ async function _performShutdown(terminationReason: string): Promise<boolean> {
     }
   }
   _completionProcessor?.emitDeferred();
+  await _spanProcessor?.forceFlush();
+  await _completionProcessor?.forceFlush();
 
   // Only shut down a provider we created. A caller-supplied provider is flushed
   // (above / in flush()) but never shut down — its owner controls its lifecycle,
@@ -603,6 +605,8 @@ async function _performShutdown(terminationReason: string): Promise<boolean> {
   _spanProcessor = null;
   _transportSpanProcessors = [];
   _completionProcessor = null;
+  _filteringExporter = null;
+  setSharedClient(null);
   _debugMode = false;
   _signalShutdownStarted = false;
 
@@ -645,3 +649,18 @@ export function isDebugEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 export { getSessionConfig } from './core/context.js';
+
+/** @internal Immutable, credential-free state used by the read-only doctor. */
+export function _doctorRuntimeSnapshot(): Readonly<{
+  state: LifecycleState;
+  initialized: boolean;
+  ownsTracerProvider: boolean;
+  exportHealth: { droppedSpans: number; exportFailures: number } | null;
+}> {
+  return {
+    state: _lifecycleState,
+    initialized: _initialized,
+    ownsTracerProvider: _ownsTracerProvider,
+    exportHealth: _filteringExporter?.health() ?? null,
+  };
+}
