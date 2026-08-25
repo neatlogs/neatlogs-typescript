@@ -8,7 +8,7 @@
  * import { init, span, shutdown } from 'neatlogs';
  *
  * async function main() {
- *   await init({ apiKey: process.env.NEATLOGS_API_KEY, instrumentations: ['openai'] });
+ *   await init({ apiKey: process.env.NEATLOGS_API_KEY });
  *
  *   const myWorkflow = span({ kind: 'WORKFLOW' }, async (query: string) => {
  *     // your LLM code here
@@ -22,8 +22,16 @@
  */
 
 // Lifecycle
-export { init, flush, shutdown, isDebugEnabled, getSessionConfig } from './init.js';
+export { init, flush, flushAll, shutdown, isDebugEnabled, getSessionConfig } from './init.js';
 export { Client, type ClientOptions } from './core/client.js';
+export {
+  doctor,
+  DOCTOR_FORMAT_VERSION,
+  type DoctorCheck,
+  type DoctorOptions,
+  type DoctorResult,
+  type DoctorStatus,
+} from './doctor.js';
 
 // Instrumentation
 export { span, Span } from './decorators/index.js';
@@ -83,6 +91,13 @@ export { NeatlogsOpencodePlugin } from './opencode-plugin.js';
 // Utilities
 export { bindTemplates } from './core/llm-binder.js';
 export { registerCrewaiTask } from './core/crewai-task-registry.js';
+export {
+  TELEMETRY_CONTRACT_VERSION,
+  TELEMETRY_SCHEMA_VERSION,
+  TELEMETRY_SCHEMA_SHA256,
+  TELEMETRY_SCHEMA_V2,
+  TELEMETRY_CONFLICT_PRECEDENCE,
+} from './schema-v2.js';
 
 // Types
 export type {
