@@ -26,16 +26,16 @@ import type { MaskFunction } from '../../src/types.js';
  * FilteringExporter wrapper then filters out those spans before they
  * reach the InMemorySpanExporter.
  */
-function makeIsolatedProvider(mask?: MaskFunction) {
+function makeIsolatedProvider(mask?: MaskFunction, maskTimeoutMs?: number) {
   const memExporter = new InMemorySpanExporter();
   const filteringExporter = new FilteringExporter(memExporter);
   const provider = new NodeTracerProvider();
-  const neatlogsProcessor = new NeatlogsSpanProcessor({ mask, debug: false });
+  const neatlogsProcessor = new NeatlogsSpanProcessor({ mask, maskTimeoutMs, debug: false });
   provider.addSpanProcessor(neatlogsProcessor);
   provider.addSpanProcessor(new SimpleSpanProcessor(filteringExporter));
   // NOTE: provider.register() is NOT called — we use provider.getTracer() directly
   // to avoid overwriting the global tracer provider between tests.
-  return { provider, exporter: memExporter, neatlogsProcessor };
+  return { provider, exporter: memExporter, filteringExporter, neatlogsProcessor };
 }
 
 describe('MaskFunction null-return: "drop span" behaviour', () => {
@@ -44,7 +44,7 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
    */
   it('global mask returning null drops the span from export', async () => {
     const dropAllMask: MaskFunction = (_spanData) => null;
-    const { provider, exporter } = makeIsolatedProvider(dropAllMask);
+    const { provider, exporter, filteringExporter } = makeIsolatedProvider(dropAllMask);
 
     const tracer = provider.getTracer('tc-mask-1');
     await new Promise<void>((resolve) => {
@@ -55,9 +55,11 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
       });
     });
 
+    await provider.forceFlush();
     const spans = exporter.getFinishedSpans();
     // Mask returned null → span should be dropped entirely
     expect(spans.length).toBe(0);
+    expect(filteringExporter.health()).toEqual({ droppedSpans: 1, exportFailures: 0 });
 
     await provider.shutdown();
     _clearMaskRegistry();
@@ -67,27 +69,35 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
    * TC-MASK-2: Global mask modifying span data — modifications are written
    * back to the OTel span via NeatlogsSpanProcessor's attribute write-back.
    */
-  it('mask attribute modifications are written back to the OTel span', async () => {
+  it('async masking redacts only the exported clone and leaves the application value unchanged', async () => {
+    const applicationValue = { secret: 'sentinel-secret' };
     const addFlagMask: MaskFunction = (spanData) => ({
       ...spanData,
-      attributes: { ...spanData.attributes, 'masked.was.applied': 'yes' },
+      attributes: {
+        ...spanData.attributes,
+        'original.attr': '[REDACTED]',
+        'masked.was.applied': 'yes',
+      },
     });
     const { provider, exporter } = makeIsolatedProvider(addFlagMask);
 
     const tracer = provider.getTracer('tc-mask-2');
     await new Promise<void>((resolve) => {
       tracer.startActiveSpan('modify-span', (span) => {
-        span.setAttribute('original.attr', 'value');
+        span.setAttribute('original.attr', applicationValue.secret);
         span.end();
         resolve();
       });
     });
 
+    await provider.forceFlush();
     const spans = exporter.getFinishedSpans();
     const target = spans.find(s => s.name === 'modify-span');
     expect(target).toBeDefined();
     // Mask modifications are written back to the OTel span attributes
     expect(target!.attributes['masked.was.applied']).toBe('yes');
+    expect(target!.attributes['original.attr']).toBe('[REDACTED]');
+    expect(applicationValue.secret).toBe('sentinel-secret');
 
     await provider.shutdown();
     _clearMaskRegistry();
@@ -112,6 +122,7 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
       });
     });
 
+    await provider.forceFlush();
     const spans = exporter.getFinishedSpans();
     // Per-span mask returned null → span should be dropped
     expect(spans.length).toBe(0);
@@ -139,10 +150,41 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
       });
     });
 
+    await provider.forceFlush();
     const spans = exporter.getFinishedSpans();
     // Span is exported — mask modified but did not drop it
     expect(spans.length).toBeGreaterThan(0);
 
+    await provider.shutdown();
+    _clearMaskRegistry();
+  });
+
+  it('rejecting mask fails closed and the exporter remains healthy', async () => {
+    const { provider, exporter, filteringExporter } = makeIsolatedProvider();
+    const tracer = provider.getTracer('tc-mask-health');
+    const rejectId = registerMask(async () => { throw new Error('controlled failure'); });
+    const safeId = registerMask((data) => ({ ...data, name: 'safe-after-failure' }));
+    const failed = tracer.startSpan('must-not-export');
+    failed.setAttribute('neatlogs.mask_id', rejectId);
+    failed.end();
+    const healthy = tracer.startSpan('health-check');
+    healthy.setAttribute('neatlogs.mask_id', safeId);
+    healthy.end();
+    await provider.forceFlush();
+    expect(exporter.getFinishedSpans().map((span) => span.name)).toEqual(['safe-after-failure']);
+    expect(filteringExporter.health()).toEqual({ droppedSpans: 1, exportFailures: 0 });
+    await provider.shutdown();
+    _clearMaskRegistry();
+  });
+
+  it('times out fail-closed and flush waits for the masking decision', async () => {
+    const never: MaskFunction = () => new Promise(() => {});
+    const { provider, exporter } = makeIsolatedProvider(never, 20);
+    provider.getTracer('tc-mask-timeout').startSpan('timeout-sentinel').end();
+    const started = Date.now();
+    await provider.forceFlush();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(15);
+    expect(exporter.getFinishedSpans()).toHaveLength(0);
     await provider.shutdown();
     _clearMaskRegistry();
   });

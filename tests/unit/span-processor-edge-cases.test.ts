@@ -33,10 +33,9 @@ vi.mock('../../src/core/crewai-task-registry.js', () => ({
 }));
 
 vi.mock('../../src/core/mask.js', () => ({
-  applyMask: vi.fn().mockImplementation((data: any, _mask: any) => {
-    if (_mask) return _mask(data);
-    return data;
-  }),
+  scheduleMask: vi.fn().mockImplementation((_span: any, data: any, mask: any) =>
+    Promise.resolve(mask ? mask(data) : data)),
+  getScheduledMask: vi.fn().mockResolvedValue({}),
 }));
 
 vi.mock('../../src/prompt/template.js', () => ({
@@ -116,7 +115,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
     mockNormalize.mockReturnValue({
       'neatlogs.span.kind': 'llm',
     });
-    processor = new NeatlogsSpanProcessor({ sampleRate: 1.0, debug: false });
+    processor = new NeatlogsSpanProcessor({ debug: false });
   });
 
   afterEach(async () => {
@@ -152,7 +151,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── normalize() throwing ────────────────────────────────
 
   describe('when normalize() throws', () => {
-    it('should not crash the span processor and should still increment spansProcessed', () => {
+    it('should not crash the span processor and should still increment spansProcessed', async () => {
       mockNormalize.mockImplementation(() => {
         throw new Error('normalize blew up');
       });
@@ -161,6 +160,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       // Should not throw — the processor should catch internally
       expect(() => processor.onEnd(span)).toThrow('normalize blew up');
+      await processor.forceFlush();
       // spansProcessed is incremented before normalize
       expect(processor._perfStats.spansProcessed).toBe(1);
     });
@@ -169,7 +169,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Very large attribute values ─────────────────────────
 
   describe('very large attribute values', () => {
-    it('should handle attributes with very large string values', () => {
+    it('should handle attributes with very large string values', async () => {
       const largeValue = 'x'.repeat(100_000);
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'llm',
@@ -183,13 +183,14 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       // Should not throw
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(processor._perfStats.spansExported).toBe(1);
       // The large value should be written back
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.llm.response']?.length).toBe(100_000);
     });
 
-    it('should handle attributes with many keys', () => {
+    it('should handle attributes with many keys', async () => {
       const manyAttrs: Record<string, any> = {
         'neatlogs.span.kind': 'llm',
       };
@@ -200,6 +201,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'many-attrs-span' });
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(processor._perfStats.spansExported).toBe(1);
     });
   });
@@ -207,7 +209,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── onStart behavior ────────────────────────────────────
 
   describe('onStart', () => {
-    it('should not set attributes for non-LLM spans', () => {
+    it('should not set attributes for non-LLM spans', async () => {
       const mockSdkSpan = {
         name: 'my-tool-span',
         attributes: { 'openinference.span.kind': 'TOOL' },
@@ -220,7 +222,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(mockSdkSpan.setAttribute).not.toHaveBeenCalled();
     });
 
-    it('should set attributes for LLM spans detected by name pattern', () => {
+    it('should set attributes for LLM spans detected by name pattern', async () => {
       const mockSdkSpan = {
         name: 'openai.chat.completion',
         attributes: {},
@@ -278,7 +280,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       );
     });
 
-    it('should detect LLM spans via "generate" pattern in name', () => {
+    it('should detect LLM spans via "generate" pattern in name', async () => {
       const mockSdkSpan = {
         name: 'generate_content',
         attributes: {},
@@ -289,7 +291,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       processor.onStart(mockSdkSpan as any, {} as any);
     });
 
-    it('should detect LLM spans via "embedding" pattern in name', () => {
+    it('should detect LLM spans via "embedding" pattern in name', async () => {
       const mockSdkSpan = {
         name: 'create_embedding',
         attributes: {},
@@ -303,7 +305,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── VECTOR_STORE filtering ──────────────────────────────
 
   describe('VECTOR_STORE span filtering', () => {
-    it('should remove content/message keys from vector_store spans', () => {
+    it('should remove content/message keys from vector_store spans', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'vector_store',
         'neatlogs.vector_store.collection': 'docs',
@@ -313,6 +315,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'pinecone.upsert' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.vector_store.collection']).toBe('docs');
@@ -324,7 +327,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Resource attribute handling ─────────────────────────
 
   describe('resource attribute handling', () => {
-    it('should handle array values in resource attributes', () => {
+    it('should handle array values in resource attributes', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -344,6 +347,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
       expect(parsed.resource.attributes['neatlogs.tags']).toEqual(['tag1', 'tag2']);
@@ -352,7 +356,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(parsed.resource.attributes['some.bool']).toBe(true);
     });
 
-    it('should stringify non-primitive, non-array resource values', () => {
+    it('should stringify non-primitive, non-array resource values', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -369,6 +373,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
       // Non-primitive should be stringified
@@ -379,7 +384,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Prompt template keys for special span kinds ─────────
 
   describe('prompt template keys for special span kinds', () => {
-    it('should keep prompt template keys for embedding spans', () => {
+    it('should keep prompt template keys for embedding spans', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'embedding',
         'neatlogs.llm.prompt_template': 'Embed: {{text}}',
@@ -388,13 +393,14 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'embedding-span' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       // embedding is allowed to keep prompt templates
       expect(attrs['neatlogs.llm.prompt_template']).toBe('Embed: {{text}}');
     });
 
-    it('should keep prompt template keys for crewai_task spans', () => {
+    it('should keep prompt template keys for crewai_task spans', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'crewai_task',
         'neatlogs.llm.prompt_template': 'Task: {{desc}}',
@@ -402,12 +408,13 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'crewai.task' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.llm.prompt_template']).toBe('Task: {{desc}}');
     });
 
-    it('should keep prompt template keys for PromptTemplate-named spans', () => {
+    it('should keep prompt template keys for PromptTemplate-named spans', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'chain',
         'neatlogs.llm.prompt_template': 'Hello {{name}}',
@@ -415,6 +422,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'PromptTemplate' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       // PromptTemplate spans keep their prompt_template attribute
@@ -449,6 +457,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
     it('should not log performance stats when debug is false', async () => {
       const span = makeMockSpan();
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const consoleSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
       await processor.shutdown();
@@ -477,7 +486,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── span events handling ────────────────────────────────
 
   describe('span events handling', () => {
-    it('should include events in the processed span dict', () => {
+    it('should include events in the processed span dict', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -496,6 +505,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
@@ -508,13 +518,13 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── spanToDict edge cases ───────────────────────────────
 
   describe('spanToDict edge cases', () => {
-    it('should handle span with no events', () => {
+    it('should handle span with no events', async () => {
       const span = makeMockSpan({ events: [] });
       const dict = spanToDict(span);
       expect(dict.events).toEqual([]);
     });
 
-    it('should handle span with no resource', () => {
+    it('should handle span with no resource', async () => {
       const span = makeMockSpan({
         resource: { attributes: {} },
       });
@@ -522,7 +532,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(dict.resource).toEqual({});
     });
 
-    it('should handle span with ERROR status', () => {
+    it('should handle span with ERROR status', async () => {
       const span = makeMockSpan({
         status: { code: SpanStatusCode.ERROR, message: 'something failed' },
       });
@@ -531,7 +541,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(dict.status.description).toBe('something failed');
     });
 
-    it('should handle span with UNSET status (no message)', () => {
+    it('should handle span with UNSET status (no message)', async () => {
       const span = makeMockSpan({
         status: { code: SpanStatusCode.UNSET },
       });
@@ -540,7 +550,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(dict.status.description).toBeNull();
     });
 
-    it('should handle multiple events with attributes', () => {
+    it('should handle multiple events with attributes', async () => {
       const span = makeMockSpan({
         events: [
           { name: 'event1', time: makeHrTime(100, 0), attributes: { a: 1 } },
@@ -559,7 +569,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Write-back edge cases ───────────────────────────────
 
   describe('attribute write-back', () => {
-    it('should handle write-back of array attributes', () => {
+    it('should handle write-back of array attributes', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'llm',
         'neatlogs.tags': ['tag1', 'tag2'],
@@ -567,12 +577,13 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'array-writeback' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.tags']).toEqual(['tag1', 'tag2']);
     });
 
-    it('should not write back complex object attributes', () => {
+    it('should not write back complex object attributes', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'llm',
         'neatlogs.complex': { nested: true },
@@ -580,13 +591,14 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'complex-writeback' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       // Complex objects should not be written back
       expect(attrs['neatlogs.complex']).toBeUndefined();
     });
 
-    it('should write back boolean attributes', () => {
+    it('should write back boolean attributes', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'llm',
         'neatlogs.internal': true,
@@ -594,12 +606,13 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'bool-writeback' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.internal']).toBe(true);
     });
 
-    it('should write back number attributes', () => {
+    it('should write back number attributes', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'llm',
         'neatlogs.llm.token_count.total': 500,
@@ -607,6 +620,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
 
       const span = makeMockSpan({ name: 'num-writeback' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.llm.token_count.total']).toBe(500);
@@ -616,7 +630,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Framework span name normalization edge cases ────────
 
   describe('framework span name normalization', () => {
-    it('should handle task name with trailing dots', () => {
+    it('should handle task name with trailing dots', async () => {
       const spans = [{
         name: 'Research market trends...task',
         kind: 'task',
@@ -630,7 +644,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       );
     });
 
-    it('should not overwrite existing task description', () => {
+    it('should not overwrite existing task description', async () => {
       const spans = [{
         name: 'Do thing.task',
         kind: 'task',
@@ -645,7 +659,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(result[0].attributes['neatlogs.task.description']).toBe('existing description');
     });
 
-    it('should not rename task spans without crewai attributes', () => {
+    it('should not rename task spans without crewai attributes', async () => {
       const spans = [{
         name: 'some-operation.task',
         kind: 'task',
@@ -656,7 +670,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
       expect(result[0].name).toBe('some-operation.task');
     });
 
-    it('should handle empty span name with .task suffix', () => {
+    it('should handle empty span name with .task suffix', async () => {
       const spans = [{
         name: '.task',
         kind: 'task',
@@ -671,7 +685,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── CrewAI task injection edge cases ────────────────────
 
   describe('CrewAI task injection edge cases', () => {
-    it('should not inject when no task ID is present', () => {
+    it('should not inject when no task ID is present', async () => {
       const spans = [{
         name: 'some-span',
         attributes: {},
@@ -703,7 +717,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
   // ── Concurrent span processing ──────────────────────────
 
   describe('concurrent span processing', () => {
-    it('should handle multiple spans processed sequentially', () => {
+    it('should handle multiple spans processed sequentially', async () => {
       for (let i = 0; i < 10; i++) {
         const span = makeMockSpan({
           name: `span-${i}`,
@@ -711,6 +725,7 @@ describe('NeatlogsSpanProcessor edge cases', () => {
           parentSpanId: 'parent0000000001',
         });
         processor.onEnd(span);
+      await processor.forceFlush();
       }
 
       expect(processor._perfStats.spansProcessed).toBe(10);

@@ -35,6 +35,7 @@ const mockNormalize = vi.fn().mockReturnValue({
   'neatlogs.llm.model_name': 'gpt-4o',
   'neatlogs.llm.token_count.total': 100,
 });
+const mockMaskResults = vi.hoisted(() => new WeakMap<object, Promise<any>>());
 
 vi.mock('../../src/core/attribute-processor.js', () => {
   return {
@@ -49,10 +50,12 @@ vi.mock('../../src/core/crewai-task-registry.js', () => ({
 }));
 
 vi.mock('../../src/core/mask.js', () => ({
-  applyMask: vi.fn().mockImplementation((data: any, _mask: any) => {
-    if (_mask) return _mask(data);
-    return data;
+  scheduleMask: vi.fn().mockImplementation((span: object, data: any, mask: any) => {
+    const result = Promise.resolve(mask ? mask(data) : data);
+    mockMaskResults.set(span, result);
+    return result;
   }),
+  getScheduledMask: vi.fn().mockImplementation((span: object) => mockMaskResults.get(span)),
 }));
 
 vi.mock('../../src/prompt/template.js', () => ({
@@ -134,7 +137,7 @@ describe('NeatlogsSpanProcessor', () => {
       'neatlogs.llm.model_name': 'gpt-4o',
       'neatlogs.llm.token_count.total': 100,
     });
-    processor = new NeatlogsSpanProcessor({ sampleRate: 1.0, debug: false });
+    processor = new NeatlogsSpanProcessor({ debug: false });
   });
 
   afterEach(async () => {
@@ -174,13 +177,14 @@ describe('NeatlogsSpanProcessor', () => {
   // ── onEnd normalizes attributes ───────────────────────
 
   describe('onEnd', () => {
-    it('should call normalize and write back attributes', () => {
+    it('should call normalize and write back attributes', async () => {
       const span = makeMockSpan({
         name: 'openai.chat',
         attributes: { 'openinference.span.kind': 'LLM' },
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(mockNormalize).toHaveBeenCalledTimes(1);
       // The normalize call receives a SpanDict
@@ -193,9 +197,10 @@ describe('NeatlogsSpanProcessor', () => {
       expect(attrs['neatlogs.llm.model_name']).toBe('gpt-4o');
     });
 
-    it('should increment spansProcessed and spansExported', () => {
+    it('should increment spansProcessed and spansExported', async () => {
       const span = makeMockSpan();
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(processor._perfStats.spansProcessed).toBe(1);
       expect(processor._perfStats.spansExported).toBe(1);
@@ -205,9 +210,10 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Skip neatlogs.trace.complete spans ────────────────
 
   describe('neatlogs.trace.complete spans', () => {
-    it('should skip internal completion markers', () => {
+    it('should skip internal completion markers', async () => {
       const span = makeMockSpan({ name: 'neatlogs.trace.complete' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(mockNormalize).not.toHaveBeenCalled();
       expect(processor._perfStats.spansProcessed).toBe(0);
@@ -238,6 +244,7 @@ describe('NeatlogsSpanProcessor', () => {
         expect(processor.endActiveSpans('SIGTERM')).toBe(2);
         expect(processor.endActiveSpans('SIGTERM')).toBe(0);
         expect(foreign.isRecording()).toBe(true);
+        await processor.forceFlush();
 
         const spans = exporter.getFinishedSpans();
         const names = spans.map((span) => span.name);
@@ -302,15 +309,17 @@ describe('NeatlogsSpanProcessor', () => {
           scheduledDelayMillis: 60_000,
         }),
       );
-      provider.addSpanProcessor(
-        new CompletionMarkerSpanProcessor(
-          lifecycle,
-          provider.getTracer('neatlogs.internal'),
-        ),
+      const completion = new CompletionMarkerSpanProcessor(
+        lifecycle,
+        provider.getTracer('neatlogs.internal'),
       );
+      provider.addSpanProcessor(completion);
 
       try {
         provider.getTracer('neatlogs.test').startSpan('workflow').end();
+        await lifecycle.forceFlush();
+        await completion.forceFlush();
+        await lifecycle.forceFlush();
         await provider.forceFlush();
         const names = exporter.getFinishedSpans().map((span) => span.name);
         expect(names.indexOf('workflow')).toBeLessThan(
@@ -338,6 +347,9 @@ describe('NeatlogsSpanProcessor', () => {
         provider.getTracer('neatlogs.test').startSpan('before-boundary').end();
         completion.emitDeferred();
         provider.getTracer('neatlogs.test').startSpan('after-boundary').end();
+        await lifecycle.forceFlush();
+        await completion.forceFlush();
+        await lifecycle.forceFlush();
         expect(
           exporter
             .getFinishedSpans()
@@ -361,15 +373,16 @@ describe('NeatlogsSpanProcessor', () => {
           scheduledDelayMillis: 60_000,
         }),
       );
-      provider.addSpanProcessor(
-        new CompletionMarkerSpanProcessor(
-          lifecycle,
-          provider.getTracer('neatlogs.internal'),
-        ),
+      const completion = new CompletionMarkerSpanProcessor(
+        lifecycle,
+        provider.getTracer('neatlogs.internal'),
       );
+      provider.addSpanProcessor(completion);
 
       try {
         provider.getTracer('neatlogs.test').startSpan('dropped-root').end();
+        await lifecycle.forceFlush();
+        await completion.forceFlush();
         await provider.forceFlush();
         expect(exporter.getFinishedSpans()).toEqual([]);
       } finally {
@@ -378,39 +391,17 @@ describe('NeatlogsSpanProcessor', () => {
     });
   });
 
-  // ── Sample rate filtering ─────────────────────────────
-
-  describe('sample rate filtering', () => {
-    it('should drop spans when sampleRate < 1 and random exceeds rate', () => {
-      const sampledProcessor = new NeatlogsSpanProcessor({ sampleRate: 0.0 });
-      const span = makeMockSpan();
-
-      // With sampleRate 0.0, Math.random() (0..1) will always be > 0.0
-      sampledProcessor.onEnd(span);
-
-      // spansProcessed still incremented, but spansExported should be 0
-      expect(sampledProcessor._perfStats.spansProcessed).toBe(1);
-      expect(sampledProcessor._perfStats.spansExported).toBe(0);
-    });
-
-    it('should process all spans when sampleRate is 1.0', () => {
-      const span = makeMockSpan();
-      processor.onEnd(span);
-
-      expect(processor._perfStats.spansExported).toBe(1);
-    });
-  });
-
   // ── PromptTemplate spans ──────────────────────────────
 
   describe('PromptTemplate spans', () => {
-    it('should set neatlogs.internal = true for PromptTemplate', () => {
+    it('should set neatlogs.internal = true for PromptTemplate', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'chain',
       });
 
       const span = makeMockSpan({ name: 'PromptTemplate' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.internal']).toBe(true);
@@ -421,7 +412,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── RETRIEVER dedup ───────────────────────────────────
 
   describe('RETRIEVER dedup', () => {
-    it('should suppress OI retriever when internal retriever child exists', () => {
+    it('should suppress OI retriever when internal retriever child exists', async () => {
       // Step 1: Internal retriever child ends first
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'retriever',
@@ -436,6 +427,7 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(childSpan);
+      await processor.forceFlush();
 
       // parentId should be in the suppress set now
       expect(processor._suppressedRetrievers.has(parentId)).toBe(true);
@@ -451,6 +443,7 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(parentSpan);
+      await processor.forceFlush();
 
       // parentId should be removed from suppress set
       expect(processor._suppressedRetrievers.has(parentId)).toBe(false);
@@ -464,7 +457,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── EMBEDDING/VECTOR_STORE filtering ──────────────────
 
   describe('EMBEDDING span filtering', () => {
-    it('should remove content/message keys from embedding spans', () => {
+    it('should remove content/message keys from embedding spans', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'embedding',
         'neatlogs.embedding.model': 'text-embedding-ada-002',
@@ -477,6 +470,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan({ name: 'embedding' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.embedding.model']).toBe('text-embedding-ada-002');
@@ -486,7 +480,7 @@ describe('NeatlogsSpanProcessor', () => {
       expect(attrs['gen_ai.completion.0']).toBeUndefined();
     });
 
-    it('should additionally remove embedding input/output when skip_output is true', () => {
+    it('should additionally remove embedding input/output when skip_output is true', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'embedding',
         'neatlogs._skip_output_value': true,
@@ -496,6 +490,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan({ name: 'embedding' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.embedding.input']).toBeUndefined();
@@ -506,7 +501,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Prompt template filter for non-LLM spans ─────────
 
   describe('prompt template filtering for non-LLM spans', () => {
-    it('should remove prompt template keys for non-LLM spans', () => {
+    it('should remove prompt template keys for non-LLM spans', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'tool',
         'neatlogs.llm.prompt_template': 'should be removed',
@@ -516,6 +511,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan({ name: 'some-tool' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.llm.prompt_template']).toBeUndefined();
@@ -523,7 +519,7 @@ describe('NeatlogsSpanProcessor', () => {
       expect(attrs['neatlogs.llm.prompt_template.version']).toBeUndefined();
     });
 
-    it('should keep prompt template keys for LLM spans', () => {
+    it('should keep prompt template keys for LLM spans', async () => {
       mockNormalize.mockReturnValue({
         'neatlogs.span.kind': 'llm',
         'neatlogs.llm.prompt_template': 'Hello {{name}}',
@@ -533,6 +529,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan({ name: 'openai.chat' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       const attrs = (span as any).attributes;
       expect(attrs['neatlogs.llm.prompt_template']).toBe('Hello {{name}}');
@@ -542,7 +539,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Completion marker ─────────────────────────────────
 
   describe('completion marker', () => {
-    it('should emit completion marker for root spans (no parent)', () => {
+    it('should emit completion marker for root spans (no parent)', async () => {
       const mockStartSpan = vi.fn().mockReturnValue({
         setAttribute: vi.fn(),
         end: vi.fn(),
@@ -559,6 +556,7 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(getTracerSpy).toHaveBeenCalledWith('neatlogs.internal');
       expect(mockStartSpan).toHaveBeenCalledWith(
@@ -579,18 +577,19 @@ describe('NeatlogsSpanProcessor', () => {
       _setNeatlogsProvider(null);
     });
 
-    it('should not emit completion marker for child spans', () => {
+    it('should not emit completion marker for child spans', async () => {
       const span = makeMockSpan({
         name: 'child-span',
         parentSpanId: 'parent123456789a',
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       // Child spans do not create completion markers.
     });
 
-    it('should copy neatlogs.tags from resource to completion marker', () => {
+    it('should copy neatlogs.tags from resource to completion marker', async () => {
       const mockSetAttribute = vi.fn();
       const mockStartSpan = vi.fn().mockReturnValue({
         setAttribute: mockSetAttribute,
@@ -610,13 +609,14 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(mockSetAttribute).toHaveBeenCalledWith('neatlogs.tags', ['prod', 'v2']);
 
       _setNeatlogsProvider(null);
     });
 
-    it('should copy root session and end-user identity to the completion marker', () => {
+    it('should copy root session and end-user identity to the completion marker', async () => {
       const mockSetAttribute = vi.fn();
       const mockStartSpan = vi.fn().mockReturnValue({
         setAttribute: mockSetAttribute,
@@ -641,6 +641,7 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(mockSetAttribute).toHaveBeenCalledWith(
         'neatlogs.session.id',
@@ -674,8 +675,8 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Mask applied when logging ─────────────────────────
 
   describe('mask application', () => {
-    it('should call applyMask with the mask function', async () => {
-      const { applyMask: mockApplyMask } = await import('../../src/core/mask.js');
+    it('should schedule masking with the mask function', async () => {
+      const { scheduleMask: mockScheduleMask } = await import('../../src/core/mask.js');
 
       const maskFn = vi.fn((data: Record<string, any>) => {
         const result = { ...data };
@@ -696,18 +697,18 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan();
       maskedProcessor.onEnd(span);
+      await maskedProcessor.forceFlush();
 
-      // applyMask should have been called
-      expect(mockApplyMask).toHaveBeenCalled();
-      const callArgs = (mockApplyMask as any).mock.calls[0];
-      expect(callArgs[1]).toBe(maskFn);
+      expect(mockScheduleMask).toHaveBeenCalled();
+      const callArgs = (mockScheduleMask as any).mock.calls[0];
+      expect(callArgs[2]).toBe(maskFn);
     });
   });
 
   // ── File logging ──────────────────────────────────────
 
   describe('file logging', () => {
-    it('should write raw spans when raw log stream is open', () => {
+    it('should write raw spans when raw log stream is open', async () => {
       const writeData: string[] = [];
       (processor as any)._rawLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -716,13 +717,14 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan({ name: 'test-raw-log' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
       expect(parsed.name).toBe('test-raw-log');
     });
 
-    it('should write processed spans when processed log stream is open', () => {
+    it('should write processed spans when processed log stream is open', async () => {
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
         write: (data: string) => writeData.push(data),
@@ -731,6 +733,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan({ name: 'test-processed-log' });
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
@@ -738,7 +741,7 @@ describe('NeatlogsSpanProcessor', () => {
       expect(parsed.attributes).toBeDefined();
     });
 
-    it('should not write when streams are destroyed', () => {
+    it('should not write when streams are destroyed', async () => {
       const writeData: string[] = [];
       (processor as any)._rawLogStream = makeMockLogStream({
         destroyed: true,
@@ -747,6 +750,7 @@ describe('NeatlogsSpanProcessor', () => {
 
       const span = makeMockSpan();
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(0);
     });
@@ -793,7 +797,7 @@ describe('NeatlogsSpanProcessor', () => {
         process.env.NEATLOGS_LOG_SPANS_FILE = processedLogPath;
       }
 
-      const loggingProcessor = new NeatlogsSpanProcessor({ sampleRate: 1.0 });
+      const loggingProcessor = new NeatlogsSpanProcessor();
       try {
         loggingProcessor.onEnd(makeMockSpan({ name: opts.spanName }));
         await loggingProcessor.shutdown();
@@ -836,7 +840,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Self-parenting detection ──────────────────────────
 
   describe('self-parenting detection', () => {
-    it('should set parent_span_id to null when span is self-parented', () => {
+    it('should set parent_span_id to null when span is self-parented', async () => {
       const spanId = 'abcdef0123456789';
       const writeData: string[] = [];
       (processor as any)._processedLogStream = makeMockLogStream({
@@ -850,6 +854,7 @@ describe('NeatlogsSpanProcessor', () => {
       });
 
       processor.onEnd(span);
+      await processor.forceFlush();
 
       expect(writeData.length).toBe(1);
       const parsed = JSON.parse(writeData[0].trim());
@@ -860,7 +865,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── spanToDict helper ─────────────────────────────────
 
   describe('spanToDict', () => {
-    it('should convert ReadableSpan to a plain dict', () => {
+    it('should convert ReadableSpan to a plain dict', async () => {
       const span = makeMockSpan({
         name: 'my-span',
         traceId: 'aaaa0000bbbb1111cccc2222dddd3333',
@@ -882,7 +887,7 @@ describe('NeatlogsSpanProcessor', () => {
       expect(dict.attributes['test.key']).toBe('value');
     });
 
-    it('should handle missing parent span id', () => {
+    it('should handle missing parent span id', async () => {
       const span = makeMockSpan({ parentSpanId: undefined });
       const dict = spanToDict(span);
       expect(dict.parent_span_id).toBeNull();
@@ -915,7 +920,7 @@ describe('NeatlogsSpanProcessor', () => {
   // ── Framework span name normalization ─────────────────
 
   describe('_normalizeFrameworkSpanNames', () => {
-    it('should rename CrewAI task spans', () => {
+    it('should rename CrewAI task spans', async () => {
       const spans = [
         {
           name: 'Research market trends.task',
@@ -933,7 +938,7 @@ describe('NeatlogsSpanProcessor', () => {
       );
     });
 
-    it('should not rename non-task spans', () => {
+    it('should not rename non-task spans', async () => {
       const spans = [
         {
           name: 'some-span',

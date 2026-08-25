@@ -29,7 +29,7 @@ import type { Span as SdkSpan, SpanProcessor } from '@opentelemetry/sdk-trace-ba
 
 import { UnifiedAttributeProcessor } from './attribute-processor.js';
 import type { SpanDict } from './attribute-processor.js';
-import { applyMask } from './mask.js';
+import { getScheduledMask, scheduleMask } from './mask.js';
 import { getLogger } from './logger.js';
 import { applySessionAttributes } from './session.js';
 import { applyEndUserAttributes } from './end-user.js';
@@ -208,7 +208,6 @@ export function spanToDict(
 // ────────────────────────────────────────────────────────
 
 export interface NeatlogsSpanProcessorOptions {
-  sampleRate?: number;
   debug?: boolean;
   mask?: MaskFunction;
   /** Pre-built AttributeMapper. If not supplied, a default mapper is created. */
@@ -216,6 +215,8 @@ export interface NeatlogsSpanProcessorOptions {
   emitCompletionMarkers?: boolean;
   /** Treat every span on this processor's private provider as SDK-owned. */
   ownAllSpans?: boolean;
+  /** @internal Test/operational bound for user masking callbacks. */
+  maskTimeoutMs?: number;
 }
 
 // ────────────────────────────────────────────────────────
@@ -223,12 +224,12 @@ export interface NeatlogsSpanProcessorOptions {
 // ────────────────────────────────────────────────────────
 
 export class NeatlogsSpanProcessor implements SpanProcessor {
-  private readonly sampleRate: number;
   private readonly debug: boolean;
   private readonly mask: MaskFunction | undefined;
   private readonly unifiedProcessor: UnifiedAttributeProcessor;
   private readonly emitCompletionMarkers: boolean;
   private readonly ownAllSpans: boolean;
+  private readonly maskTimeoutMs: number | undefined;
 
   private perfStats: PerfStats;
   private _retrieversToSuppress: Set<string>;
@@ -236,6 +237,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   private _closingReason: string | null;
   private _closed: boolean;
   private _completionEligibleRoots: WeakSet<object>;
+  private _pendingMasks: Set<Promise<unknown>>;
 
   // File logging
   private _logRawSpansEnabled: boolean;
@@ -244,11 +246,11 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   private _processedLogStream: fs.WriteStream | null;
 
   constructor(opts: NeatlogsSpanProcessorOptions = {}) {
-    this.sampleRate = opts.sampleRate ?? 1.0;
     this.debug = opts.debug ?? false;
     this.mask = opts.mask;
     this.emitCompletionMarkers = opts.emitCompletionMarkers ?? true;
     this.ownAllSpans = opts.ownAllSpans ?? false;
+    this.maskTimeoutMs = opts.maskTimeoutMs;
 
     this.unifiedProcessor = new UnifiedAttributeProcessor(
       opts.mapper ?? new AttributeMapper(),
@@ -274,6 +276,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this._closingReason = null;
     this._closed = false;
     this._completionEligibleRoots = new WeakSet<object>();
+    this._pendingMasks = new Set<Promise<unknown>>();
   }
 
   // ── File logging init ─────────────────────────────────
@@ -449,8 +452,13 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this._activeSpans.delete(span.spanContext().spanId);
     if (this._closed) return;
 
-    // Skip internal completion markers — they only need to be exported as-is
+    // Completion markers contain root metadata and cross the same masking boundary.
     if (span.name === 'neatlogs.trace.complete') {
+      const markerData = spanToDict(span, { includeScope: true });
+      markerData.resource = { attributes: markerData.resource };
+      const result = scheduleMask(span as object, markerData, this.mask ?? null, this.maskTimeoutMs);
+      const pending = result.finally(() => this._pendingMasks.delete(pending));
+      this._pendingMasks.add(pending);
       return;
     }
 
@@ -472,11 +480,6 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         } catch (e) {
           logger.warn(`Failed to write span to raw log file: ${e}`);
         }
-      }
-
-      // Sample rate check
-      if (this.sampleRate < 1.0 && Math.random() > this.sampleRate) {
-        return;
       }
 
       // 2. Process and normalize attributes
@@ -636,23 +639,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       spanData = results[0] ?? spanData;
       this._resolveActualModelName(spanData);
 
-      // 7b. Apply mask — if mask returns null, drop the span entirely
-      const maskedSpanData = applyMask(spanData, this.mask ?? null);
-      if (maskedSpanData === null) {
-        // Mark the OTel span so the FilteringExporter can skip it
-        try {
-          const spanAttrs = (span as any).attributes ?? (span as any)._attributes;
-          if (spanAttrs != null) {
-            spanAttrs['neatlogs.dropped'] = true;
-          }
-        } catch {
-          // Best-effort — if write-back fails, span may still export
-        }
-        return;
-      }
-      spanData = maskedSpanData;
-
-      // 7c. Write normalized neatlogs.* attributes back to the OTel span
+      // 7b. Write normalized attributes back for downstream interoperability.
       const finalAttrs = (spanData.attributes ?? {}) as Record<string, any>;
       try {
         const spanAttrs = (span as any).attributes ?? (span as any)._attributes;
@@ -685,27 +672,21 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         }
       }
 
-      // 8. Log processed span dict (mask already applied in step 7b)
-      if (this._processedLogStream && !this._processedLogStream.destroyed) {
-        try {
-          this._processedLogStream.write(
-            JSON.stringify(spanData) + '\n',
-          );
-        } catch (e) {
-          logger.warn(`Failed to write span to processed log file: ${e}`);
+      // 7c. Mask asynchronously at the final Neatlogs export boundary.
+      const maskResult = scheduleMask(span as object, spanData, this.mask ?? null, this.maskTimeoutMs);
+      const pending = maskResult.then((maskedSpanData) => {
+        if (maskedSpanData === null) return;
+        if (this._processedLogStream && !this._processedLogStream.destroyed) {
+          try { this._processedLogStream.write(JSON.stringify(maskedSpanData) + '\n'); }
+          catch (e) { logger.warn(`Failed to write span to processed log file: ${e}`); }
         }
-      }
-
-      this.perfStats.spansExported += 1;
-
-      if (!span.parentSpanId) {
-        this._completionEligibleRoots.add(span as object);
-      }
-
-      // Emit completion marker when a root span ends
-      if (this.emitCompletionMarkers && !span.parentSpanId) {
-        this.emitCompletionMarker(span, traceId, resourceAttrs);
-      }
+        this.perfStats.spansExported += 1;
+        if (!span.parentSpanId) {
+          this._completionEligibleRoots.add(span as object);
+          if (this.emitCompletionMarkers) this.emitCompletionMarker(span, traceId, resourceAttrs);
+        }
+      }).finally(() => this._pendingMasks.delete(pending));
+      this._pendingMasks.add(pending);
     } finally {
       this.perfStats.onEndTime += performance.now() - startTime;
     }
@@ -975,10 +956,13 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   // ── forceFlush / shutdown ─────────────────────────────
 
   async forceFlush(): Promise<void> {
-    // Flushing is handled by BatchSpanProcessor downstream.
+    while (this._pendingMasks.size > 0) {
+      await Promise.allSettled([...this._pendingMasks]);
+    }
   }
 
   async shutdown(): Promise<void> {
+    await this.forceFlush();
     this._closed = true;
     this._logPerformanceStats();
 
@@ -987,6 +971,11 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
 
     await closeLogStream(this._processedLogStream, 'processed');
     this._processedLogStream = null;
+  }
+
+  async whenMaskComplete(span: ReadableSpan): Promise<boolean> {
+    const result = getScheduledMask(span as object);
+    return result ? (await result) !== null && !this._closed : false;
   }
 
   // ── Performance stats ─────────────────────────────────
@@ -1038,6 +1027,7 @@ export class CompletionMarkerSpanProcessor implements SpanProcessor {
   private closed = false;
   private deferring = false;
   private readonly deferredRoots: ReadableSpan[] = [];
+  private readonly pending = new Set<Promise<void>>();
 
   constructor(
     private readonly source: NeatlogsSpanProcessor,
@@ -1048,12 +1038,13 @@ export class CompletionMarkerSpanProcessor implements SpanProcessor {
 
   onEnd(span: ReadableSpan): void {
     if (this.closed || span.name === 'neatlogs.trace.complete' || span.parentSpanId) return;
-    if (!this.source.ownsSpan(span) || !this.source.isCompletionEligible(span)) return;
-    if (this.deferring) {
-      this.deferredRoots.push(span);
-      return;
-    }
-    this.emit(span);
+    if (!this.source.ownsSpan(span)) return;
+    const task = this.source.whenMaskComplete(span).then((eligible) => {
+      if (!eligible || this.closed) return;
+      if (this.deferring) this.deferredRoots.push(span);
+      else this.emit(span);
+    }).finally(() => this.pending.delete(task));
+    this.pending.add(task);
   }
 
   beginShutdown(): void {
@@ -1078,8 +1069,12 @@ export class CompletionMarkerSpanProcessor implements SpanProcessor {
     );
   }
 
-  async forceFlush(): Promise<void> {}
+  async forceFlush(): Promise<void> {
+    while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
+    this.emitDeferred();
+  }
   async shutdown(): Promise<void> {
+    await this.forceFlush();
     this.closed = true;
     this.deferredRoots.splice(0);
   }

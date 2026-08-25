@@ -14,7 +14,7 @@ describe('mask edge cases', () => {
   });
 
   describe('registerMask', () => {
-    it('should return incrementing keys', () => {
+    it('should return incrementing keys', async () => {
       const fn1 = (data: Record<string, any>) => data;
       const fn2 = (data: Record<string, any>) => data;
       const fn3 = (data: Record<string, any>) => data;
@@ -27,14 +27,14 @@ describe('mask edge cases', () => {
   });
 
   describe('applyMask', () => {
-    it('should return original data when mask returns undefined', () => {
+    it('should return original data when mask returns undefined', async () => {
       const mask = () => undefined as any;
       const spanData = { name: 'test', attributes: {} };
-      const result = applyMask(spanData, mask);
+      const result = await applyMask(spanData, mask);
       expect(result).toBe(spanData);
     });
 
-    it('should handle per-span mask that modifies attributes deeply', () => {
+    it('should handle per-span mask that modifies attributes deeply', async () => {
       const perSpanMask = (data: Record<string, any>) => {
         const copy = { ...data };
         copy.attributes = {
@@ -51,32 +51,32 @@ describe('mask edge cases', () => {
           'sensitive.data': 'secret-password',
         },
       };
-      const result = applyMask(spanData, null);
+      const result = await applyMask(spanData, null);
       expect(result.attributes['sensitive.data']).toBe('[REDACTED]');
     });
 
-    it('should handle mask that adds new attributes', () => {
+    it('should handle mask that adds new attributes', async () => {
       const mask = (data: Record<string, any>) => ({
         ...data,
         extra: 'added-by-mask',
       });
       const spanData = { name: 'test', attributes: {} };
-      const result = applyMask(spanData, mask);
+      const result = await applyMask(spanData, mask);
       expect(result.extra).toBe('added-by-mask');
     });
 
-    it('should handle mask that removes attributes', () => {
+    it('should handle mask that removes attributes', async () => {
       const mask = (data: Record<string, any>) => {
         const { secret, ...rest } = data;
         return rest;
       };
       const spanData = { name: 'test', secret: 'hidden', attributes: {} };
-      const result = applyMask(spanData, mask);
+      const result = await applyMask(spanData, mask);
       expect(result.secret).toBeUndefined();
       expect(result.name).toBe('test');
     });
 
-    it('should prefer per-span mask even when it returns the same data', () => {
+    it('should prefer per-span mask even when it returns the same data', async () => {
       let perSpanCalled = false;
       let globalCalled = false;
 
@@ -94,27 +94,27 @@ describe('mask edge cases', () => {
         name: 'test',
         attributes: { 'neatlogs.mask_id': maskId },
       };
-      applyMask(spanData, globalMask);
+      await applyMask(spanData, globalMask);
       expect(perSpanCalled).toBe(true);
       expect(globalCalled).toBe(false);
     });
 
-    it('should handle spanData with missing attributes key', () => {
+    it('should handle spanData with missing attributes key', async () => {
       const mask = (data: Record<string, any>) => data;
       const spanData = { name: 'test' } as any;
-      const result = applyMask(spanData, mask);
+      const result = await applyMask(spanData, mask);
       expect(result).toBe(spanData);
     });
 
-    it('should handle null spanData gracefully', () => {
+    it('should handle null spanData gracefully', async () => {
       // applyMask checks spanData?.attributes, so null is handled
-      const result = applyMask(null as any, null);
+      const result = await applyMask(null as any, null);
       expect(result).toBeNull();
     });
   });
 
   describe('_clearMaskRegistry', () => {
-    it('should reset ID counter so new masks start from 1', () => {
+    it('should reset ID counter so new masks start from 1', async () => {
       registerMask((d) => d);
       registerMask((d) => d);
       _clearMaskRegistry();
