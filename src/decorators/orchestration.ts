@@ -26,7 +26,7 @@ const logger = getLogger();
 export function span<TArgs extends any[], TReturn>(
   options: SpanOptions,
   fn: (...args: TArgs) => TReturn,
-): (...args: TArgs) => TReturn extends Promise<any> ? TReturn : Promise<Awaited<TReturn>> {
+): (...args: TArgs) => TReturn {
   // Validate kind
   if (!VALID_SPAN_KINDS.has(options.kind)) {
     throw new Error(

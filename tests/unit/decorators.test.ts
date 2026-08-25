@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   safeJsonDumps,
   serializeObj,
-  shouldCaptureContent,
   setCommonSpanAttrs,
   decorateSpan,
 } from '../../src/decorators/base.js';
@@ -18,6 +17,7 @@ function createMockSpan() {
     setStatus: vi.fn(),
     end: vi.fn(),
     recordException: vi.fn(),
+    addEvent: vi.fn(),
     _attrs: {} as Record<string, any>,
   };
 }
@@ -54,6 +54,102 @@ vi.mock('@opentelemetry/api', () => {
       ERROR: 2,
     },
   };
+});
+
+describe('stream and thenable lifecycle', () => {
+  beforeEach(() => { mockSpan = createMockSpan(); });
+
+  it('awaits PromiseLike values and ends exactly once', async () => {
+    const thenable = { then: (resolve: (value: string) => void) => resolve('thenable-ok') };
+    const result = await decorateSpan({ kind: 'CHAIN' }, () => thenable as PromiseLike<string>)();
+    expect(result).toBe('thenable-ok');
+    expect(mockSpan.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('records early iterator return with partial output', async () => {
+    async function* source() { yield 'first'; yield 'second'; }
+    const iterator = decorateSpan({ kind: 'LLM' }, () => source())();
+    expect(await iterator.next()).toEqual({ value: 'first', done: false });
+    await iterator.return('stopped');
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.llm.stream.completion_state', 'consumer_cancelled',
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('output.value', '["first"]');
+    expect(mockSpan.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('records provider iterator errors with partial output', async () => {
+    const source = {
+      [Symbol.asyncIterator]() {
+        let call = 0;
+        return { next: async () => call++ === 0 ? { done: false, value: 'partial' } :
+          Promise.reject(new Error('provider failed')) };
+      },
+    };
+    const iterator = decorateSpan({ kind: 'LLM' }, () => source)()[Symbol.asyncIterator]();
+    await iterator.next();
+    await expect(iterator.next()).rejects.toThrow('provider failed');
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.llm.stream.completion_state', 'provider_error',
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('output.value', '["partial"]');
+    expect(mockSpan.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends a reader lifecycle exactly once on releaseLock', async () => {
+    const stream = new ReadableStream({ start(controller) { controller.enqueue('chunk'); } });
+    const wrapped = decorateSpan({ kind: 'LLM' }, () => stream)();
+    const reader = wrapped.getReader();
+    await reader.read();
+    reader.releaseLock();
+    expect(mockSpan.end).toHaveBeenCalledTimes(1);
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.llm.stream.completion_state', 'consumer_cancelled',
+    );
+  });
+
+  it('covers iterator throw and completed iteration states', async () => {
+    const target = {
+      next: vi.fn().mockResolvedValue({ done: true, value: 'final' }),
+      throw: vi.fn().mockResolvedValue({ done: true, value: 'recovered' }),
+      [Symbol.asyncIterator]() { return this; },
+    };
+    const iterator = decorateSpan({ kind: 'LLM' }, () => target)();
+    expect(await iterator.throw(new Error('consumer signal'))).toEqual({ done: true, value: 'recovered' });
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.llm.stream.completion_state', 'complete',
+    );
+    expect(mockSpan.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports stream cancel and pipeThrough without duplicate endings', async () => {
+    const cancelled = decorateSpan({ kind: 'LLM' }, () => new ReadableStream())();
+    await cancelled.cancel('consumer stopped');
+    expect(mockSpan.end).toHaveBeenCalledTimes(1);
+
+    mockSpan = createMockSpan();
+    const source = new ReadableStream({ start(controller) { controller.enqueue('x'); controller.close(); } });
+    const transformed = decorateSpan({ kind: 'LLM' }, () => source)().pipeThrough(
+      new TransformStream({ transform(chunk, controller) { controller.enqueue(chunk); } }),
+    );
+    await transformed.pipeTo(new WritableStream());
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.llm.stream.completion_state', 'complete',
+    );
+    expect(mockSpan.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mutate or re-end a span after the shutdown cutoff', async () => {
+    let recording = true;
+    (mockSpan as any).isRecording = () => recording;
+    async function* source() { yield 'late'; }
+    const iterator = decorateSpan({ kind: 'LLM' }, () => source())();
+    recording = false;
+    await iterator.next();
+    await iterator.next();
+    expect(mockSpan.setStatus).not.toHaveBeenCalled();
+    expect(mockSpan.end).not.toHaveBeenCalled();
+  });
 });
 
 beforeEach(() => {
@@ -149,50 +245,6 @@ describe('serializeObj', () => {
   });
 });
 
-// ─── shouldCaptureContent ──────────────────────────────────────────────────────
-
-describe('shouldCaptureContent', () => {
-  const origEnv = process.env.NEATLOGS_TRACE_CONTENT;
-
-  afterEach(() => {
-    if (origEnv === undefined) {
-      delete process.env.NEATLOGS_TRACE_CONTENT;
-    } else {
-      process.env.NEATLOGS_TRACE_CONTENT = origEnv;
-    }
-  });
-
-  it('should return true when env var is not set', () => {
-    delete process.env.NEATLOGS_TRACE_CONTENT;
-    expect(shouldCaptureContent()).toBe(true);
-  });
-
-  it('should return true when env var is empty', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = '';
-    expect(shouldCaptureContent()).toBe(true);
-  });
-
-  it('should return false when env var is "false"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = 'false';
-    expect(shouldCaptureContent()).toBe(false);
-  });
-
-  it('should return false when env var is "0"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = '0';
-    expect(shouldCaptureContent()).toBe(false);
-  });
-
-  it('should return false when env var is "FALSE"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = 'FALSE';
-    expect(shouldCaptureContent()).toBe(false);
-  });
-
-  it('should return true when env var is "true"', () => {
-    process.env.NEATLOGS_TRACE_CONTENT = 'true';
-    expect(shouldCaptureContent()).toBe(true);
-  });
-});
-
 // ─── setCommonSpanAttrs ────────────────────────────────────────────────────────
 
 describe('setCommonSpanAttrs', () => {
@@ -237,7 +289,6 @@ describe('setCommonSpanAttrs', () => {
 describe('decorateSpan', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should wrap a sync function and capture input/output', () => {
@@ -384,7 +435,6 @@ describe('decorateSpan', () => {
 describe('span()', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should throw for invalid span kind', () => {
@@ -618,7 +668,6 @@ describe('retrieverPostprocessor', () => {
 describe('span() with RETRIEVER', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should use retrieverPostprocessor for RETRIEVER kind', () => {

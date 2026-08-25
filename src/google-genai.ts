@@ -7,7 +7,7 @@
  * (see `wrapVertexAI`, which is the same SDK in `vertexai: true` mode).
  *
  * Mirrors Python's `neatlogs.wrap(genai.Client())`. If you prefer zero-code
- * instrumentation, pass `instrumentations: ['google_genai']` to `init()` instead.
+ * integration; initialize Neatlogs and wrap the Google client explicitly.
  *
  * Usage:
  *   import { wrapGoogleGenAI } from 'neatlogs/google-genai';
