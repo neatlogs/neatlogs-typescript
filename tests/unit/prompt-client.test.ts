@@ -304,6 +304,15 @@ describe('Shared client', () => {
     setSharedClient(client);
     expect(getSharedClient()).toBe(client);
   });
+
+  it('clears and removes the shared client', () => {
+    const client = new PromptClient({ baseUrl: 'http://example.com', apiKey: 'test-key' });
+    const clear = vi.spyOn(client, 'clearCache');
+    setSharedClient(client);
+    setSharedClient(null);
+    expect(clear).toHaveBeenCalled();
+    expect(() => getSharedClient()).toThrow('No prompt client available');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -345,7 +354,7 @@ describe('PromptClient', () => {
 
       const calledOptions = mockFetch.mock.calls[0][1] as RequestInit;
       const headers = calledOptions.headers as Record<string, string>;
-      expect(headers['Authorization']).toBe('Bearer test-api-key');
+      expect(headers['Authorization']).toBeUndefined();
       expect(headers['x-api-key']).toBe('test-api-key');
       expect(headers['Content-Type']).toBe('application/json');
     });
@@ -413,6 +422,64 @@ describe('PromptClient', () => {
       // Should only have fetched once due to caching
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
+
+    it('deduplicates concurrent fetches and cleans inflight state', async () => {
+      let resolveFetch!: (value: any) => void;
+      const mockFetch = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve; }));
+      vi.stubGlobal('fetch', mockFetch);
+      const first = client.getPrompt('dedupe');
+      const second = client.getPrompt('dedupe');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      resolveFetch({ ok: true, json: async () => ({ items: [
+        { id: '1', name: 'dedupe', version: 1, content: 'ok', createdAt: '1' },
+      ] }) });
+      await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+      expect((client as any)._inflight.size).toBe(0);
+    });
+
+    it('force refresh bypasses a fresh cache entry', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [
+        { id: '1', name: 'refresh', version: 1, content: 'ok', createdAt: '1' },
+      ] }) });
+      vi.stubGlobal('fetch', mockFetch);
+      await client.getPrompt('refresh');
+      await client.getPrompt('refresh', { forceRefresh: true });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('serves stale once while one background revalidation runs', async () => {
+      client = new PromptClient({ baseUrl: 'https://api.test.com', apiKey: 'key', cacheTtlMs: 0, staleWhileRevalidateMs: 10_000 });
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [
+        { id: '1', name: 'swr', version: 1, content: 'ok', createdAt: '1' },
+      ] }) });
+      vi.stubGlobal('fetch', mockFetch);
+      await client.getPrompt('swr');
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      await Promise.all([client.getPrompt('swr'), client.getPrompt('swr')]);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('bounds the cache with LRU eviction', async () => {
+      client = new PromptClient({ baseUrl: 'https://api.test.com', apiKey: 'key', maxCacheEntries: 2 });
+      vi.stubGlobal('fetch', vi.fn((_url: string) => Promise.resolve({ ok: true, json: async () => ({ items: [
+        { id: '1', name: 'item', version: 1, content: 'ok', createdAt: '1' },
+      ] }) })));
+      await client.getPrompt('one');
+      await client.getPrompt('two');
+      await client.getPrompt('one');
+      await client.getPrompt('three');
+      expect([...(client as any)._cache.keys()]).toEqual(['one::', 'three::']);
+    });
+  });
+
+  it('aborts a request at the configured timeout without retrying', async () => {
+    const mockFetch = vi.fn((_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(options.signal?.reason));
+    }));
+    vi.stubGlobal('fetch', mockFetch);
+    client = new PromptClient({ baseUrl: 'https://api.test.com', apiKey: 'key', requestTimeoutMs: 10 });
+    await expect(client.fetchPrompt('timeout')).rejects.toThrow();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   describe('fetchPrompt', () => {

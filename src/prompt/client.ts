@@ -208,7 +208,21 @@ export class PromptHandle {
 export interface PromptClientOptions {
   baseUrl: string;
   apiKey: string;
+  cacheTtlMs?: number;
+  staleWhileRevalidateMs?: number;
+  maxCacheEntries?: number;
+  requestTimeoutMs?: number;
 }
+
+export interface GetPromptOptions {
+  version?: number;
+  label?: string;
+  forceRefresh?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+interface CacheEntry { prompt: CachedPrompt; cachedAt: number; }
 
 /**
  * Prompt client for Neatlogs managed prompts.
@@ -219,11 +233,20 @@ export interface PromptClientOptions {
 export class PromptClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
-  private readonly _cache: Map<string, CachedPrompt> = new Map();
+  private readonly _cache = new Map<string, CacheEntry>();
+  private readonly _inflight = new Map<string, Promise<PromptHandle>>();
+  private readonly cacheTtlMs: number;
+  private readonly staleWhileRevalidateMs: number;
+  private readonly maxCacheEntries: number;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: PromptClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.apiKey = options.apiKey;
+    this.cacheTtlMs = options.cacheTtlMs ?? 60_000;
+    this.staleWhileRevalidateMs = options.staleWhileRevalidateMs ?? 300_000;
+    this.maxCacheEntries = options.maxCacheEntries ?? 100;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
   }
 
   // ---- public API ----------------------------------------------------------
@@ -234,7 +257,7 @@ export class PromptClient {
    */
   async getPrompt(
     name: string,
-    options?: { version?: number; label?: string },
+    options?: GetPromptOptions,
   ): Promise<PromptHandle> {
     const version = options?.version;
     const label = options?.label;
@@ -245,12 +268,29 @@ export class PromptClient {
 
     const cacheKey = `${name}:${label ?? ''}:${version ?? ''}`;
     const cached = this._cache.get(cacheKey);
-    if (cached) {
-      return new PromptHandle(cached);
+    const age = cached ? Date.now() - cached.cachedAt : Infinity;
+    if (cached && !options?.forceRefresh && age <= this.cacheTtlMs) {
+      this._touch(cacheKey, cached);
+      return new PromptHandle(cached.prompt);
     }
+    if (cached && !options?.forceRefresh && age <= this.cacheTtlMs + this.staleWhileRevalidateMs) {
+      this._touch(cacheKey, cached);
+      void this._fetchOnce(cacheKey, name, options).catch(() => undefined);
+      return new PromptHandle(cached.prompt);
+    }
+    return this._fetchOnce(cacheKey, name, options);
+  }
 
-    const handle = await this.fetchPrompt(name, options);
-    this._cache.set(cacheKey, {
+  clearCache(): void {
+    this._cache.clear();
+    this._inflight.clear();
+  }
+
+  private _fetchOnce(cacheKey: string, name: string, options?: GetPromptOptions): Promise<PromptHandle> {
+    const existing = this._inflight.get(cacheKey);
+    if (existing) return existing;
+    const request = this.fetchPrompt(name, options).then((handle) => {
+      const prompt: CachedPrompt = {
       id: handle.id,
       name: handle.name,
       version: handle.version,
@@ -260,8 +300,26 @@ export class PromptClient {
       labels: handle.labels,
       updatedAt: handle.updatedAt,
       type: handle.type as 'text' | 'chat',
-    });
-    return handle;
+      };
+      this._cache.set(cacheKey, { prompt, cachedAt: Date.now() });
+      this._evict();
+      return handle;
+    }).finally(() => this._inflight.delete(cacheKey));
+    this._inflight.set(cacheKey, request);
+    return request;
+  }
+
+  private _touch(key: string, entry: CacheEntry): void {
+    this._cache.delete(key);
+    this._cache.set(key, entry);
+  }
+
+  private _evict(): void {
+    while (this._cache.size > this.maxCacheEntries) {
+      const oldest = this._cache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this._cache.delete(oldest);
+    }
   }
 
   /**
@@ -269,7 +327,7 @@ export class PromptClient {
    */
   async fetchPrompt(
     name: string,
-    options?: { version?: number; label?: string },
+    options?: GetPromptOptions,
   ): Promise<PromptHandle> {
     const version = options?.version;
     const label = options?.label;
@@ -277,13 +335,14 @@ export class PromptClient {
     if (label != null) {
       const path = `/api/v1/prompts/${encodeURIComponent(name)}/fetch`;
       const url = `${path}?label=${encodeURIComponent(label)}`;
-      const payload = await this._request(url);
+      const payload = await this._request(url, { signal: options?.signal }, options?.timeoutMs);
       return new PromptHandle(normalizePromptObject(payload));
     }
 
     // List all versions, find the right one
     const listing = await this._request(
       `/api/managed-prompts?name=${encodeURIComponent(name)}&limit=100&offset=0`,
+      { signal: options?.signal }, options?.timeoutMs,
     );
     const items: Record<string, any>[] = listing['items'] ?? [];
 
@@ -417,20 +476,24 @@ export class PromptClient {
   /**
    * Internal fetch wrapper with auth headers and OTel suppression.
    */
-  async _request(path: string, options?: RequestInit): Promise<any> {
+  async _request(path: string, options?: RequestInit, timeoutMs = this.requestTimeoutMs): Promise<any> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${this.apiKey}`,
       'x-api-key': this.apiKey,
       ...(options?.headers as Record<string, string> | undefined),
     };
 
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort(options?.signal?.reason);
+    options?.signal?.addEventListener('abort', relayAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(new Error('Prompt request timed out')), timeoutMs);
     const fetchOptions: RequestInit = {
       method: options?.method ?? 'GET',
       headers,
       body: options?.body,
+      signal: controller.signal,
     };
 
     // Suppress OTel instrumentation on our own HTTP calls so they don't
@@ -439,9 +502,9 @@ export class PromptClient {
     try {
       const suppressedContext = suppressTracing(context.active());
       response = await context.with(suppressedContext, () => fetch(url, fetchOptions));
-    } catch {
-      // If OTel is not available, fall through to plain fetch
-      response = await fetch(url, fetchOptions);
+    } finally {
+      clearTimeout(timer);
+      options?.signal?.removeEventListener('abort', relayAbort);
     }
 
     if (!response.ok) {
@@ -466,7 +529,8 @@ export class PromptClient {
 let _sharedClient: PromptClient | null = null;
 
 /** Set the module-level shared prompt client (called by init()). */
-export function setSharedClient(client: PromptClient): void {
+export function setSharedClient(client: PromptClient | null): void {
+  _sharedClient?.clearCache();
   _sharedClient = client;
 }
 
@@ -486,14 +550,14 @@ export function getSharedClient(): PromptClient {
 
 export async function getPrompt(
   name: string,
-  options?: { version?: number; label?: string },
+  options?: GetPromptOptions,
 ): Promise<PromptHandle> {
   return getSharedClient().getPrompt(name, options);
 }
 
 export async function fetchPrompt(
   name: string,
-  options?: { version?: number; label?: string },
+  options?: GetPromptOptions,
 ): Promise<PromptHandle> {
   return getSharedClient().fetchPrompt(name, options);
 }
