@@ -52,4 +52,50 @@ describe('doctor v2 local envelope', () => {
     expect(result.first_failure).toBe('PARENT_MISSING');
     expect(result.checks.map((check) => check.reason_code)).toEqual(expect.arrayContaining(['PARENT_MISSING', 'PAYLOAD_ATTACHMENT_REQUIRED', 'SAMPLING_INCONSISTENT']));
   });
+
+  it('warns on an LLM latency outlier while exempting the first cold call', () => {
+    const value = envelope();
+    const root = value.spans[0]!;
+    const llmSpans = [100_000_000, 110_000_000, 900_000_000].map((duration_ns, index) => ({
+      span_id: `${index + 6}`.repeat(16),
+      parent_span_id: root.span_id,
+      name: 'doctor.chat',
+      kind: 'LLM',
+      status: 'OK',
+      duration_ns,
+      start_time_ns: index + 1,
+      attributes: { 'gen_ai.operation.name': 'chat' },
+      sampled: true,
+      ended: true,
+    }));
+    const result = doctorLocalV2({ ...value, spans: [root, ...llmSpans] });
+    expect(result.status).toBe('warn');
+    expect(result.first_failure).toBeNull();
+    expect(result.checks.find((check) => check.reason_code === 'LATENCY_OUTLIER')).toMatchObject({ status: 'warn', remediation_code: 'INVESTIGATE_SLOW_OPERATION' });
+
+    const coldStart = doctorLocalV2({ ...value, spans: [root, ...llmSpans.map((span, index) => ({ ...span, duration_ns: index === 0 ? 900_000_000 : 100_000_000 }))] });
+    expect(coldStart.checks.some((check) => check.reason_code === 'LATENCY_OUTLIER')).toBe(false);
+  });
+
+  it('reports one rate-limit warning per affected span', () => {
+    const value = envelope();
+    const spans = value.spans.map((span, index) => index === 1
+      ? { ...span, attributes: { 'http.response.status_code': 429, 'error.type': 'rate_limit_exceeded' } }
+      : span);
+    const result = doctorLocalV2({ ...value, spans });
+    expect(result.checks.filter((check) => check.reason_code === 'RATE_LIMITED')).toHaveLength(1);
+  });
+
+  it('keeps PII detection opt-in and never includes matched values', () => {
+    const value = envelope();
+    const secret = 'person@example.com';
+    const spans = value.spans.map((span, index) => index === 1
+      ? { ...span, attributes: { nested: { contact: secret } } }
+      : span);
+    expect(doctorLocalV2({ ...value, spans }).checks.some((check) => check.reason_code === 'PII_DETECTED')).toBe(false);
+    const result = doctorLocalV2({ ...value, spans }, { checkPii: true });
+    const finding = result.checks.find((check) => check.reason_code === 'PII_DETECTED');
+    expect(finding).toMatchObject({ status: 'warn', details: { categories: 'email' } });
+    expect(JSON.stringify(finding)).not.toContain(secret);
+  });
 });
