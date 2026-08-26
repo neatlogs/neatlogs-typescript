@@ -60,7 +60,10 @@ export class FilteringExporter implements SpanExporter {
   private _exportFailures = 0;
   private _droppedSpans = 0;
 
-  constructor(private readonly _delegate: SpanExporter) {}
+  constructor(
+    private readonly _delegate: SpanExporter,
+    private readonly _onPrepared?: (spans: readonly ReadableSpan[]) => void,
+  ) {}
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     void Promise.all(spans.map(async (span) => {
@@ -72,6 +75,10 @@ export class FilteringExporter implements SpanExporter {
     })).then((prepared) => {
       const filtered = prepared.filter((span): span is ReadableSpan => span !== null);
       this._droppedSpans += prepared.length - filtered.length;
+      // This is the final masked and filtered boundary. Doctor v2 can observe
+      // the exact exportable batch here without receiving credentials or
+      // mutating the spans passed to the transport exporter.
+      this._onPrepared?.(Object.freeze([...filtered]));
       if (filtered.length === 0) return resultCallback({ code: ExportResultCode.SUCCESS });
       this._delegate.export(filtered, (result) => {
         if (result.code === ExportResultCode.FAILED) this._exportFailures += 1;
