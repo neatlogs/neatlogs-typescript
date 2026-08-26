@@ -26,9 +26,13 @@ import type { MaskFunction } from '../../src/types.js';
  * FilteringExporter wrapper then filters out those spans before they
  * reach the InMemorySpanExporter.
  */
-function makeIsolatedProvider(mask?: MaskFunction, maskTimeoutMs?: number) {
+function makeIsolatedProvider(
+  mask?: MaskFunction,
+  maskTimeoutMs?: number,
+  onPrepared?: ConstructorParameters<typeof FilteringExporter>[1],
+) {
   const memExporter = new InMemorySpanExporter();
-  const filteringExporter = new FilteringExporter(memExporter);
+  const filteringExporter = new FilteringExporter(memExporter, onPrepared);
   const provider = new NodeTracerProvider();
   const neatlogsProcessor = new NeatlogsSpanProcessor({ mask, maskTimeoutMs, debug: false });
   provider.addSpanProcessor(neatlogsProcessor);
@@ -99,6 +103,25 @@ describe('MaskFunction null-return: "drop span" behaviour', () => {
     expect(target!.attributes['original.attr']).toBe('[REDACTED]');
     expect(applicationValue.secret).toBe('sentinel-secret');
 
+    await provider.shutdown();
+    _clearMaskRegistry();
+  });
+
+  it('doctor capture observes only the final masked export batch', async () => {
+    const observed: string[] = [];
+    const mask: MaskFunction = (spanData) => ({
+      ...spanData,
+      attributes: { ...spanData.attributes, secret: '[REDACTED]' },
+    });
+    const { provider } = makeIsolatedProvider(mask, undefined, (spans) => {
+      observed.push(...spans.map((span) => String(span.attributes.secret)));
+    });
+    const span = provider.getTracer('doctor-capture').startSpan('capture');
+    span.setAttribute('secret', 'must-not-be-observed');
+    span.end();
+    await provider.forceFlush();
+    expect(observed).toEqual(['[REDACTED]']);
+    expect(JSON.stringify(observed)).not.toContain('must-not-be-observed');
     await provider.shutdown();
     _clearMaskRegistry();
   });
