@@ -36,6 +36,15 @@ function maskedReadableSpan(span: ReadableSpan, data: Record<string, any>): Read
   return {
     ...span,
     name: typeof data.name === 'string' ? data.name : span.name,
+    kind: span.kind,
+    startTime: span.startTime,
+    endTime: span.endTime,
+    duration: span.duration,
+    links: span.links,
+    droppedAttributesCount: span.droppedAttributesCount,
+    droppedEventsCount: span.droppedEventsCount,
+    droppedLinksCount: span.droppedLinksCount,
+    instrumentationLibrary: span.instrumentationLibrary,
     spanContext: () => span.spanContext(),
     parentSpanId: data.parent_span_id === null ? undefined :
       typeof data.parent_span_id === 'string' ? data.parent_span_id : span.parentSpanId,
@@ -78,7 +87,11 @@ export class FilteringExporter implements SpanExporter {
       // This is the final masked and filtered boundary. Doctor v2 can observe
       // the exact exportable batch here without receiving credentials or
       // mutating the spans passed to the transport exporter.
-      this._onPrepared?.(Object.freeze([...filtered]));
+      try {
+        this._onPrepared?.(Object.freeze([...filtered]));
+      } catch {
+        // Diagnostic observation must never affect application telemetry.
+      }
       if (filtered.length === 0) return resultCallback({ code: ExportResultCode.SUCCESS });
       this._delegate.export(filtered, (result) => {
         if (result.code === ExportResultCode.FAILED) this._exportFailures += 1;
