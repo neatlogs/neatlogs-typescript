@@ -101,6 +101,7 @@ export {
 export {
   DOCTOR_V2_FORMAT_VERSION,
   doctorLocalV2,
+  doctorCapturedLocalV2,
   doctorSemanticDigest,
 } from './doctor-v2.js';
 export type {

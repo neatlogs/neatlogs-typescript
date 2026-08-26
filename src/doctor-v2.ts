@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { TELEMETRY_SCHEMA_VERSION } from './schema-v2.js';
 import { __version__ } from './version.js';
+import { getCapturedEnvelope } from './core/doctor-capture.js';
+import { _doctorRuntimeSnapshot } from './init.js';
 
 export const DOCTOR_V2_FORMAT_VERSION = 'neatlogs.doctor/v2' as const;
 
@@ -64,8 +66,8 @@ export type DoctorV2Result = Readonly<{
   }>;
   sampling: Readonly<{ effective_sampler: string; consistent: boolean }>;
   ownership: Readonly<{ provider: 'private' | 'ambiguous' }>;
-  queue: Readonly<{ mode: 'diagnostic_capture'; dropped_spans: number }>;
-  retry: Readonly<{ attempts: 0; window_ms: 0 }>;
+  queue: Readonly<{ mode: 'batch' | 'disabled'; max_size: number; dropped_spans: number }>;
+  retry: Readonly<{ observable: false; attempts: null; window_ms: null }>;
   flush: Readonly<{ outcome: 'success' | 'timeout' | 'failed'; timeout_ms: number }>;
   checks: readonly DoctorV2Check[];
 }>;
@@ -247,7 +249,7 @@ function jsonSafe(value: unknown): boolean {
 /** Validate the finished, masked, normalized envelope captured before network send. */
 export function doctorLocalV2(
   envelope: DiagnosticEnvelope,
-  options: Readonly<{ flushOutcome?: 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; privateProvider?: boolean; checkPii?: boolean }> = {},
+  options: Readonly<{ flushOutcome?: 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; privateProvider?: boolean; checkPii?: boolean; effectiveSampler?: string; queueMode?: 'batch' | 'disabled'; queueMaxSize?: number; droppedSpans?: number }> = {},
 ): DoctorV2Result {
   const checks: DoctorV2Check[] = [];
   if (!TRACE_ID.test(envelope.trace_id)) checks.push(failure('trace_id', 'TRACE_ID_INVALID', 'Trace ID must be 32 lowercase hexadecimal characters'));
@@ -294,11 +296,30 @@ export function doctorLocalV2(
     first_failure: first?.reason_code ?? null,
     runtime: Object.freeze({ language: 'typescript', sdk_version: __version__, schema_version: String(TELEMETRY_SCHEMA_VERSION), transport: 'otlp_http_protobuf' }),
     ...(digest && TRACE_ID.test(envelope.trace_id) && SPAN_ID.test(envelope.root_span_id) ? { capture: Object.freeze({ trace_id: envelope.trace_id, root_span_id: envelope.root_span_id, span_count: envelope.spans.length, semantic_digest: digest }) } : {}),
-    sampling: Object.freeze({ effective_sampler: 'parentbased_traceidratio', consistent: sampling.size <= 1 }),
+    sampling: Object.freeze({ effective_sampler: options.effectiveSampler ?? 'parentbased_traceidratio', consistent: sampling.size <= 1 }),
     ownership: Object.freeze({ provider: options.privateProvider === false ? 'ambiguous' : 'private' }),
-    queue: Object.freeze({ mode: 'diagnostic_capture', dropped_spans: 0 }),
-    retry: Object.freeze({ attempts: 0 as const, window_ms: 0 as const }),
+    queue: Object.freeze({ mode: options.queueMode ?? 'batch', max_size: options.queueMaxSize ?? 2_048, dropped_spans: options.droppedSpans ?? 0 }),
+    retry: Object.freeze({ observable: false as const, attempts: null, window_ms: null }),
     flush: Object.freeze({ outcome: flushOutcome, timeout_ms: options.flushTimeoutMs ?? 5_000 }),
     checks: Object.freeze(checks),
+  });
+}
+
+/** Inspect the latest trace captured at the final masked export boundary. */
+export function doctorCapturedLocalV2(
+  options: Readonly<{ traceId?: string; flushOutcome?: 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; checkPii?: boolean }> = {},
+): DoctorV2Result | null {
+  const envelope = getCapturedEnvelope(options.traceId);
+  if (!envelope) return null;
+  const runtime = _doctorRuntimeSnapshot();
+  return doctorLocalV2(envelope, {
+    flushOutcome: options.flushOutcome,
+    flushTimeoutMs: options.flushTimeoutMs,
+    privateProvider: runtime.ownsTracerProvider,
+    effectiveSampler: runtime.effectiveSampler,
+    queueMode: runtime.exportEnabled ? 'batch' : 'disabled',
+    queueMaxSize: runtime.queueMaxSize,
+    droppedSpans: runtime.exportHealth?.droppedSpans ?? 0,
+    checkPii: options.checkPii,
   });
 }
