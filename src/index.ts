@@ -98,6 +98,17 @@ export {
   TELEMETRY_SCHEMA_V2,
   TELEMETRY_CONFLICT_PRECEDENCE,
 } from './schema-v2.js';
+export {
+  DOCTOR_V2_FORMAT_VERSION,
+  doctorLocalV2,
+  doctorSemanticDigest,
+} from './doctor-v2.js';
+export type {
+  DiagnosticEnvelope,
+  DiagnosticSpan,
+  DoctorV2Check,
+  DoctorV2Result,
+} from './doctor-v2.js';
 
 // Types
 export type {
