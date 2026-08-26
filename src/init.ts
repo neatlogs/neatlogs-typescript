@@ -31,6 +31,7 @@ import {
 import { addVerificationMarkerResourceAttribute } from './core/resource.js';
 import { getRegisteredClients } from './core/client-registry.js';
 import { FilteringExporter } from './core/filtering-exporter.js';
+import { capturePreparedSpans, clearDoctorCapture } from './core/doctor-capture.js';
 import { _setOtelLogger } from './core/log.js';
 import { _setSessionConfig } from './core/context.js';
 import { _setNeatlogsProvider } from './core/provider.js';
@@ -58,6 +59,9 @@ let _transportSpanProcessors: SpanProcessor[] = [];
 let _completionProcessor: CompletionMarkerSpanProcessor | null = null;
 let _filteringExporter: FilteringExporter | null = null;
 let _debugMode = false;
+let _effectiveSampleRate = 1;
+let _exportEnabled = false;
+let _queueMaxSize = 2_048;
 // Retained so shutdown() can disable the instrumentors it installed; otherwise a
 // stale instrumentor stays bound to the shut-down provider after reinit.
 
@@ -157,6 +161,9 @@ export function init(options: InitOptions = {}): Promise<void> {
 
 async function _performInit(options: InitOptions): Promise<void> {
 
+  // A new runtime must not diagnose envelopes from a previous initialization.
+  clearDoctorCapture();
+
   const sampleRate = options.sampleRate ?? 1.0;
   if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
     throw new RangeError('sampleRate must be a finite number between 0 and 1.');
@@ -192,6 +199,9 @@ async function _performInit(options: InitOptions): Promise<void> {
       );
     }
   }
+  _effectiveSampleRate = sampleRate;
+  _exportEnabled = !disableExportResolved;
+  _queueMaxSize = 2_048;
 
   // 4. Debug mode
   if (options.debug) {
@@ -288,6 +298,7 @@ async function _performInit(options: InitOptions): Promise<void> {
         url: tracesEndpoint,
         headers: { 'x-api-key': resolvedKey },
       }),
+      capturePreparedSpans,
     );
     _filteringExporter = otlpExporter;
 
@@ -608,6 +619,9 @@ async function _performShutdown(terminationReason: string): Promise<boolean> {
   _filteringExporter = null;
   setSharedClient(null);
   _debugMode = false;
+  _effectiveSampleRate = 1;
+  _exportEnabled = false;
+  _queueMaxSize = 2_048;
   _signalShutdownStarted = false;
 
   // Reset session config
@@ -656,11 +670,17 @@ export function _doctorRuntimeSnapshot(): Readonly<{
   initialized: boolean;
   ownsTracerProvider: boolean;
   exportHealth: { droppedSpans: number; exportFailures: number } | null;
+  effectiveSampler: string;
+  exportEnabled: boolean;
+  queueMaxSize: number;
 }> {
   return {
     state: _lifecycleState,
     initialized: _initialized,
     ownsTracerProvider: _ownsTracerProvider,
     exportHealth: _filteringExporter?.health() ?? null,
+    effectiveSampler: `parentbased_traceidratio:${_effectiveSampleRate}`,
+    exportEnabled: _exportEnabled,
+    queueMaxSize: _queueMaxSize,
   };
 }
