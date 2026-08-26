@@ -25,6 +25,9 @@ export type DiagnosticSpan = Readonly<{
   payload_references?: readonly Readonly<{ digest: string; size: number; mime_type: string }>[];
   sampled?: boolean;
   ended?: boolean;
+  start_time_ns?: number;
+  duration_ns?: number;
+  attributes?: Readonly<Record<string, unknown>>;
 }>;
 
 export type DiagnosticEnvelope = Readonly<{
@@ -90,6 +93,9 @@ const remediation: Readonly<Record<string, string>> = Object.freeze({
   SAMPLING_INCONSISTENT: 'FIX_PARENT_BASED_SAMPLING',
   FLUSH_TIMEOUT: 'INCREASE_FLUSH_BUDGET',
   PROVIDER_OWNERSHIP_AMBIGUOUS: 'USE_PRIVATE_PROVIDER',
+  LATENCY_OUTLIER: 'INVESTIGATE_SLOW_OPERATION',
+  RATE_LIMITED: 'RESPECT_RETRY_AFTER',
+  PII_DETECTED: 'MASK_SENSITIVE_CONTENT',
   LOCAL_ENVELOPE_VALID: 'NONE',
 });
 
@@ -121,6 +127,119 @@ function failure(name: string, reason_code: keyof typeof remediation, message: s
   return Object.freeze({ name, status: 'fail', reason_code, remediation_code: remediation[reason_code], message, ...(details ? { details: Object.freeze(details) } : {}) });
 }
 
+function warning(name: string, reason_code: keyof typeof remediation, message: string, details?: Record<string, string | number | boolean | null>): DoctorV2Check {
+  return Object.freeze({ name, status: 'warn', reason_code, remediation_code: remediation[reason_code], message, ...(details ? { details: Object.freeze(details) } : {}) });
+}
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
+    : (sorted[middle] ?? 0);
+}
+
+function latencyWarnings(envelope: DiagnosticEnvelope): DoctorV2Check[] {
+  const groups = new Map<string, Array<{ span: DiagnosticSpan; index: number }>>();
+  envelope.spans.forEach((span, index) => {
+    if (span.kind.toUpperCase() !== 'LLM' || !Number.isFinite(span.duration_ns) || (span.duration_ns ?? 0) < 0) return;
+    const operation = typeof span.attributes?.['gen_ai.operation.name'] === 'string'
+      ? span.attributes['gen_ai.operation.name'] as string
+      : span.name;
+    const group = groups.get(operation) ?? [];
+    group.push({ span, index });
+    groups.set(operation, group);
+  });
+  const checks: DoctorV2Check[] = [];
+  for (const [operation, group] of groups) {
+    if (group.length < 3) continue;
+    const ordered = [...group].sort((left, right) =>
+      (left.span.start_time_ns ?? left.index) - (right.span.start_time_ns ?? right.index));
+    const baseline = median(group.map(({ span }) => span.duration_ns ?? 0));
+    const threshold = Math.max(500_000_000, baseline * 3);
+    for (const { span } of ordered.slice(1)) {
+      if ((span.duration_ns ?? 0) > threshold) {
+        checks.push(warning('latency', 'LATENCY_OUTLIER', 'LLM latency is an outlier for this operation', {
+          span_id: span.span_id,
+          operation,
+          duration_ns: span.duration_ns ?? 0,
+          median_ns: baseline,
+          threshold_ns: threshold,
+        }));
+      }
+    }
+  }
+  return checks;
+}
+
+const THROTTLE_CODES = new Set([
+  'rate_limit_exceeded', 'rate_limit_error', 'resource_exhausted',
+  'throttlingexception', 'toomanyrequests', 'too_many_requests',
+]);
+
+function rateLimitSignal(attributes: Readonly<Record<string, unknown>> | undefined): string | null {
+  if (!attributes) return null;
+  for (const [rawKey, value] of Object.entries(attributes)) {
+    const key = rawKey.toLowerCase();
+    const normalized = String(value).toLowerCase();
+    if ((key.includes('http') || key.includes('status')) && (normalized === '429' || normalized === '503')) return 'http_status';
+    if (key.includes('retry-after') || key.includes('retry_after')) return 'retry_after';
+    if (THROTTLE_CODES.has(normalized)) return 'provider_code';
+    if (key.includes('rate_limit_remaining') || key.includes('ratelimit_remaining')) {
+      const remaining = typeof value === 'number' ? value : Number(value);
+      if (Number.isFinite(remaining) && remaining <= 1) return 'rate_limit_remaining';
+    }
+  }
+  return null;
+}
+
+function rateLimitWarnings(envelope: DiagnosticEnvelope): DoctorV2Check[] {
+  return envelope.spans.flatMap((span) => {
+    const signal = rateLimitSignal(span.attributes);
+    return signal
+      ? [warning('rate_limit', 'RATE_LIMITED', 'Span contains a provider throttling signal', { span_id: span.span_id, signal })]
+      : [];
+  });
+}
+
+const PII_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+  ['email', /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i],
+  ['us_phone', /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/],
+  ['us_ssn', /\b\d{3}-\d{2}-\d{4}\b/],
+  ['credit_card', /\b(?:\d[ -]*?){13,19}\b/],
+];
+
+function piiCategories(value: unknown): Set<string> {
+  const categories = new Set<string>();
+  const seen = new WeakSet<object>();
+  let visited = 0;
+  const walk = (item: unknown, depth: number): void => {
+    if (depth > 12 || visited++ > 10_000) return;
+    if (typeof item === 'string') {
+      for (const [category, pattern] of PII_PATTERNS) if (pattern.test(item)) categories.add(category);
+      return;
+    }
+    if (!item || typeof item !== 'object' || seen.has(item)) return;
+    seen.add(item);
+    if (Array.isArray(item)) for (const child of item) walk(child, depth + 1);
+    else for (const child of Object.values(item as Record<string, unknown>)) walk(child, depth + 1);
+  };
+  walk(value, 0);
+  return categories;
+}
+
+function piiWarnings(envelope: DiagnosticEnvelope): DoctorV2Check[] {
+  return envelope.spans.flatMap((span) => {
+    const categories = piiCategories(span.attributes);
+    return categories.size > 0
+      ? [warning('privacy', 'PII_DETECTED', 'Span attributes contain potential sensitive data', {
+        span_id: span.span_id,
+        categories: [...categories].sort().join(','),
+      })]
+      : [];
+  });
+}
+
 function jsonSafe(value: unknown): boolean {
   try { JSON.stringify(canonicalize(value)); return true; } catch { return false; }
 }
@@ -128,7 +247,7 @@ function jsonSafe(value: unknown): boolean {
 /** Validate the finished, masked, normalized envelope captured before network send. */
 export function doctorLocalV2(
   envelope: DiagnosticEnvelope,
-  options: Readonly<{ flushOutcome?: 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; privateProvider?: boolean }> = {},
+  options: Readonly<{ flushOutcome?: 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; privateProvider?: boolean; checkPii?: boolean }> = {},
 ): DoctorV2Result {
   const checks: DoctorV2Check[] = [];
   if (!TRACE_ID.test(envelope.trace_id)) checks.push(failure('trace_id', 'TRACE_ID_INVALID', 'Trace ID must be 32 lowercase hexadecimal characters'));
@@ -160,15 +279,18 @@ export function doctorLocalV2(
   if (options.privateProvider === false) checks.push(failure('ownership', 'PROVIDER_OWNERSHIP_AMBIGUOUS', 'Doctor could not prove private provider ownership'));
   const flushOutcome = options.flushOutcome ?? 'success';
   if (flushOutcome === 'timeout') checks.push(failure('flush', 'FLUSH_TIMEOUT', 'Diagnostic capture did not flush within the configured deadline'));
+  checks.push(...latencyWarnings(envelope), ...rateLimitWarnings(envelope));
+  if (options.checkPii === true) checks.push(...piiWarnings(envelope));
 
   if (checks.length === 0) checks.push(Object.freeze({ name: 'local_envelope', status: 'pass', reason_code: 'LOCAL_ENVELOPE_VALID', remediation_code: 'NONE', message: 'The final normalized local envelope is valid' }));
   const first = checks.find((check) => check.status === 'fail');
+  const hasWarning = checks.some((check) => check.status === 'warn');
   let digest: string | undefined;
   try { digest = doctorSemanticDigest(envelope); } catch { /* an existing JSON failure is safer than emitting a partial digest */ }
   return Object.freeze({
     format_version: DOCTOR_V2_FORMAT_VERSION,
     mode: 'local',
-    status: first ? 'fail' : 'pass',
+    status: first ? 'fail' : hasWarning ? 'warn' : 'pass',
     first_failure: first?.reason_code ?? null,
     runtime: Object.freeze({ language: 'typescript', sdk_version: __version__, schema_version: String(TELEMETRY_SCHEMA_VERSION), transport: 'otlp_http_protobuf' }),
     ...(digest && TRACE_ID.test(envelope.trace_id) && SPAN_ID.test(envelope.root_span_id) ? { capture: Object.freeze({ trace_id: envelope.trace_id, root_span_id: envelope.root_span_id, span_count: envelope.spans.length, semantic_digest: digest }) } : {}),
