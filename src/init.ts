@@ -19,7 +19,9 @@ import {
   TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanProcessor,
+  type SpanExporter,
 } from '@opentelemetry/sdk-trace-base';
+import { ExportResultCode } from '@opentelemetry/core';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { LoggerProvider, BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
@@ -287,17 +289,29 @@ async function _performInit(options: InitOptions): Promise<void> {
   });
   provider.addSpanProcessor(_spanProcessor);
 
-  // 12. Add BatchSpanProcessor + OTLPSpanExporter (if export enabled)
-  if (!disableExportResolved) {
+  // 12. Add BatchSpanProcessor + exporter. Local Doctor uses the exact same
+  // final masking/filtering boundary with a successful in-memory sink, so it
+  // can inspect export-ready bytes without credentials or network access.
+  if (!disableExportResolved || options.diagnosticCapture) {
     const tracesEndpoint = endpoint.endsWith('/v1/traces')
       ? endpoint
       : `${baseUrl}/v1/traces`;
 
+    const diagnosticSink: SpanExporter = {
+      export(_spans, resultCallback) {
+        resultCallback({ code: ExportResultCode.SUCCESS });
+      },
+      async shutdown() {},
+      async forceFlush() {},
+    };
+
     const otlpExporter = new FilteringExporter(
-      new OTLPTraceExporter({
-        url: tracesEndpoint,
-        headers: { 'x-api-key': resolvedKey },
-      }),
+      options.diagnosticCapture
+        ? diagnosticSink
+        : new OTLPTraceExporter({
+            url: tracesEndpoint,
+            headers: { 'x-api-key': resolvedKey },
+          }),
       capturePreparedSpans,
     );
     _filteringExporter = otlpExporter;
@@ -315,8 +329,10 @@ async function _performInit(options: InitOptions): Promise<void> {
     _transportSpanProcessors = [batchProcessor, completionProcessor];
     _completionProcessor = completionProcessor;
 
-    if (options.debug) {
+    if (options.debug && !options.diagnosticCapture) {
       logger.debug(`OTLP trace exporter configured: ${tracesEndpoint}`);
+    } else if (options.debug) {
+      logger.debug('Local Doctor diagnostic capture configured (network disabled)');
     }
   } else if (options.debug) {
     logger.debug('Export disabled — spans will not be sent to backend');
