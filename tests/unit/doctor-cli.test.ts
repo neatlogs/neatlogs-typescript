@@ -9,18 +9,19 @@ function io(env: NodeJS.ProcessEnv = {}) {
 
 describe('doctor CLI', () => {
   it('runs local checks without network access or credentials', async () => {
-    const value = io({ NEATLOGS_ENDPOINT: 'http://localhost:4100', NEATLOGS_API_KEY: 'configured' });
+    const value = io({ NEATLOGS_ENDPOINT: 'http://localhost:4100' });
     const fetch = vi.fn();
     const code = await runDoctorCli(['doctor', '--local', '--json'], { ...value.overrides, fetch });
     expect(code).toBe(0);
     expect(fetch).not.toHaveBeenCalled();
-    expect(JSON.parse(value.output[0]!)).toMatchObject({ format_version: 'neatlogs.doctor/v2', mode: 'local', status: 'pass', capture: null });
-  });
-
-  it('reports missing credentials without exposing environment content', async () => {
-    const value = io({ NEATLOGS_ENDPOINT: 'http://localhost:4100' });
-    expect(await runDoctorCli(['doctor', '--local', '--json'], value.overrides)).toBe(2);
-    expect(JSON.parse(value.output[0]!)).toMatchObject({ status: 'fail', first_failure: 'MISSING_CREDENTIALS' });
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      format_version: 'neatlogs.doctor/v2', mode: 'local', status: 'pass',
+      capture: { span_count: 3 },
+      ownership: { provider: 'private' },
+      queue: { mode: 'diagnostic_capture', pending_spans: 0, dropped_spans: 0 },
+      flush: { outcome: 'success', timeout_ms: 5000 },
+      checks: [{ reason_code: 'LOCAL_ENVELOPE_VALID' }],
+    });
   });
 
   it('does not attempt a probe without credentials', async () => {
@@ -43,10 +44,18 @@ describe('doctor CLI', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const code = await runDoctorCli(['doctor', '--probe', '--json'], { ...value.overrides, fetch: fetch as typeof globalThis.fetch, sleep: async () => undefined });
     expect(code).toBe(0);
-    expect(fetch).toHaveBeenNthCalledWith(1, new URL('http://localhost:4100/api/diagnostics/v2/sessions'), expect.objectContaining({ body: '{}', headers: expect.objectContaining({ 'x-api-key': 'private-key' }) }));
+    expect(fetch).toHaveBeenNthCalledWith(1, new URL('http://localhost:4100/api/diagnostics/v2/sessions'), expect.objectContaining({
+      body: expect.stringContaining('"envelope_digest":"sha256:'),
+      headers: expect.objectContaining({ 'x-api-key': 'private-key' }),
+    }));
     expect(fetch).toHaveBeenNthCalledWith(2, new URL(`http://localhost:4100/api/diagnostics/v2/sessions/${diagnosticSessionId}`), expect.objectContaining({ method: 'GET' }));
     expect(value.output[0]).toContain(diagnosticSessionId);
-    expect(value.output[0]).toContain('simplified_durable');
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      mode: 'probe', status: 'pass',
+      capture: { span_count: 3 },
+      probe: { diagnostic_id: diagnosticSessionId, receipt_status: 'pass' },
+      checks: expect.arrayContaining([expect.objectContaining({ reason_code: 'DIAGNOSTIC_VISIBLE' })]),
+    });
     expect(value.output[0]).not.toContain('private-key');
     expect(value.output[0]).not.toContain('dpt_secret');
     expect(value.output[0]).not.toContain('never-print');
@@ -61,7 +70,7 @@ describe('doctor CLI', () => {
       : new Response(JSON.stringify(options?.method === 'POST' ? { format_version: 'neatlogs.doctor-session/v2', diagnostic_id: diagnosticSessionId, probe_token: 'dpt_secret', created_at: '2030-01-01T00:00:00Z', expires_at: '2030-01-01T00:10:00Z', fixture_version: 'doctor-fixture/v1' } : session), { status: options?.method === 'POST' ? 201 : 200 }));
     const code = await runDoctorCli(['doctor', '--probe', '--json'], { ...value.overrides, fetch: fetch as typeof globalThis.fetch, sleep: async () => undefined });
     expect(code).toBe(3);
-    expect(JSON.parse(value.output[0]!)).toMatchObject({ status: 'fail', first_failure: 'BACKEND_PROBE_INCOMPLETE', stages: [{ stage: 'auth', status: 'accepted' }] });
+    expect(JSON.parse(value.output[0]!)).toMatchObject({ status: 'fail', first_failure: 'BACKEND_PROBE_INCOMPLETE', probe: { stages: [{ stage: 'auth', status: 'accepted' }] } });
     expect(value.output[0]).not.toContain('dpt_secret');
   });
 
