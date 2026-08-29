@@ -64,11 +64,11 @@ export type DoctorV2Result = Readonly<{
     span_count: number;
     semantic_digest: string;
   }>;
-  sampling: Readonly<{ effective_sampler: string; consistent: boolean }>;
-  ownership: Readonly<{ provider: 'private' | 'ambiguous' }>;
-  queue: Readonly<{ mode: 'batch' | 'disabled'; max_size: number; dropped_spans: number }>;
-  retry: Readonly<{ observable: false; attempts: null; window_ms: null }>;
-  flush: Readonly<{ outcome: 'success' | 'timeout' | 'failed'; timeout_ms: number }>;
+  sampling: Readonly<{ effective_sampler: string; root_sample_rate: number; sampled: boolean }>;
+  ownership: Readonly<{ provider: 'private' | 'ambiguous'; instrumentor_count: number }>;
+  queue: Readonly<{ mode: 'batch' | 'diagnostic_capture'; pending_spans: number; dropped_spans: number; capacity: number | null }>;
+  retry: Readonly<{ attempts: number; window_ms: number; exhausted: boolean }>;
+  flush: Readonly<{ outcome: 'not_attempted' | 'success' | 'timeout' | 'failed'; timeout_ms: number; duration_ms: number | null }>;
   checks: readonly DoctorV2Check[];
 }>;
 
@@ -249,7 +249,7 @@ function jsonSafe(value: unknown): boolean {
 /** Validate the finished, masked, normalized envelope captured before network send. */
 export function doctorLocalV2(
   envelope: DiagnosticEnvelope,
-  options: Readonly<{ flushOutcome?: 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; privateProvider?: boolean; checkPii?: boolean; effectiveSampler?: string; queueMode?: 'batch' | 'disabled'; queueMaxSize?: number; droppedSpans?: number }> = {},
+  options: Readonly<{ flushOutcome?: 'not_attempted' | 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; flushDurationMs?: number | null; privateProvider?: boolean; instrumentorCount?: number; checkPii?: boolean; effectiveSampler?: string; rootSampleRate?: number; queueMode?: 'batch' | 'diagnostic_capture'; queueMaxSize?: number | null; pendingSpans?: number; droppedSpans?: number; retryAttempts?: number; retryWindowMs?: number; retryExhausted?: boolean }> = {},
 ): DoctorV2Result {
   const checks: DoctorV2Check[] = [];
   if (!TRACE_ID.test(envelope.trace_id)) checks.push(failure('trace_id', 'TRACE_ID_INVALID', 'Trace ID must be 32 lowercase hexadecimal characters'));
@@ -296,18 +296,18 @@ export function doctorLocalV2(
     first_failure: first?.reason_code ?? null,
     runtime: Object.freeze({ language: 'typescript', sdk_version: __version__, schema_version: String(TELEMETRY_SCHEMA_VERSION), transport: 'otlp_http_protobuf' }),
     ...(digest && TRACE_ID.test(envelope.trace_id) && SPAN_ID.test(envelope.root_span_id) ? { capture: Object.freeze({ trace_id: envelope.trace_id, root_span_id: envelope.root_span_id, span_count: envelope.spans.length, semantic_digest: digest }) } : {}),
-    sampling: Object.freeze({ effective_sampler: options.effectiveSampler ?? 'parentbased_traceidratio', consistent: sampling.size <= 1 }),
-    ownership: Object.freeze({ provider: options.privateProvider === false ? 'ambiguous' : 'private' }),
-    queue: Object.freeze({ mode: options.queueMode ?? 'batch', max_size: options.queueMaxSize ?? 2_048, dropped_spans: options.droppedSpans ?? 0 }),
-    retry: Object.freeze({ observable: false as const, attempts: null, window_ms: null }),
-    flush: Object.freeze({ outcome: flushOutcome, timeout_ms: options.flushTimeoutMs ?? 5_000 }),
+    sampling: Object.freeze({ effective_sampler: options.effectiveSampler ?? 'parentbased_traceidratio', root_sample_rate: options.rootSampleRate ?? 1, sampled: envelope.spans.find((span) => span.sampled !== undefined)?.sampled ?? true }),
+    ownership: Object.freeze({ provider: options.privateProvider === false ? 'ambiguous' : 'private', instrumentor_count: options.instrumentorCount ?? 0 }),
+    queue: Object.freeze({ mode: options.queueMode ?? 'diagnostic_capture', pending_spans: options.pendingSpans ?? 0, dropped_spans: options.droppedSpans ?? 0, capacity: options.queueMaxSize ?? 2_048 }),
+    retry: Object.freeze({ attempts: options.retryAttempts ?? 0, window_ms: options.retryWindowMs ?? 0, exhausted: options.retryExhausted ?? false }),
+    flush: Object.freeze({ outcome: flushOutcome, timeout_ms: options.flushTimeoutMs ?? 5_000, duration_ms: options.flushDurationMs ?? null }),
     checks: Object.freeze(checks),
   });
 }
 
 /** Inspect the latest trace captured at the final masked export boundary. */
 export function doctorCapturedLocalV2(
-  options: Readonly<{ traceId?: string; flushOutcome?: 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; checkPii?: boolean }> = {},
+  options: Readonly<{ traceId?: string; flushOutcome?: 'not_attempted' | 'success' | 'timeout' | 'failed'; flushTimeoutMs?: number; flushDurationMs?: number | null; checkPii?: boolean }> = {},
 ): DoctorV2Result | null {
   const envelope = getCapturedEnvelope(options.traceId);
   if (!envelope) return null;
@@ -315,9 +315,11 @@ export function doctorCapturedLocalV2(
   return doctorLocalV2(envelope, {
     flushOutcome: options.flushOutcome,
     flushTimeoutMs: options.flushTimeoutMs,
+    flushDurationMs: options.flushDurationMs,
     privateProvider: runtime.ownsTracerProvider,
-    effectiveSampler: runtime.effectiveSampler,
-    queueMode: runtime.exportEnabled ? 'batch' : 'disabled',
+    effectiveSampler: runtime.effectiveSampler.split(':')[0],
+    rootSampleRate: Number(runtime.effectiveSampler.split(':').at(-1)) || 0,
+    queueMode: runtime.exportEnabled ? 'batch' : 'diagnostic_capture',
     queueMaxSize: runtime.queueMaxSize,
     droppedSpans: runtime.exportHealth?.droppedSpans ?? 0,
     checkPii: options.checkPii,
