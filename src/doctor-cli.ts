@@ -1,23 +1,53 @@
-import { doctor, type DoctorCheck } from './doctor.js';
-import { DOCTOR_V2_FORMAT_VERSION } from './doctor-v2.js';
-import { TELEMETRY_SCHEMA_VERSION } from './schema-v2.js';
-import { __version__ } from './version.js';
+import { span } from './decorators/orchestration.js';
+import { trace, setTraceOutput } from './core/context.js';
+import { doctorCapturedLocalV2, DOCTOR_V2_FORMAT_VERSION } from './doctor-v2.js';
+import { flush, init, shutdown } from './init.js';
+import { disableLogging, enableLogging } from './core/logger.js';
 
 export type DoctorCliIO = Readonly<{ stdout: (line: string) => void; stderr: (line: string) => void; fetch: typeof globalThis.fetch; env: NodeJS.ProcessEnv; sleep: (milliseconds: number) => Promise<void> }>;
 const defaultIO: DoctorCliIO = { stdout: (line) => process.stdout.write(`${line}\n`), stderr: (line) => process.stderr.write(`${line}\n`), fetch: globalThis.fetch, env: process.env, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) };
 
-function localResult(env: NodeJS.ProcessEnv) {
-  const result = doctor({ endpoint: env.NEATLOGS_ENDPOINT });
-  const exportDisabled = ['true', '1', 'yes'].includes((env.NEATLOGS_DISABLE_EXPORT ?? '').toLowerCase());
-  const credentialCheck: DoctorCheck = exportDisabled
-    ? { name: 'credentials', status: 'warn', reason_code: 'EXPORT_DISABLED', message: 'Export is explicitly disabled; no ingestion credential is required' }
-    : env.NEATLOGS_API_KEY?.trim()
-      ? { name: 'credentials', status: 'pass', reason_code: 'CREDENTIAL_PRESENT', message: 'A non-empty ingestion credential is configured' }
-      : { name: 'credentials', status: 'fail', reason_code: 'MISSING_CREDENTIALS', message: 'Set NEATLOGS_API_KEY to enable telemetry export' };
-  const checks = [credentialCheck, ...result.checks];
-  const failed = checks.find((check) => check.status === 'fail');
-  const warning = checks.some((check) => check.status === 'warn');
-  return { format_version: DOCTOR_V2_FORMAT_VERSION, mode: 'local', status: failed ? 'fail' : warning ? 'warn' : 'pass', first_failure: failed?.reason_code ?? null, runtime: { language: 'typescript', sdk_version: __version__, schema_version: String(TELEMETRY_SCHEMA_VERSION), transport: 'otlp_http_protobuf' }, capture: null, checks, note: 'Standalone local mode is read-only. Call doctorCapturedLocalV2() inside the instrumented process to inspect its final masked export envelope.' } as const;
+async function localResult(env: NodeJS.ProcessEnv) {
+  const flushTimeoutMs = 5_000;
+  const started = Date.now();
+  let traceId = '';
+  disableLogging();
+  try {
+    await init({
+      apiKey: env.NEATLOGS_API_KEY,
+      endpoint: env.NEATLOGS_ENDPOINT,
+      workflowName: 'neatlogs.doctor.v2',
+      disableExport: true,
+      diagnosticCapture: true,
+      registerShutdownHandlers: false,
+      batchSize: 32,
+      flushInterval: 60,
+    });
+    const diagnosticTool = span(
+      { kind: 'TOOL', name: 'doctor.tool', toolName: 'diagnostic_tool' },
+      async (input: { value: number }) => ({ value: input.value + 1 }),
+    );
+    await trace({ name: 'doctor.workflow', kind: 'WORKFLOW', sessionId: 'neatlogs-doctor-local' }, async (root) => {
+      traceId = root.spanContext().traceId;
+      const output = await diagnosticTool({ value: 1 });
+      setTraceOutput({ result: output });
+    });
+    const flushed = await Promise.race([
+      flush(),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), flushTimeoutMs)),
+    ]);
+    const result = doctorCapturedLocalV2({
+      traceId,
+      flushOutcome: flushed ? 'success' : 'timeout',
+      flushTimeoutMs,
+      flushDurationMs: Date.now() - started,
+    });
+    if (!result) throw new Error('Diagnostic envelope was not captured');
+    return result;
+  } finally {
+    await shutdown('doctor-local-complete').catch(() => false);
+    enableLogging();
+  }
 }
 
 const REQUIRED_PROBE_STAGES = ['auth', 'schema_decode', 'pii', 'kafka', 'raw_durable', 'root_resolution', 'simplified_durable', 'visibility'] as const;
@@ -67,26 +97,49 @@ function safeReceipt(value: unknown): { status: string; firstFailure: string | n
   };
 }
 
-function probeResult(sessionId: string, receipt: ReturnType<typeof safeReceipt>) {
+function probeResult(local: Awaited<ReturnType<typeof localResult>>, sessionId: string, receipt: ReturnType<typeof safeReceipt>) {
   const failed = receipt.stages.find((stage) => stage.status === 'failed');
-  const completed = receipt.status === 'pass' && REQUIRED_PROBE_STAGES.every((required) => receipt.stages.some((stage) => stage.stage === required && stage.status === 'accepted'));
+  const digestMismatch =
+    (!!receipt.localDigest && receipt.localDigest !== local.capture?.semantic_digest) ||
+    (!!receipt.backendDigest && receipt.backendDigest !== local.capture?.semantic_digest);
+  const completed = !digestMismatch && receipt.status === 'pass' && REQUIRED_PROBE_STAGES.every((required) => receipt.stages.some((stage) => stage.stage === required && stage.status === 'accepted'));
   const incomplete = receipt.status === 'expired' ? 'BACKEND_PROBE_EXPIRED' : 'BACKEND_PROBE_INCOMPLETE';
+  const reason = digestMismatch ? 'DIGEST_MISMATCH' : receipt.firstFailure ?? failed?.reason_code ?? (completed ? null : incomplete);
+  const probeCheck = completed
+    ? { name: 'probe_visibility', status: 'pass', reason_code: 'DIAGNOSTIC_VISIBLE', remediation_code: 'NONE', message: 'The diagnostic trace reached the authenticated read path' }
+    : { name: 'probe_visibility', status: 'fail', reason_code: reason ?? incomplete, remediation_code: digestMismatch ? 'CONTACT_SUPPORT' : 'WAIT_FOR_RECEIPT', message: 'The backend diagnostic did not reach confirmed visibility' };
   return {
-    format_version: DOCTOR_V2_FORMAT_VERSION,
+    ...local,
     mode: 'probe',
-    status: failed || !completed ? 'fail' : 'pass',
-    diagnostic_session_id: sessionId,
-    ...(receipt.createdAt ? { created_at: receipt.createdAt } : {}),
-    ...(receipt.expiresAt ? { expires_at: receipt.expiresAt } : {}),
-    ...(receipt.localDigest ? { local_semantic_digest: receipt.localDigest } : {}),
-    ...(receipt.backendDigest ? { backend_semantic_digest: receipt.backendDigest } : {}),
-    stages: receipt.stages,
-    first_failure: receipt.firstFailure ?? failed?.reason_code ?? (completed ? null : incomplete),
-    reason_codes: receipt.firstFailure ? [receipt.firstFailure] : failed ? [failed.reason_code] : completed ? [] : [incomplete],
+    status: completed ? 'pass' : 'fail',
+    first_failure: reason,
+    probe: {
+      diagnostic_id: sessionId,
+      receipt_status: receipt.status,
+      ...(receipt.expiresAt ? { expires_at: receipt.expiresAt } : {}),
+      stages: receipt.stages,
+    },
+    checks: [...local.checks, probeCheck],
   } as const;
 }
 
-function human(result: { status: string; first_failure?: unknown; checks?: readonly DoctorCheck[]; note?: string }): string {
+function failedProbeResult(local: Awaited<ReturnType<typeof localResult>>, reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE') {
+  return {
+    ...local,
+    mode: 'probe',
+    status: 'fail',
+    first_failure: reasonCode,
+    checks: [...local.checks, {
+      name: 'probe_transport', status: 'fail', reason_code: reasonCode,
+      remediation_code: reasonCode === 'AUTH_FAILED' ? 'CHECK_INGEST_CREDENTIAL' : 'CHECK_DIAGNOSTIC_ENDPOINT',
+      message: reasonCode === 'AUTH_FAILED'
+        ? 'The authenticated diagnostic session was rejected'
+        : 'The backend diagnostic session is unavailable',
+    }],
+  } as const;
+}
+
+function human(result: { status: string; first_failure?: unknown; checks?: readonly Readonly<{ status: string; reason_code: string; message: string }>[]; note?: string }): string {
   const lines = [`Neatlogs Doctor: ${result.status.toUpperCase()}`];
   for (const check of result.checks ?? []) lines.push(`${check.status === 'pass' ? 'PASS' : check.status === 'fail' ? 'FAIL' : 'INFO'} ${check.reason_code}: ${check.message}`);
   if (result.first_failure) lines.push(`First failure: ${String(result.first_failure)}`);
@@ -102,9 +155,15 @@ export async function runDoctorCli(argv: readonly string[], overrides: Partial<D
   if (argv.includes('--help') || argv.includes('-h')) { io.stdout('Usage: neatlogs doctor (--local | --probe) [--json]'); return 0; }
   if (argv[0] !== 'doctor' || modes.length !== 1 || argv.some((arg) => !['doctor', '--local', '--probe', '--json'].includes(arg))) { io.stderr('Usage: neatlogs doctor (--local | --probe) [--json]'); return 4; }
   if (modes[0] === '--local') {
-    const result = localResult(io.env);
-    io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
-    return result.status === 'fail' ? 2 : result.status === 'warn' ? 1 : 0;
+    try {
+      const result = await localResult(io.env);
+      io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
+      return result.status === 'fail' ? 2 : result.status === 'warn' ? 1 : 0;
+    } catch {
+      const result = { format_version: DOCTOR_V2_FORMAT_VERSION, mode: 'local', status: 'fail', first_failure: 'INSTRUMENTOR_INACTIVE', checks: [{ name: 'local_envelope', status: 'fail', reason_code: 'INSTRUMENTOR_INACTIVE', remediation_code: 'ENABLE_INSTRUMENTOR', message: 'Doctor could not capture a local diagnostic envelope' }] } as const;
+      io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
+      return 2;
+    }
   }
   const apiKey = io.env.NEATLOGS_API_KEY?.trim();
   if (!apiKey) {
@@ -114,11 +173,23 @@ export async function runDoctorCli(argv: readonly string[], overrides: Partial<D
   let endpoint: URL;
   try { endpoint = new URL(io.env.NEATLOGS_ENDPOINT?.trim() || 'https://ingest.neatlogs.com'); } catch { io.stderr('Invalid NEATLOGS_ENDPOINT'); return 4; }
   endpoint.pathname = '/api/diagnostics/v2/sessions'; endpoint.search = ''; endpoint.hash = '';
+  let local: Awaited<ReturnType<typeof localResult>> | null = null;
   try {
+    local = await localResult(io.env);
+    if (!local.capture || local.status === 'fail') throw new Error('Local diagnostic capture failed');
     const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
-    const response = await io.fetch(endpoint, { method: 'POST', headers, body: '{}' });
+    const response = await io.fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({
+      envelope_digest: local.capture.semantic_digest,
+      fixture_version: 'doctor-v2',
+      trace_id: local.capture.trace_id,
+    }) });
+    if (!response.ok) {
+      const result = failedProbeResult(local, response.status === 401 || response.status === 403 ? 'AUTH_FAILED' : 'BACKEND_PROBE_UNAVAILABLE');
+      io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
+      return 3;
+    }
     const created = safeSession(await response.json().catch(() => ({})));
-    if (!response.ok || !created.diagnosticId || !/^diag_[A-Za-z0-9_-]{16,128}$/.test(created.diagnosticId)) throw new Error('Diagnostic session creation failed');
+    if (!created.diagnosticId || !/^diag_[A-Za-z0-9_-]{16,128}$/.test(created.diagnosticId)) throw new Error('Diagnostic session creation failed');
     const sessionId = created.diagnosticId;
     const receiptUrl = new URL(`${endpoint.pathname}/${encodeURIComponent(sessionId)}`, endpoint);
     let current = safeReceipt({ diagnostic_id: sessionId, status: 'pending', stages: [] });
@@ -128,18 +199,20 @@ export async function runDoctorCli(argv: readonly string[], overrides: Partial<D
         const read = await io.fetch(receiptUrl, { method: 'GET', headers: { 'x-api-key': apiKey, ...(created.probeToken ? { 'x-neatlogs-diagnostic-token': created.probeToken } : {}) } });
         if (!read.ok) break;
         current = safeReceipt(await read.json().catch(() => ({})));
-        const state = probeResult(sessionId, current);
+        const state = probeResult(local, sessionId, current);
         if (state.status === 'pass' || current.stages.some((stage) => stage.status === 'failed')) break;
         if (attempt < maxAttempts - 1) await io.sleep(250);
       }
-      const result = probeResult(sessionId, current);
+      const result = probeResult(local, sessionId, current);
       io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
       return result.status === 'pass' ? 0 : 3;
     } finally {
       void io.fetch(receiptUrl, { method: 'DELETE', headers: { 'x-api-key': apiKey } }).catch(() => undefined);
     }
   } catch {
-    const result = { format_version: DOCTOR_V2_FORMAT_VERSION, mode: 'probe', status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE', reason_codes: ['BACKEND_PROBE_UNAVAILABLE'] };
+    const result = local
+      ? failedProbeResult(local, 'BACKEND_PROBE_UNAVAILABLE')
+      : { format_version: DOCTOR_V2_FORMAT_VERSION, mode: 'probe', status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE', reason_codes: ['BACKEND_PROBE_UNAVAILABLE'] } as const;
     io.stdout(json ? JSON.stringify(result, null, 2) : human(result)); return 3;
   }
 }
