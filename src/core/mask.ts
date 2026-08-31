@@ -14,8 +14,81 @@ const logger = getLogger();
 const _MASK_REGISTRY = new Map<string, MaskFunction>();
 const _MASK_RESULTS = new WeakMap<object, Promise<Record<string, any> | null>>();
 const DEFAULT_MASK_TIMEOUT_MS = 5_000;
+const MAX_MASK_VALUE_DEPTH = 32;
 
 let _nextId = 0;
+
+type SerializedShape =
+  | { kind: 'json'; inner: SerializedShape }
+  | { kind: 'array'; children: SerializedShape[] }
+  | { kind: 'object'; children: Record<string, SerializedShape> }
+  | { kind: 'scalar' };
+
+/**
+ * Clone a telemetry envelope and materialize JSON-encoded values for the mask
+ * callback. OTel attributes commonly contain JSON strings; treating those as
+ * opaque text is an easy way for an otherwise-recursive redactor to miss a
+ * nested credential. The matching shape restores the wire representation after
+ * the callback without ever mutating application-owned data.
+ */
+function prepareMaskValue(value: any, depth = 0): [any, SerializedShape] {
+  if (depth >= MAX_MASK_VALUE_DEPTH) {
+    // Keep over-depth values opaque without exposing application-owned mutable
+    // references to the callback.
+    return [structuredClone(value), { kind: 'scalar' }];
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(value);
+        const [prepared, inner] = prepareMaskValue(parsed, depth + 1);
+        return [prepared, { kind: 'json', inner }];
+      } catch {
+        // Ordinary strings and malformed JSON remain ordinary strings.
+      }
+    }
+    return [value, { kind: 'scalar' }];
+  }
+  if (Array.isArray(value)) {
+    const pairs = value.map((item) => prepareMaskValue(item, depth + 1));
+    return [pairs.map(([item]) => item), { kind: 'array', children: pairs.map(([, shape]) => shape) }];
+  }
+  if (value && typeof value === 'object') {
+    const output: Record<string, any> = {};
+    const children: Record<string, SerializedShape> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const [prepared, shape] = prepareMaskValue(item, depth + 1);
+      output[key] = prepared;
+      children[key] = shape;
+    }
+    return [output, { kind: 'object', children }];
+  }
+  return [value, { kind: 'scalar' }];
+}
+
+function restoreMaskValue(value: any, shape: SerializedShape, depth = 0): any {
+  if (depth >= MAX_MASK_VALUE_DEPTH) return value;
+  if (shape.kind === 'json') {
+    if (value === undefined) return undefined;
+    // Preserve whole-value replacements made using the existing string wire
+    // contract; serializing again here would produce a quoted JSON string.
+    if (typeof value === 'string') return value;
+    return JSON.stringify(restoreMaskValue(value, shape.inner, depth + 1));
+  }
+  if (shape.kind === 'array' && Array.isArray(value)) {
+    return value.map((item, index) =>
+      restoreMaskValue(item, shape.children[index] ?? { kind: 'scalar' }, depth + 1));
+  }
+  if (shape.kind === 'object' && value && typeof value === 'object' && !Array.isArray(value)) {
+    const output: Record<string, any> = {};
+    for (const [key, item] of Object.entries(value)) {
+      output[key] = restoreMaskValue(item, shape.children[key] ?? { kind: 'scalar' }, depth + 1);
+    }
+    return output;
+  }
+  return value;
+}
 
 /**
  * Register a mask function and return its lookup key.
@@ -60,7 +133,9 @@ export async function applyMask(
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const invocation = Promise.resolve().then(() => maskFn(spanData));
+    const [candidate, shape] = prepareMaskValue(spanData);
+    const candidateBeforeMask = JSON.stringify(candidate);
+    const invocation = Promise.resolve().then(() => maskFn(candidate));
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
         () => reject(new Error(`mask timed out after ${timeoutMs}ms`)),
@@ -70,7 +145,15 @@ export async function applyMask(
     const result = await Promise.race([invocation, timeout]);
     // null means "drop this span entirely"; undefined means "keep original"
     if (result === null) return null;
-    return result !== undefined ? result : spanData;
+    if (result === undefined) return spanData;
+    if (result === candidate && JSON.stringify(candidate) === candidateBeforeMask) {
+      return spanData;
+    }
+    const masked = result;
+    if (!masked || typeof masked !== 'object' || Array.isArray(masked)) {
+      throw new TypeError('mask must return a span object or null');
+    }
+    return restoreMaskValue(masked, shape);
   } catch (exc) {
     logger.error(
       `mask callable failed for span '${spanData?.name}': ${exc} — dropping the span to prevent unmasked export.`,

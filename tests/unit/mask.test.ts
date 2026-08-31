@@ -43,6 +43,68 @@ describe('mask', () => {
       expect(result.name).toBe('masked');
     });
 
+    it('materializes nested serialized JSON and restores it after masking', async () => {
+      const original = {
+        name: 'json-input',
+        attributes: {
+          'neatlogs.chain.input': JSON.stringify({
+            request: { api_key: 'secret', safe: true },
+          }),
+        },
+      };
+      const result = await applyMask(original, (candidate) => {
+        candidate.attributes['neatlogs.chain.input'].request.api_key = '[REDACTED]';
+        return candidate;
+      });
+
+      expect(JSON.parse(result!.attributes['neatlogs.chain.input'])).toEqual({
+        request: { api_key: '[REDACTED]', safe: true },
+      });
+      expect(JSON.parse(original.attributes['neatlogs.chain.input']).request.api_key).toBe('secret');
+    });
+
+    it('preserves a whole serialized JSON string replacement', async () => {
+      const original = {
+        name: 'json-input',
+        attributes: { 'neatlogs.chain.input': '{"email":"secret@example.com"}' },
+      };
+      const result = await applyMask(original, (candidate) => {
+        candidate.attributes['neatlogs.chain.input'] = '{"email":"[REDACTED]"}';
+        return candidate;
+      });
+
+      expect(result!.attributes['neatlogs.chain.input']).toBe('{"email":"[REDACTED]"}');
+    });
+
+    it('does not expose source references beyond the traversal depth limit', async () => {
+      const original: Record<string, any> = { name: 'deep', attributes: {} };
+      let source = original.attributes;
+      for (let index = 0; index < 40; index += 1) {
+        source.next = {};
+        source = source.next;
+      }
+      source.secret = 'original';
+
+      await applyMask(original, (candidate) => {
+        let current = candidate.attributes;
+        for (let index = 0; index < 40; index += 1) current = current.next;
+        current.secret = '[REDACTED]';
+        return candidate;
+      });
+
+      expect(source.secret).toBe('original');
+    });
+
+    it('fails closed when a mask returns an invalid value', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const result = await applyMask(
+        { name: 'test', attributes: {} },
+        (() => 'invalid') as any,
+      );
+      expect(result).toBeNull();
+      spy.mockRestore();
+    });
+
     it('should apply per-span mask over global mask', async () => {
       const perSpanMask = (data: Record<string, any>) => ({
         ...data,
