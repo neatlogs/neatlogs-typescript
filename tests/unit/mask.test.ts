@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import {
-  registerMask,
-  applyMask,
-  _clearMaskRegistry,
-} from '../../src/core/mask.js';
+import { registerMask, applyMask, _clearMaskRegistry } from '../../src/core/mask.js';
 
 describe('mask', () => {
   beforeEach(() => {
@@ -27,23 +23,23 @@ describe('mask', () => {
   });
 
   describe('applyMask', () => {
-    it('should return span data unchanged when no mask is provided', () => {
+    it('should return span data unchanged when no mask is provided', async () => {
       const spanData = { name: 'test', attributes: {} };
-      const result = applyMask(spanData, null);
+      const result = await applyMask(spanData, null);
       expect(result).toBe(spanData);
     });
 
-    it('should apply global mask when no per-span mask', () => {
+    it('should apply global mask when no per-span mask', async () => {
       const globalMask = (data: Record<string, any>) => ({
         ...data,
         name: 'masked',
       });
       const spanData = { name: 'original', attributes: {} };
-      const result = applyMask(spanData, globalMask);
+      const result = await applyMask(spanData, globalMask);
       expect(result.name).toBe('masked');
     });
 
-    it('should apply per-span mask over global mask', () => {
+    it('should apply per-span mask over global mask', async () => {
       const perSpanMask = (data: Record<string, any>) => ({
         ...data,
         name: 'per-span-masked',
@@ -57,11 +53,11 @@ describe('mask', () => {
         name: 'original',
         attributes: { 'neatlogs.mask_id': maskId },
       };
-      const result = applyMask(spanData, globalMask);
+      const result = await applyMask(spanData, globalMask);
       expect(result.name).toBe('per-span-masked');
     });
 
-    it('should fall back to global mask when per-span mask id is not found', () => {
+    it('should fall back to global mask when per-span mask id is not found', async () => {
       const globalMask = (data: Record<string, any>) => ({
         ...data,
         name: 'global-masked',
@@ -70,38 +66,38 @@ describe('mask', () => {
         name: 'original',
         attributes: { 'neatlogs.mask_id': '999' },
       };
-      const result = applyMask(spanData, globalMask);
+      const result = await applyMask(spanData, globalMask);
       expect(result.name).toBe('global-masked');
     });
 
-    it('should return null when mask returns null (drop span)', () => {
+    it('should return null when mask returns null (drop span)', async () => {
       const mask = () => null;
       const spanData = { name: 'test', attributes: {} };
-      const result = applyMask(spanData, mask);
+      const result = await applyMask(spanData, mask);
       expect(result).toBeNull();
     });
 
-    it('should return original span data when mask throws', () => {
-      const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    it('should fail closed when mask throws', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const mask = () => {
         throw new Error('mask error');
       };
       const spanData = { name: 'test', attributes: {} };
-      const result = applyMask(spanData, mask);
-      expect(result).toBe(spanData);
+      const result = await applyMask(spanData, mask);
+      expect(result).toBeNull();
       expect(spy).toHaveBeenCalled();
       spy.mockRestore();
     });
 
-    it('should handle undefined globalMask', () => {
+    it('should handle undefined globalMask', async () => {
       const spanData = { name: 'test', attributes: {} };
-      const result = applyMask(spanData, undefined);
+      const result = await applyMask(spanData, undefined);
       expect(result).toBe(spanData);
     });
   });
 
   describe('_clearMaskRegistry', () => {
-    it('should clear all registered masks', () => {
+    it('should clear all registered masks', async () => {
       const mask = (data: Record<string, any>) => ({
         ...data,
         name: 'masked',
@@ -118,7 +114,7 @@ describe('mask', () => {
         name: 'test',
         attributes: { 'neatlogs.mask_id': maskId },
       };
-      const result = applyMask(spanData, globalMask);
+      const result = await applyMask(spanData, globalMask);
       expect(result.name).toBe('global');
     });
   });

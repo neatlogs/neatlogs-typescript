@@ -30,14 +30,12 @@ process.env.NEATLOGS_LOG_LOGS_FILE ??= 'google_genai_multiagent_logs.log';
 import { init, span, trace, log, flush, shutdown } from 'neatlogs';
 
 async function main() {
-  // init() must run BEFORE @google/genai is imported so the instrumentation
-  // can patch the module at load time.
+  // Initialize Neatlogs before building the application.
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: 'google-genai-content-creation',
     tags: ['google-genai', 'content', 'blog'],
-    instrumentations: ['google_genai', 'openai'],
     captureLogs: true,
     disableExport: false,
     debug: true,

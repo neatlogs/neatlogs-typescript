@@ -221,17 +221,11 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@ai-sdk/cohere": "^3.0.36",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/api-logs": "^0.57.0",
     "@opentelemetry/exporter-logs-otlp-proto": "^0.216.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.57.0",
-    "@opentelemetry/instrumentation": "^0.57.0",
-    "@opentelemetry/instrumentation-http": "^0.57.0",
-    "@opentelemetry/instrumentation-undici": "^0.10.0",
     "@opentelemetry/resources": "^1.30.0",
     "@opentelemetry/sdk-logs": "^0.57.0",
-    "@opentelemetry/sdk-metrics": "^1.30.0",
     "@opentelemetry/sdk-trace-base": "^1.30.0",
     "@opentelemetry/sdk-trace-node": "^1.30.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
@@ -242,10 +236,6 @@
     "@ai-sdk/openai": "^3.0.64",
     "@anthropic-ai/bedrock-sdk": "^0.29.1",
     "@anthropic-ai/sdk": "^0.68.0",
-    "@arizeai/openinference-instrumentation-anthropic": "^0.1.10",
-    "@arizeai/openinference-instrumentation-langchain": "^4.0.9",
-    "@arizeai/openinference-instrumentation-mcp": "^0.2.15",
-    "@arizeai/openinference-instrumentation-openai": "^4.1.0",
     "@earendil-works/pi-agent-core": "^0.83.0",
     "@earendil-works/pi-ai": "^0.83.0",
     "@google/genai": "^1.34.0",
@@ -269,40 +259,11 @@
     "zod-to-json-schema": "^3.24.6"
   },
   "peerDependencies": {
-    "@arizeai/openinference-instrumentation-anthropic": ">=0.1.0",
-    "@arizeai/openinference-instrumentation-bedrock": ">=0.4.0",
-    "@arizeai/openinference-instrumentation-beeai": ">=1.0.0",
-    "@arizeai/openinference-instrumentation-claude-agent-sdk": ">=0.2.0",
-    "@arizeai/openinference-instrumentation-langchain": ">=1.0.0",
-    "@arizeai/openinference-instrumentation-mcp": ">=0.2.0",
-    "@arizeai/openinference-instrumentation-openai": ">=1.0.0",
     "@google/genai": ">=0.1.0",
     "@mastra/core": "^1.32.1",
-    "@mastra/observability": "^1.11.1",
-    "@neatlogs/instrumentation-google-genai": "^0.1.2"
+    "@mastra/observability": "^1.11.1"
   },
   "peerDependenciesMeta": {
-    "@arizeai/openinference-instrumentation-openai": {
-      "optional": true
-    },
-    "@arizeai/openinference-instrumentation-anthropic": {
-      "optional": true
-    },
-    "@arizeai/openinference-instrumentation-langchain": {
-      "optional": true
-    },
-    "@arizeai/openinference-instrumentation-bedrock": {
-      "optional": true
-    },
-    "@arizeai/openinference-instrumentation-mcp": {
-      "optional": true
-    },
-    "@arizeai/openinference-instrumentation-beeai": {
-      "optional": true
-    },
-    "@arizeai/openinference-instrumentation-claude-agent-sdk": {
-      "optional": true
-    },
     "@google/genai": {
       "optional": true
     },
@@ -310,9 +271,6 @@
       "optional": true
     },
     "@mastra/observability": {
-      "optional": true
-    },
-    "@neatlogs/instrumentation-google-genai": {
       "optional": true
     }
   }

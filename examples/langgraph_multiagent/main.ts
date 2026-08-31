@@ -48,11 +48,10 @@ async function main(): Promise<void> {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: `${workflowPrefix}langgraph-multiagent`,
     tags: ['langgraph', 'multi-provider', 'research'],
-    instrumentations: ['langchain'],
     debug: true,
   });
 
-  // Import graph AFTER init so instrumentation patches LangChain classes
+  // Import the graph after SDK initialization.
   const { buildGraph } = await import('./graph.js');
   const graph = buildGraph();
 

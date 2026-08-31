@@ -54,6 +54,6 @@ functional loop APIs, async `StreamFn` support, and standalone `tracePiStream()`
 This makes compatibility coverage explicit without pretending independent API calls
 are turns in one user workflow.
 
-Both examples default to distinct workflow names, overridable with
-`NEATLOGS_WORKFLOW_NAME`. The wrapper remains duck-typed and compatible with legacy
-`@mariozechner/pi-agent-core` projects, which the test suite keeps installed.
+Both examples assign distinct workflow names directly. The wrapper remains duck-typed
+and compatible with legacy `@mariozechner/pi-agent-core` projects, which the test suite
+keeps installed.

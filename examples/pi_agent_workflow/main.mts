@@ -19,7 +19,7 @@ import { harnessTools, model, models } from './tools.mjs';
 
 const sessionId = `pi-current-${Date.now()}`;
 const endUserId = 'pi-e2e-user';
-const workflowName = process.env.NEATLOGS_WORKFLOW_NAME ?? 'pi-agent-current-workflow';
+const workflowName = 'pi-agent-current-workflow';
 
 async function main() {
   for (const key of ['NEATLOGS_API_KEY', 'OPENAI_API_KEY']) {

@@ -32,20 +32,18 @@ process.env.NEATLOGS_LOG_LOGS_FILE ??= 'mastra_multiagent_logs.log';
 import { init, trace, log, flush, shutdown, getMastraObservability } from 'neatlogs';
 
 async function main() {
-  // init() must run BEFORE @mastra/core and @google/genai are imported
-  // so instrumentations can patch at load time.
+  // Initialize the SDK before building the Mastra application.
   await init({
     apiKey: process.env.NEATLOGS_API_KEY ?? '',
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: 'mastra-growth-diagnostics',
     tags: ['mastra', 'workflow'],
-    instrumentations: ['mastra', 'google_genai', 'openai'],
     captureLogs: true,
     disableExport: false,
     debug: true,
   });
 
-  // Dynamic imports after init() so patches are active
+  // Load application dependencies after SDK initialization.
   const { Mastra } = await import('@mastra/core');
   const { createStep, createWorkflow } = await import('@mastra/core/workflows');
   const { z } = await import('zod');

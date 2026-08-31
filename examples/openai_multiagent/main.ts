@@ -33,11 +33,10 @@ async function main() {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: `${workflowPrefix}openai-investment-research`,
     tags: ['openai', 'investment', 'research'],
-    instrumentations: ['openai'],
     debug: true,
   });
 
-  // Import agents after init so provider instrumentation is active
+  // Import the agent definitions after SDK initialization.
   const { plannerAgent, researcherAgent, analystAgent, reporterAgent } = await import('./agents.js');
 
   const investmentResearchWorkflow = span(

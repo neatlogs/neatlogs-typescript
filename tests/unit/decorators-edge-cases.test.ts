@@ -4,11 +4,7 @@
  * AGENT/TOOL with missing optional attributes, and decorateSpan edge cases.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  safeJsonDumps,
-  serializeObj,
-  decorateSpan,
-} from '../../src/decorators/base.js';
+import { safeJsonDumps, serializeObj, decorateSpan } from '../../src/decorators/base.js';
 import { span, Span, retrieverPostprocessor } from '../../src/decorators/orchestration.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
 
@@ -18,6 +14,7 @@ function createMockSpan() {
   return {
     setAttribute: vi.fn(),
     setStatus: vi.fn(),
+    addEvent: vi.fn(),
     end: vi.fn(),
     recordException: vi.fn(),
     _attrs: {} as Record<string, any>,
@@ -76,12 +73,11 @@ afterEach(() => {
 describe('Span() class-method decorator', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should decorate a class method and wrap it with span instrumentation', () => {
     // Simulate TC39 Stage 3 class method decorator behavior
-    const originalMethod = function(this: any, query: string) {
+    const originalMethod = function (this: any, query: string) {
       return `processed: ${query}`;
     };
 
@@ -107,7 +103,10 @@ describe('Span() class-method decorator', () => {
   });
 
   it('should preserve this binding for decorated class methods', () => {
-    const originalMethod = function(this: { prefix: string; format: (query: string) => string }, query: string) {
+    const originalMethod = function (
+      this: { prefix: string; format: (query: string) => string },
+      query: string,
+    ) {
       return this.format(query);
     };
     const context: ClassMethodDecoratorContext = {
@@ -142,7 +141,9 @@ describe('Span() class-method decorator', () => {
     // The span() call happens inside the decorator, so we need to
     // verify it happens during decoration.
     const decorator = Span({ kind: 'INVALID' as any });
-    const originalMethod = function(this: any) { return 42; };
+    const originalMethod = function (this: any) {
+      return 42;
+    };
     const context: ClassMethodDecoratorContext = {
       kind: 'method',
       name: 'run',
@@ -161,15 +162,11 @@ describe('Span() class-method decorator', () => {
 describe('span() with MCP_TOOL edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should handle MCP_TOOL with object arg that has toJSON', () => {
     const fn = (input: any) => 'mcp result';
-    const wrapped = span(
-      { kind: 'MCP_TOOL', toolName: 'calculate' },
-      fn,
-    );
+    const wrapped = span({ kind: 'MCP_TOOL', toolName: 'calculate' }, fn);
 
     const inputObj = {
       a: 1,
@@ -189,10 +186,7 @@ describe('span() with MCP_TOOL edge cases', () => {
 
   it('should handle MCP_TOOL with plain object arg (no toJSON)', () => {
     const fn = (input: { x: number }) => 'result';
-    const wrapped = span(
-      { kind: 'MCP_TOOL', toolName: 'tool1' },
-      fn,
-    );
+    const wrapped = span({ kind: 'MCP_TOOL', toolName: 'tool1' }, fn);
 
     wrapped({ x: 42 });
 
@@ -204,10 +198,7 @@ describe('span() with MCP_TOOL edge cases', () => {
 
   it('should handle MCP_TOOL with non-string result', () => {
     const fn = () => ({ success: true, count: 5 });
-    const wrapped = span(
-      { kind: 'MCP_TOOL', toolName: 'complex_tool' },
-      fn,
-    );
+    const wrapped = span({ kind: 'MCP_TOOL', toolName: 'complex_tool' }, fn);
 
     wrapped();
 
@@ -238,17 +229,18 @@ describe('span() with MCP_TOOL edge cases', () => {
   it('should handle MCP_TOOL with async function', async () => {
     const fn = async (input: string) => `processed: ${input}`;
     const wrapped = span(
-      { kind: 'MCP_TOOL', toolName: 'async_tool', parameters: { input: 'string' } },
+      {
+        kind: 'MCP_TOOL',
+        toolName: 'async_tool',
+        parameters: { input: 'string' },
+      },
       fn,
     );
 
     const result = await wrapped('hello');
     expect(result).toBe('processed: hello');
     expect(mockSpan.setAttribute).toHaveBeenCalledWith('mcp.tool.name', 'async_tool');
-    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
-      'mcp.tool.parameters',
-      '{"input":"string"}',
-    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith('mcp.tool.parameters', '{"input":"string"}');
   });
 });
 
@@ -284,14 +276,8 @@ describe('retrieverPostprocessor edge cases', () => {
     retrieverPostprocessor(spanObj as any, docs, {});
 
     // Should set id and score but not content
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.documents.0.id',
-      'doc1',
-    );
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.documents.0.score',
-      0.9,
-    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.documents.0.id', 'doc1');
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.documents.0.score', 0.9);
     const contentCalls = spanObj.setAttribute.mock.calls.filter(
       ([key]: [string]) => typeof key === 'string' && key.endsWith('.content'),
     );
@@ -353,24 +339,16 @@ describe('retrieverPostprocessor edge cases', () => {
 
   it('should handle documents inside nested dict with "results" key', () => {
     const result = {
-      results: [
-        { content: 'result-text', score: 0.95 },
-      ],
+      results: [{ content: 'result-text', score: 0.95 }],
     };
     retrieverPostprocessor(spanObj as any, result, { query: 'search query' });
 
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.query',
-      'search query',
-    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.query', 'search query');
     expect(spanObj.setAttribute).toHaveBeenCalledWith(
       'neatlogs.retriever.documents.0.content',
       'result-text',
     );
-    expect(spanObj.setAttribute).toHaveBeenCalledWith(
-      'neatlogs.retriever.documents.0.score',
-      0.95,
-    );
+    expect(spanObj.setAttribute).toHaveBeenCalledWith('neatlogs.retriever.documents.0.score', 0.95);
   });
 });
 
@@ -379,7 +357,6 @@ describe('retrieverPostprocessor edge cases', () => {
 describe('span() with AGENT edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should not set role/goal when they are not provided', () => {
@@ -415,7 +392,6 @@ describe('span() with AGENT edge cases', () => {
 describe('span() with TOOL edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should not set tool attributes when not provided', () => {
@@ -435,7 +411,6 @@ describe('span() with TOOL edge cases', () => {
 describe('span() with EMBEDDING edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should not set model/dimension when not provided', () => {
@@ -459,7 +434,6 @@ describe('span() with EMBEDDING edge cases', () => {
 describe('decorateSpan additional edge cases', () => {
   beforeEach(() => {
     mockSpan = createMockSpan();
-    delete process.env.NEATLOGS_TRACE_CONTENT;
   });
 
   it('should handle non-Error thrown values in sync function', () => {

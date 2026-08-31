@@ -34,8 +34,6 @@
  * Env:
  *   NEATLOGS_API_KEY            required to export
  *   NEATLOGS_ENDPOINT           backend base URL (default https://ingest.neatlogs.com)
- *   NEATLOGS_WORKFLOW_NAME      logical grouping (default: "opencode")
- *   NEATLOGS_CAPTURE_SYSTEM_PROMPT=true  capture system prompt text (default off)
  */
 
 import {
@@ -88,9 +86,7 @@ interface SessionState {
 export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, any>> => {
   const apiKey = (process.env.NEATLOGS_API_KEY ?? '').trim();
   const endpoint = (process.env.NEATLOGS_ENDPOINT ?? DEFAULT_ENDPOINT).trim();
-  const workflowName = process.env.NEATLOGS_WORKFLOW_NAME || 'opencode';
-  const captureSystemPrompt =
-    String(process.env.NEATLOGS_CAPTURE_SYSTEM_PROMPT || '').toLowerCase() === 'true';
+  const workflowName = 'opencode';
   const debug = String(process.env.NEATLOGS_DEBUG || '').toLowerCase() === 'true';
 
   const shipper = new TraceShipper({ apiKey, endpoint, workflowName, debug });
@@ -216,10 +212,9 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
       }
     },
 
-    /** Capture the system prompt (opt-in). */
+    /** Capture the system prompt. */
     'experimental.chat.system.transform': async (_input: any, output: any) => {
       try {
-        if (!captureSystemPrompt) return;
         const sessionID = String(_input?.sessionID ?? '');
         const parts = output?.system ?? output?.parts ?? output;
         const joined = Array.isArray(parts) ? parts.map((p: any) => (typeof p === 'string' ? p : p?.text ?? '')).join('\n') : String(parts ?? '');

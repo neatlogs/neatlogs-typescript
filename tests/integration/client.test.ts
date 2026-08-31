@@ -1,15 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type {
-  ReadableSpan,
-  SpanExporter,
-} from '@opentelemetry/sdk-trace-base';
+import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import type { ExportResult } from '@opentelemetry/core';
-import {
-  InMemoryLogRecordExporter,
-  SimpleLogRecordProcessor,
-} from '@opentelemetry/sdk-logs';
+import { InMemoryLogRecordExporter, SimpleLogRecordProcessor } from '@opentelemetry/sdk-logs';
 
 import { Client } from '../../src/core/client.js';
+import { flushAll } from '../../src/init.js';
 import { trace } from '../../src/core/context.js';
 import { _setOtelLogger, captureStdout, log } from '../../src/core/log.js';
 import { wrapOpenAI } from '../../src/openai.js';
@@ -21,10 +16,7 @@ const clients: Client[] = [];
 class RetainingSpanExporter implements SpanExporter {
   private readonly spans: ReadableSpan[] = [];
 
-  export(
-    spans: ReadableSpan[],
-    resultCallback: (result: ExportResult) => void,
-  ): void {
+  export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     this.spans.push(...spans);
     resultCallback({ code: 0 });
   }
@@ -55,6 +47,36 @@ afterEach(async () => {
 });
 
 describe('Client', () => {
+  it.each([-0.1, 1.1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid sampleRate %s before creating a provider',
+    (sampleRate) => {
+      expect(
+        () =>
+          new Client({
+            apiKey: 'unused',
+            workflowName: 'invalid-sampling',
+            sampleRate,
+          }),
+      ).toThrow('sampleRate must be a finite number between 0 and 1');
+    },
+  );
+
+  it('samples complete traces at the provider instead of individual exports', async () => {
+    const exporter = new RetainingSpanExporter();
+    const client = new Client({
+      apiKey: 'unused',
+      workflowName: 'never-sampled',
+      sampleRate: 0,
+      spanExporter: exporter,
+    });
+    clients.push(client);
+
+    await client.activate(() => trace({ name: 'unsampled-root', kind: 'WORKFLOW' }, () => 'done'));
+    await client.flush();
+
+    expect(exporter.getFinishedSpans()).toEqual([]);
+  });
+
   it('routes concurrent trace calls to independent providers', async () => {
     const first = makeClient('first');
     const second = makeClient('second');
@@ -69,18 +91,33 @@ describe('Client', () => {
     ]);
     await Promise.all([first.client.flush(), second.client.flush()]);
 
-    expect(first.exporter.getFinishedSpans().map((span) => span.name)).toContain(
-      'first-run',
-    );
-    expect(first.exporter.getFinishedSpans().map((span) => span.name)).not.toContain(
-      'second-run',
-    );
-    expect(second.exporter.getFinishedSpans().map((span) => span.name)).toContain(
-      'second-run',
-    );
-    expect(second.exporter.getFinishedSpans().map((span) => span.name)).not.toContain(
-      'first-run',
-    );
+    expect(first.exporter.getFinishedSpans().map((span) => span.name)).toContain('first-run');
+    expect(first.exporter.getFinishedSpans().map((span) => span.name)).not.toContain('second-run');
+    expect(second.exporter.getFinishedSpans().map((span) => span.name)).toContain('second-run');
+    expect(second.exporter.getFinishedSpans().map((span) => span.name)).not.toContain('first-run');
+  });
+
+  it('flushAll drains every live Neatlogs Client', async () => {
+    const first = makeClient('first-flush-all');
+    const second = makeClient('second-flush-all');
+    const firstFlush = vi.spyOn(first.client, 'flush');
+    const secondFlush = vi.spyOn(second.client, 'flush');
+
+    await expect(flushAll()).resolves.toBe(true);
+
+    expect(firstFlush).toHaveBeenCalledOnce();
+    expect(secondFlush).toHaveBeenCalledOnce();
+  });
+
+  it('removes a shut down Client from flushAll', async () => {
+    const entry = makeClient('closed-flush-all');
+    const clientFlush = vi.spyOn(entry.client, 'flush');
+    await entry.client.shutdown();
+    clientFlush.mockClear();
+
+    await expect(flushAll()).resolves.toBe(true);
+
+    expect(clientFlush).not.toHaveBeenCalled();
   });
 
   it('routes one shared provider wrapper at invocation time', async () => {
@@ -109,9 +146,7 @@ describe('Client', () => {
     const secondSpans = second.exporter.getFinishedSpans();
     expect(firstSpans.some((span) => span.name === 'openai.chat.completions.create')).toBe(true);
     expect(secondSpans.some((span) => span.name === 'openai.chat.completions.create')).toBe(true);
-    expect(firstSpans.find((span) => span.parentSpanId === undefined)?.name).toBe(
-      'first-project',
-    );
+    expect(firstSpans.find((span) => span.parentSpanId === undefined)?.name).toBe('first-project');
     expect(secondSpans.find((span) => span.parentSpanId === undefined)?.name).toBe(
       'second-project',
     );
@@ -157,22 +192,14 @@ describe('Client', () => {
     const second = makeClient('second', true);
     const firstLogs = new InMemoryLogRecordExporter();
     const secondLogs = new InMemoryLogRecordExporter();
-    first.client.logProvider!.addLogRecordProcessor(
-      new SimpleLogRecordProcessor(firstLogs),
-    );
-    second.client.logProvider!.addLogRecordProcessor(
-      new SimpleLogRecordProcessor(secondLogs),
-    );
+    first.client.logProvider!.addLogRecordProcessor(new SimpleLogRecordProcessor(firstLogs));
+    second.client.logProvider!.addLogRecordProcessor(new SimpleLogRecordProcessor(secondLogs));
 
     first.client.activate(() => log('first message'));
     second.client.activate(() => log('second message'));
 
-    expect(firstLogs.getFinishedLogRecords().map((item) => item.body)).toEqual([
-      'first message',
-    ]);
-    expect(secondLogs.getFinishedLogRecords().map((item) => item.body)).toEqual([
-      'second message',
-    ]);
+    expect(firstLogs.getFinishedLogRecords().map((item) => item.body)).toEqual(['first message']);
+    expect(secondLogs.getFinishedLogRecords().map((item) => item.body)).toEqual(['second message']);
   });
 
   it('does not leak a log-disabled Client into the global project logger', () => {
@@ -192,12 +219,8 @@ describe('Client', () => {
     const second = makeClient('second', true);
     const firstLogs = new InMemoryLogRecordExporter();
     const secondLogs = new InMemoryLogRecordExporter();
-    first.client.logProvider!.addLogRecordProcessor(
-      new SimpleLogRecordProcessor(firstLogs),
-    );
-    second.client.logProvider!.addLogRecordProcessor(
-      new SimpleLogRecordProcessor(secondLogs),
-    );
+    first.client.logProvider!.addLogRecordProcessor(new SimpleLogRecordProcessor(firstLogs));
+    second.client.logProvider!.addLogRecordProcessor(new SimpleLogRecordProcessor(secondLogs));
 
     await Promise.all([
       first.client.activate(() =>
@@ -214,12 +237,8 @@ describe('Client', () => {
       ),
     ]);
 
-    expect(firstLogs.getFinishedLogRecords().map((item) => item.body)).toEqual([
-      'first stdout',
-    ]);
-    expect(secondLogs.getFinishedLogRecords().map((item) => item.body)).toEqual([
-      'second stdout',
-    ]);
+    expect(firstLogs.getFinishedLogRecords().map((item) => item.body)).toEqual(['first stdout']);
+    expect(secondLogs.getFinishedLogRecords().map((item) => item.body)).toEqual(['second stdout']);
   });
 
   it('closes active spans once and makes cached tracers no-op', async () => {
@@ -233,9 +252,7 @@ describe('Client', () => {
     await expect(first).resolves.toBe(true);
     expect(active.isRecording()).toBe(false);
 
-    const finished = exporter
-      .getFinishedSpans()
-      .find((span) => span.name === 'active');
+    const finished = exporter.getFinishedSpans().find((span) => span.name === 'active');
     expect(finished?.attributes['neatlogs.trace.interrupted']).toBe(true);
     expect(tracer.startSpan('late').isRecording()).toBe(false);
     expect(() => client.activate(() => undefined)).toThrow(/closing or closed/);
@@ -261,9 +278,9 @@ describe('Client', () => {
         disableExport: true,
       });
       clients.push(client);
-      expect(
-        client.tracerProvider.resource.attributes['neatlogs.verification.marker'],
-      ).toBe('run-123');
+      expect(client.tracerProvider.resource.attributes['neatlogs.verification.marker']).toBe(
+        'run-123',
+      );
     } finally {
       if (previous === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES;
       else process.env.OTEL_RESOURCE_ATTRIBUTES = previous;

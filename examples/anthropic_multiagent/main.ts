@@ -420,7 +420,6 @@ async function main() {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: `${workflowPrefix}anthropic-code-review`,
     tags: ['anthropic', 'code-review', 'python'],
-    instrumentations: ['anthropic'],
     debug: true,
   });
 

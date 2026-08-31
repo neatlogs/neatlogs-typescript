@@ -356,7 +356,6 @@ async function main() {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: `${workflowPrefix}google-genai-content-creation`,
     tags: ['google-genai', 'content', 'blog'],
-    instrumentations: ['google_genai'],
     debug: true,
   });
 

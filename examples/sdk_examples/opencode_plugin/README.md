@@ -39,8 +39,6 @@ dependency next to the plugin dir so opencode can resolve the import.
 
 ```bash
 export NEATLOGS_API_KEY=...                 # required to export
-export NEATLOGS_WORKFLOW_NAME=opencode      # optional
-export NEATLOGS_CAPTURE_SYSTEM_PROMPT=true  # optional
 
 # From this directory, launch opencode as usual:
 opencode

@@ -7,10 +7,7 @@
 import { init, span, trace, PromptTemplate, shutdown } from 'neatlogs';
 
 async function main() {
-  await init({
-    apiKey: process.env.NEATLOGS_API_KEY,
-    instrumentations: ['openai'],
-  });
+  await init({ apiKey: process.env.NEATLOGS_API_KEY });
 
   const systemTemplate = new PromptTemplate(
     'You are a {{role}} assistant. Answer questions about {{topic}}.'

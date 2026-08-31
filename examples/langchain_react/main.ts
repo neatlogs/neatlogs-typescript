@@ -102,11 +102,10 @@ async function main(): Promise<void> {
     endpoint: process.env.NEATLOGS_ENDPOINT ?? 'http://localhost:4100',
     workflowName: `${workflowPrefix}langchain-react-agent`,
     tags: ['langchain', 'react', 'research', 'retriever'],
-    instrumentations: ['langchain'],
     debug: true,
   });
 
-  // IMPORTANT: Import LangChain modules AFTER init() so instrumentation patches them
+  // Load the application dependencies after SDK initialization.
   const { AzureChatOpenAI } = await import('@langchain/openai');
   const { tool: lcTool } = await import('@langchain/core/tools');
   const { ChatPromptTemplate } = await import('@langchain/core/prompts');
