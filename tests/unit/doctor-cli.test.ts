@@ -31,7 +31,29 @@ describe('doctor CLI', () => {
     expect(code).toBe(3);
     expect(fetch).not.toHaveBeenCalled();
     expect(value.output[0]).not.toContain('undefined');
-    expect(JSON.parse(value.output[0]!)).toMatchObject({ first_failure: 'MISSING_CREDENTIALS' });
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      format_version: 'neatlogs.doctor/v2', mode: 'probe', status: 'fail',
+      first_failure: 'CREDENTIAL_MISSING',
+      runtime: { language: 'typescript' },
+      capture: { span_count: 3 },
+      checks: expect.arrayContaining([expect.objectContaining({
+        reason_code: 'CREDENTIAL_MISSING', remediation_code: 'SET_CREDENTIAL',
+      })]),
+    });
+  });
+
+  it('reports an invalid endpoint without throwing or contacting the backend', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'not-a-url' });
+    const fetch = vi.fn();
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], { ...value.overrides, fetch });
+    expect(code).toBe(3);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      status: 'fail', first_failure: 'ENDPOINT_INVALID',
+      checks: expect.arrayContaining([expect.objectContaining({
+        reason_code: 'ENDPOINT_INVALID', remediation_code: 'SET_ENDPOINT',
+      })]),
+    });
   });
 
   it('polls the actual backend receipt shape and passes only after visibility', async () => {
@@ -70,7 +92,7 @@ describe('doctor CLI', () => {
       : new Response(JSON.stringify(options?.method === 'POST' ? { format_version: 'neatlogs.doctor-session/v2', diagnostic_id: diagnosticSessionId, probe_token: 'dpt_secret', created_at: '2030-01-01T00:00:00Z', expires_at: '2030-01-01T00:10:00Z', fixture_version: 'doctor-fixture/v1' } : session), { status: options?.method === 'POST' ? 201 : 200 }));
     const code = await runDoctorCli(['doctor', '--probe', '--json'], { ...value.overrides, fetch: fetch as typeof globalThis.fetch, sleep: async () => undefined });
     expect(code).toBe(3);
-    expect(JSON.parse(value.output[0]!)).toMatchObject({ status: 'fail', first_failure: 'BACKEND_PROBE_INCOMPLETE', probe: { stages: [{ stage: 'auth', status: 'accepted' }] } });
+    expect(JSON.parse(value.output[0]!)).toMatchObject({ status: 'fail', first_failure: 'STAGE_PENDING', probe: { stages: [{ stage: 'auth', status: 'accepted' }] } });
     expect(value.output[0]).not.toContain('dpt_secret');
   });
 

@@ -40,6 +40,22 @@ describe('doctor v2 local envelope', () => {
     expect(doctorSemanticDigest({ ...value, spans: [...value.spans].reverse() })).toBe(doctorSemanticDigest(value));
   });
 
+  it('detects a canonical nested assistant tool request without an execution span', () => {
+    const value = envelope();
+    const spans = value.spans
+      .filter((span) => span.kind !== 'TOOL')
+      .map((span) => span.kind === 'LLM' ? {
+        ...span,
+        tool_calls: [],
+        choices: [{ index: 0, message: { role: 'assistant', tool_calls: [{ id: 'doctor_nested_call', name: 'diagnostic_tool' }] } }],
+        expected_choice_count: 1,
+      } : span);
+    const result = doctorLocalV2({ ...value, spans });
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason_code: 'TOOL_EXECUTION_MISSING' }),
+    ]));
+  });
+
   it('rejects hierarchy, sampling, and payload defects', () => {
     const value = envelope();
     const broken: DiagnosticEnvelope = {

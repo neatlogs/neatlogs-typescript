@@ -246,6 +246,24 @@ function jsonSafe(value: unknown): boolean {
   try { JSON.stringify(canonicalize(value)); return true; } catch { return false; }
 }
 
+function collectNestedToolRequestIds(value: unknown, output: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const child of value) collectNestedToolRequestIds(child, output);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'tool_calls' && Array.isArray(child)) {
+      for (const call of child) {
+        if (call && typeof call === 'object' && typeof (call as Record<string, unknown>).id === 'string') {
+          output.add((call as Record<string, unknown>).id as string);
+        }
+      }
+    }
+    collectNestedToolRequestIds(child, output);
+  }
+}
+
 /** Validate the finished, masked, normalized envelope captured before network send. */
 export function doctorLocalV2(
   envelope: DiagnosticEnvelope,
@@ -273,6 +291,7 @@ export function doctorLocalV2(
     if (span.oversized && !(span.payload_references?.some((reference) => reference.size > 0 && DIGEST.test(reference.digest) && reference.mime_type.length > 0))) checks.push(failure('payload', 'PAYLOAD_ATTACHMENT_REQUIRED', 'Oversized content requires a valid payload reference', { span_id: span.span_id }));
   }
   const requested = new Set(envelope.spans.flatMap((span) => span.tool_calls ?? []).map((call) => call.id));
+  for (const span of envelope.spans) collectNestedToolRequestIds(span.choices, requested);
   const executed = new Set(envelope.spans.flatMap((span) => span.tool_call ? [span.tool_call.id] : []));
   for (const callId of requested) if (!executed.has(callId)) checks.push(failure('tools', 'TOOL_EXECUTION_MISSING', 'Assistant-requested tool call has no execution span', { call_id: callId }));
   for (const callId of executed) if (!requested.has(callId)) checks.push(failure('tools', 'TOOL_CALL_MISSING', 'Tool execution has no preserved assistant request', { call_id: callId }));
