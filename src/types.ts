@@ -11,12 +11,24 @@ export type SpanKind =
   | 'MCP_TOOL'
   | 'GUARDRAIL';
 
+/** Context supplied to an export-boundary mask callback. */
+export interface MaskContext {
+  /** Aborted when the callback exceeds the SDK's masking deadline. */
+  signal: AbortSignal;
+  /** Signal currently being prepared for export. */
+  signalType: 'span' | 'log';
+  /** Deadline enforced by the SDK, in milliseconds. */
+  timeoutMs: number;
+}
+
 /**
- * A mask function that can redact or transform span data before export.
- * Return null to drop the span entirely.
+ * A mask function that can redact or transform a span or log immediately
+ * before export. Return null to drop the signal entirely. The optional context
+ * keeps existing one-argument callbacks source-compatible.
  */
 export type MaskFunction = (
-  spanData: Record<string, any>,
+  signalData: Record<string, any>,
+  context?: MaskContext,
 ) =>
   | Record<string, any>
   | null

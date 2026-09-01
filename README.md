@@ -396,21 +396,27 @@ const rendered = handle.compile({ name: 'world' });
 
 ---
 
-### `flush()` / `flushAll()` / `shutdown()`
+### `flush()` / `flushAll()` / `flushAllDetailed()` / `shutdown()`
 
 ```typescript
 // Flush pending spans without shutting down
 await flush();
 
-// Flush the default pipeline and every live Neatlogs Client
-await flushAll();
+// Flush the default pipeline and every live Neatlogs Client under one deadline
+const flushed = await flushAll(30_000);
+if (!flushed) console.error('One or more Neatlogs pipelines failed to flush');
+
+// Inspect per-pipeline timeout and failure details when needed
+const result = await flushAllDetailed(30_000);
+if (!result.success) console.error(result.outcomes);
 
 // Flush and shut down — call before process exit
 await shutdown();
 ```
 
-`flushAll()` only knows about Neatlogs-owned pipelines. It does not discover or
-flush Datadog, Langfuse, Braintrust, or a global OpenTelemetry provider.
+`flushAll()` and `flushAllDetailed()` only know about Neatlogs-owned pipelines.
+They do not discover or flush Datadog, Langfuse, Braintrust, or a global
+OpenTelemetry provider.
 
 `shutdown()` resets all SDK state so `init()` can be called again if needed.
 

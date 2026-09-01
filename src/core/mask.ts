@@ -9,6 +9,12 @@ import type { MaskFunction } from '../types.js';
 import { getLogger } from './logger.js';
 
 const logger = getLogger();
+export const DEFAULT_MASK_TIMEOUT_MS = 5_000;
+
+export interface ApplyMaskOptions {
+  signalType?: 'span' | 'log';
+  timeoutMs?: number;
+}
 
 /** Module-level registry: key -> mask function */
 const _MASK_REGISTRY = new Map<string, MaskFunction>();
@@ -52,22 +58,42 @@ function effectiveMask(
 export async function applyMask(
   spanData: Record<string, any>,
   globalMask: MaskFunction | null | undefined,
+  options: ApplyMaskOptions = {},
 ): Promise<Record<string, any> | null> {
   const maskFn = effectiveMask(spanData, globalMask);
   if (!maskFn) return spanData;
 
+  const signalType = options.signalType ?? 'span';
+  const timeoutMs = options.timeoutMs ?? DEFAULT_MASK_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
   try {
     // Run user masking outside SpanProcessor.onEnd() so a slow callback does
     // not block application request completion.
-    const result = await Promise.resolve().then(() => maskFn(spanData));
+    const maskPromise = Promise.resolve().then(() =>
+      maskFn(spanData, { signal: controller.signal, signalType, timeoutMs }),
+    );
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`mask callback exceeded ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref?.();
+    });
+    const result = await Promise.race([maskPromise, timeoutPromise]);
     // null means "drop this span entirely"; undefined means "keep original"
     if (result === null) return null;
     return result !== undefined ? result : spanData;
   } catch (exc) {
+    const signalName = spanData?.name ?? spanData?.signal_type ?? signalType;
     logger.error(
-      `mask callable failed for span '${spanData?.name}': ${exc} — dropping the span to prevent unmasked export.`,
+      `mask callable failed for ${signalType} '${signalName}': ${exc} — dropping it to prevent unmasked export.`,
     );
     return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
   }
 }
 
@@ -77,7 +103,7 @@ export function scheduleMask(
   spanData: Record<string, any>,
   globalMask: MaskFunction | null | undefined,
 ): Promise<Record<string, any> | null> {
-  const result = applyMask(spanData, globalMask);
+  const result = applyMask(spanData, globalMask, { signalType: 'span' });
   _MASK_RESULTS.set(span, result);
   return result;
 }

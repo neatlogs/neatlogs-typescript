@@ -1,6 +1,7 @@
 export type NeatlogsConfigurationErrorCode =
   | 'UNKNOWN_INIT_OPTION'
-  | 'UNSUPPORTED_INSTRUMENTATIONS';
+  | 'UNSUPPORTED_INSTRUMENTATIONS'
+  | 'CONFLICTING_INIT';
 
 /** A caller-actionable SDK configuration failure. */
 export class NeatlogsConfigurationError extends TypeError {

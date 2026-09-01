@@ -3,24 +3,35 @@
  * Provides the low-level wrapping logic used by span() and Span().
  */
 
-import { ROOT_CONTEXT, SpanStatusCode, type Span as OtelSpan } from '@opentelemetry/api';
-import { getLogger } from '../core/logger.js';
-import { registerMask } from '../core/mask.js';
-import { applyEndUserAttributes, isRootSpan } from '../core/end-user.js';
-import { applySessionAttributes } from '../core/session.js';
-import { getNeatlogsTracer, getNeatlogsParentContext, withNeatlogsSpan } from '../core/provider.js';
-import type { SpanOptions, MaskFunction } from '../types.js';
+import {
+  ROOT_CONTEXT,
+  SpanStatusCode,
+  type Span as OtelSpan,
+} from "@opentelemetry/api";
+import { getLogger } from "../core/logger.js";
+import { registerMask } from "../core/mask.js";
+import { applyEndUserAttributes, isRootSpan } from "../core/end-user.js";
+import { applySessionAttributes } from "../core/session.js";
+import {
+  getNeatlogsTracer,
+  getNeatlogsParentContext,
+  withNeatlogsSpan,
+} from "../core/provider.js";
+import type { SpanOptions, MaskFunction } from "../types.js";
 
 const logger = getLogger();
-const TRACER_NAME = 'neatlogs';
+const TRACER_NAME = "neatlogs";
+const MAX_SEMANTIC_STREAM_EVENTS = 128;
 
 /** Safely serialize any value to JSON string. */
 export function safeJsonDumps(value: any): string {
   try {
     return JSON.stringify(value, (_key, val) => {
-      if (typeof val === 'bigint') return val.toString();
-      if (val instanceof Error) return { message: val.message, name: val.name, stack: val.stack };
-      if (typeof val === 'function') return `[Function: ${val.name || 'anonymous'}]`;
+      if (typeof val === "bigint") return val.toString();
+      if (val instanceof Error)
+        return { message: val.message, name: val.name, stack: val.stack };
+      if (typeof val === "function")
+        return `[Function: ${val.name || "anonymous"}]`;
       return val;
     });
   } catch {
@@ -31,10 +42,15 @@ export function safeJsonDumps(value: any): string {
 /** Serialize an object for span attributes. Handles toJSON(), plain objects, primitives. */
 export function serializeObj(obj: any): any {
   if (obj === null || obj === undefined) return obj;
-  if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') return obj;
-  if (typeof obj.toJSON === 'function') return obj.toJSON();
+  if (
+    typeof obj === "string" ||
+    typeof obj === "number" ||
+    typeof obj === "boolean"
+  )
+    return obj;
+  if (typeof obj.toJSON === "function") return obj.toJSON();
   if (Array.isArray(obj)) return obj.map(serializeObj);
-  if (typeof obj === 'object') {
+  if (typeof obj === "object") {
     const result: Record<string, any> = {};
     for (const [key, value] of Object.entries(obj)) {
       result[key] = serializeObj(value);
@@ -47,17 +63,17 @@ export function serializeObj(obj: any): any {
 /** Set common span attributes from options. */
 export function setCommonSpanAttrs(span: OtelSpan, opts: SpanOptions): void {
   if (opts.kind) {
-    span.setAttribute('openinference.span.kind', opts.kind);
+    span.setAttribute("openinference.span.kind", opts.kind);
   }
   if (opts.internal) {
-    span.setAttribute('neatlogs.internal', true);
+    span.setAttribute("neatlogs.internal", true);
   }
   if (opts.description) {
-    span.setAttribute('neatlogs.description', opts.description);
+    span.setAttribute("neatlogs.description", opts.description);
   }
   if (opts.mask) {
     const maskId = registerMask(opts.mask);
-    span.setAttribute('neatlogs.mask_id', maskId);
+    span.setAttribute("neatlogs.mask_id", maskId);
   }
 }
 
@@ -65,22 +81,40 @@ export interface DecorateSpanOptions extends SpanOptions {
   /** Override the span name (defaults to function name). */
   spanName?: string;
   /** Post-process callback after the function returns. */
-  postprocessResult?: (span: OtelSpan, result: any, boundInputs: Record<string, any>) => void;
+  postprocessResult?: (
+    span: OtelSpan,
+    result: any,
+    boundInputs: Record<string, any>,
+  ) => void;
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   return (
     value !== null &&
-    (typeof value === 'object' || typeof value === 'function') &&
-    typeof (value as { then?: unknown }).then === 'function'
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function"
   );
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   return (
     value !== null &&
-    (typeof value === 'object' || typeof value === 'function') &&
-    typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function'
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { [Symbol.asyncIterator]?: unknown })[
+      Symbol.asyncIterator
+    ] === "function"
+  );
+}
+
+function isSyncIterator(
+  value: unknown,
+): value is Iterator<unknown> & Iterable<unknown> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { next?: unknown }).next === "function" &&
+    typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] ===
+      "function"
   );
 }
 
@@ -90,9 +124,9 @@ function isReadableStreamLike(value: unknown): value is {
 } {
   return (
     value !== null &&
-    typeof value === 'object' &&
-    typeof (value as { getReader?: unknown }).getReader === 'function' &&
-    typeof (value as { cancel?: unknown }).cancel === 'function'
+    typeof value === "object" &&
+    typeof (value as { getReader?: unknown }).getReader === "function" &&
+    typeof (value as { cancel?: unknown }).cancel === "function"
   );
 }
 
@@ -104,7 +138,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
   opts: DecorateSpanOptions,
   fn: (...args: TArgs) => TReturn,
 ): (...args: TArgs) => TReturn {
-  const spanName = opts.spanName ?? opts.name ?? (fn.name || 'anonymous');
+  const spanName = opts.spanName ?? opts.name ?? (fn.name || "anonymous");
   const captureInput = opts.captureInput !== false;
   const captureOutput = opts.captureOutput !== false;
 
@@ -122,12 +156,16 @@ export function decorateSpan<TArgs extends any[], TReturn>(
     const span = tracer.startSpan(spanName, {}, parentContext);
     return withNeatlogsSpan(span, () => {
       let finished = false;
+      let streamInterrupted = false;
       const streamChunks: any[] = [];
 
       const captureResult = (result: any): void => {
         if (captureOutput) {
           try {
-            span.setAttribute('output.value', safeJsonDumps(serializeObj(result)));
+            span.setAttribute(
+              "output.value",
+              safeJsonDumps(serializeObj(result)),
+            );
           } catch (err) {
             logger.debug(`Failed to capture output: ${err}`);
           }
@@ -151,47 +189,83 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         span.end();
       };
 
+      const setStreamCounts = (): void => {
+        span.setAttribute("neatlogs.stream.chunk_count", streamChunks.length);
+        if (streamChunks.length > MAX_SEMANTIC_STREAM_EVENTS) {
+          span.setAttribute(
+            "neatlogs.stream.events_dropped",
+            streamChunks.length - MAX_SEMANTIC_STREAM_EVENTS,
+          );
+        }
+      };
+
       const finishError = (error: any): void => {
         if (finished) return;
         finished = true;
+        if (error?.name === "AbortError") {
+          span.setAttribute("neatlogs.stream.cancelled", true);
+          if (streamChunks.length > 0) {
+            setStreamCounts();
+            captureResult(streamChunks);
+          }
+          span.setStatus({ code: SpanStatusCode.UNSET });
+          span.end();
+          return;
+        }
         span.setStatus({
           code: SpanStatusCode.ERROR,
           message: error?.message ?? String(error),
         });
-        span.recordException(error instanceof Error ? error : new Error(String(error)));
+        span.recordException(
+          error instanceof Error ? error : new Error(String(error)),
+        );
         span.end();
       };
 
       const recordChunk = (chunk: any): void => {
         const index = streamChunks.length;
         streamChunks.push(chunk);
-        const attributes: Record<string, string | number> = {
-          'neatlogs.stream.chunk.index': index,
+        if (index >= MAX_SEMANTIC_STREAM_EVENTS) return;
+        const serialized = safeJsonDumps(serializeObj(chunk));
+        const summary: Record<string, unknown> = {
+          value_type: Array.isArray(chunk) ? "array" : typeof chunk,
+          encoded_bytes: new TextEncoder().encode(serialized).byteLength,
         };
-        if (captureOutput) {
-          attributes['neatlogs.stream.chunk.value'] = safeJsonDumps(serializeObj(chunk));
-        }
-        span.addEvent('neatlogs.stream.chunk', attributes);
+        if (Array.isArray(chunk)) summary.items = chunk.length;
+        else if (chunk && typeof chunk === "object")
+          summary.keys = Object.keys(chunk).sort();
+        span.addEvent("neatlogs.stream.chunk", {
+          "neatlogs.stream.chunk.index": index,
+          "neatlogs.stream.chunk.summary": safeJsonDumps(summary),
+        });
       };
 
       const finishStream = (cancelled = false): void => {
-        if (cancelled) {
-          span.setAttribute('neatlogs.stream.cancelled', true);
+        setStreamCounts();
+        if (!cancelled) {
+          finishSuccess(streamChunks);
+          return;
         }
-        span.setAttribute('neatlogs.stream.chunk_count', streamChunks.length);
-        finishSuccess(streamChunks);
+        if (finished) return;
+        finished = true;
+        span.setAttribute("neatlogs.stream.cancelled", true);
+        captureResult(streamChunks);
+        span.setStatus({ code: SpanStatusCode.UNSET });
+        span.end();
       };
 
-      const wrapIterator = (iterator: any): any => {
+      const wrapAsyncIterator = (iterator: any): any => {
         let proxy: any;
         proxy = new Proxy(iterator, {
           get(target, property) {
             if (property === Symbol.asyncIterator) return () => proxy;
-            if (property === 'next') {
+            if (property === "next") {
               return async (...nextArgs: any[]) => {
                 try {
-                  const item = await withNeatlogsSpan(span, () => target.next(...nextArgs));
-                  if (item.done) finishStream();
+                  const item = await withNeatlogsSpan(span, () =>
+                    target.next(...nextArgs),
+                  );
+                  if (item.done) finishStream(streamInterrupted);
                   else recordChunk(item.value);
                   return item;
                 } catch (error) {
@@ -200,13 +274,16 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                 }
               };
             }
-            if (property === 'return') {
+            if (property === "return") {
               return async (...returnArgs: any[]) => {
                 try {
+                  streamInterrupted = true;
                   const item = target.return
-                    ? await withNeatlogsSpan(span, () => target.return(...returnArgs))
+                    ? await withNeatlogsSpan(span, () =>
+                        target.return(...returnArgs),
+                      )
                     : { done: true, value: returnArgs[0] };
-                  finishStream(true);
+                  if (item.done) finishStream(true);
                   return item;
                 } catch (error) {
                   finishError(error);
@@ -214,11 +291,13 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                 }
               };
             }
-            if (property === 'throw') {
+            if (property === "throw") {
               return async (...throwArgs: any[]) => {
                 try {
                   const item = target.throw
-                    ? await withNeatlogsSpan(span, () => target.throw(...throwArgs))
+                    ? await withNeatlogsSpan(span, () =>
+                        target.throw(...throwArgs),
+                      )
                     : Promise.reject(throwArgs[0]);
                   if (item.done) finishStream();
                   else recordChunk(item.value);
@@ -230,34 +309,110 @@ export function decorateSpan<TArgs extends any[], TReturn>(
               };
             }
             const value = Reflect.get(target, property, target);
-            return typeof value === 'function' ? value.bind(target) : value;
+            return typeof value === "function" ? value.bind(target) : value;
           },
         });
         return proxy;
       };
 
       const wrapAsyncIterable = (source: AsyncIterable<unknown>): any => {
-        if (typeof (source as any).next === 'function') {
-          return wrapIterator(source);
+        if (typeof (source as any).next === "function") {
+          return wrapAsyncIterator(source);
         }
         return new Proxy(source as any, {
           get(target, property) {
             if (property === Symbol.asyncIterator) {
-              return () => wrapIterator(target[Symbol.asyncIterator]());
+              return () => wrapAsyncIterator(target[Symbol.asyncIterator]());
             }
             const value = Reflect.get(target, property, target);
-            return typeof value === 'function' ? value.bind(target) : value;
+            return typeof value === "function" ? value.bind(target) : value;
           },
         });
+      };
+
+      const wrapSyncIterator = (
+        iterator: Iterator<unknown> & Iterable<unknown>,
+      ): any => {
+        let proxy: any;
+        proxy = new Proxy(iterator, {
+          get(target, property) {
+            if (property === Symbol.iterator) return () => proxy;
+            if (property === "next") {
+              return (...nextArgs: any[]) => {
+                try {
+                  const item = withNeatlogsSpan(span, () =>
+                    (
+                      target.next as (
+                        ...args: any[]
+                      ) => IteratorResult<unknown>
+                    )(...nextArgs),
+                  );
+                  if (item.done) finishStream(streamInterrupted);
+                  else recordChunk(item.value);
+                  return item;
+                } catch (error) {
+                  finishError(error);
+                  throw error;
+                }
+              };
+            }
+            if (property === "return") {
+              return (...returnArgs: any[]) => {
+                try {
+                  streamInterrupted = true;
+                  const item = target.return
+                    ? withNeatlogsSpan(span, () =>
+                        (
+                          target.return as (
+                            ...args: any[]
+                          ) => IteratorResult<unknown>
+                        )(...returnArgs),
+                      )
+                    : { done: true, value: returnArgs[0] };
+                  if (item.done) finishStream(true);
+                  return item;
+                } catch (error) {
+                  finishError(error);
+                  throw error;
+                }
+              };
+            }
+            if (property === "throw") {
+              return (...throwArgs: any[]) => {
+                try {
+                  if (!target.throw) throw throwArgs[0];
+                  const item = withNeatlogsSpan(span, () =>
+                    (
+                      target.throw as (
+                        ...args: any[]
+                      ) => IteratorResult<unknown>
+                    )(...throwArgs),
+                  );
+                  if (item.done) finishStream(streamInterrupted);
+                  else recordChunk(item.value);
+                  return item;
+                } catch (error) {
+                  finishError(error);
+                  throw error;
+                }
+              };
+            }
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return proxy;
       };
 
       const wrapReader = (reader: any): any =>
         new Proxy(reader, {
           get(target, property) {
-            if (property === 'read') {
+            if (property === "read") {
               return async (...readArgs: any[]) => {
                 try {
-                  const item = await withNeatlogsSpan(span, () => target.read(...readArgs));
+                  const item = await withNeatlogsSpan(span, () =>
+                    target.read(...readArgs),
+                  );
                   if (item.done) finishStream();
                   else recordChunk(item.value);
                   return item;
@@ -267,7 +422,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                 }
               };
             }
-            if (property === 'cancel') {
+            if (property === "cancel") {
               return async (...cancelArgs: any[]) => {
                 try {
                   const result = await target.cancel(...cancelArgs);
@@ -279,7 +434,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                 }
               };
             }
-            if (property === 'releaseLock') {
+            if (property === "releaseLock") {
               return (...releaseArgs: any[]) => {
                 try {
                   return target.releaseLock(...releaseArgs);
@@ -289,23 +444,24 @@ export function decorateSpan<TArgs extends any[], TReturn>(
               };
             }
             const value = Reflect.get(target, property, target);
-            return typeof value === 'function' ? value.bind(target) : value;
+            return typeof value === "function" ? value.bind(target) : value;
           },
         });
 
       const wrapReadableStream = (stream: any): any =>
         new Proxy(stream, {
           get(target, property) {
-            if (property === 'getReader') {
-              return (...readerArgs: any[]) => wrapReader(target.getReader(...readerArgs));
+            if (property === "getReader") {
+              return (...readerArgs: any[]) =>
+                wrapReader(target.getReader(...readerArgs));
             }
             if (property === Symbol.asyncIterator) {
               const iteratorFactory = target[Symbol.asyncIterator];
-              if (typeof iteratorFactory === 'function') {
-                return () => wrapIterator(iteratorFactory.call(target));
+              if (typeof iteratorFactory === "function") {
+                return () => wrapAsyncIterator(iteratorFactory.call(target));
               }
             }
-            if (property === 'cancel') {
+            if (property === "cancel") {
               return async (...cancelArgs: any[]) => {
                 try {
                   const result = await target.cancel(...cancelArgs);
@@ -317,7 +473,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                 }
               };
             }
-            if (property === 'pipeTo') {
+            if (property === "pipeTo") {
               return async (...pipeArgs: any[]) => {
                 try {
                   const result = await target.pipeTo(...pipeArgs);
@@ -330,7 +486,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
               };
             }
             const value = Reflect.get(target, property, target);
-            return typeof value === 'function' ? value.bind(target) : value;
+            return typeof value === "function" ? value.bind(target) : value;
           },
         });
 
@@ -344,13 +500,21 @@ export function decorateSpan<TArgs extends any[], TReturn>(
           sessionFeatureName: opts.sessionFeatureName,
           sessionEntryPoint: opts.sessionEntryPoint,
         });
-        applyEndUserAttributes(span, opts.endUserId, opts.endUserMetadata, isRoot);
+        applyEndUserAttributes(
+          span,
+          opts.endUserId,
+          opts.endUserMetadata,
+          isRoot,
+        );
 
         // Capture input
         if (captureInput && args.length > 0) {
           try {
-            const inputValue = args.length === 1 ? serializeObj(args[0]) : args.map(serializeObj);
-            span.setAttribute('input.value', safeJsonDumps(inputValue));
+            const inputValue =
+              args.length === 1
+                ? serializeObj(args[0])
+                : args.map(serializeObj);
+            span.setAttribute("input.value", safeJsonDumps(inputValue));
           } catch (err) {
             logger.debug(`Failed to capture input: ${err}`);
           }
@@ -359,29 +523,28 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         // Execute the function
         const result = fn(...args);
 
+        const handleResult = (resolved: any): any => {
+          // A promise may resolve to a stream. Classify the resolved value before
+          // ending the span so async factories remain open through consumption.
+          if (isReadableStreamLike(resolved))
+            return wrapReadableStream(resolved);
+          if (isAsyncIterable(resolved)) return wrapAsyncIterable(resolved);
+          if (isSyncIterator(resolved)) return wrapSyncIterator(resolved);
+          finishSuccess(resolved);
+          return resolved;
+        };
+
         // Handle any Promise/A+ thenable, not only native Promise instances.
         if (isPromiseLike(result)) {
           return Promise.resolve(result)
-            .then((resolved: any) => {
-              finishSuccess(resolved);
-              return resolved;
-            })
+            .then(handleResult)
             .catch((error: any) => {
               finishError(error);
               throw error;
             });
         }
 
-        // Keep stream spans open until consumption, cancellation, or error.
-        if (isReadableStreamLike(result)) {
-          return wrapReadableStream(result);
-        }
-        if (isAsyncIterable(result)) {
-          return wrapAsyncIterable(result);
-        }
-
-        finishSuccess(result);
-        return result;
+        return handleResult(result);
       } catch (error: any) {
         finishError(error);
         throw error;
@@ -390,7 +553,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
   };
 
   // Preserve function name for debugging
-  Object.defineProperty(wrapped, 'name', {
+  Object.defineProperty(wrapped, "name", {
     value: spanName,
     configurable: true,
   });
@@ -406,12 +569,12 @@ function _extractBoundInputs(fn: Function, args: any[]): Record<string, any> {
   const match = fnStr.match(/\(([^)]*)\)/);
   if (match) {
     const paramNames = match[1]
-      .split(',')
+      .split(",")
       .map((p) =>
         p
           .trim()
-          .replace(/\s*[:=].*$/, '')
-          .replace(/^\.\.\./, ''),
+          .replace(/\s*[:=].*$/, "")
+          .replace(/^\.\.\./, ""),
       )
       .filter(Boolean);
     for (let i = 0; i < Math.min(paramNames.length, args.length); i++) {

@@ -223,6 +223,7 @@ describe('init() edge cases', () => {
     expect(OTLPLogExporter).toHaveBeenCalledWith({
       url: 'https://custom.neatlogs.com/v1/logs',
       headers: { 'x-api-key': 'test-key' },
+      compression: 'gzip',
     });
     expect(BatchLogRecordProcessor).toHaveBeenCalledTimes(1);
     const options = (BatchLogRecordProcessor as any).mock.calls[0][1];

@@ -5,33 +5,47 @@ import {
   type Span,
   type SpanOptions,
   type Tracer,
-} from '@opentelemetry/api';
-import { Resource } from '@opentelemetry/resources';
-import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+} from "@opentelemetry/api";
+import { Resource } from "@opentelemetry/resources";
+import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import {
-  BatchSpanProcessor,
   ParentBasedSampler,
   TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanExporter,
-} from '@opentelemetry/sdk-trace-base';
-import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
-import { BatchLogRecordProcessor, LoggerProvider } from '@opentelemetry/sdk-logs';
-import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
+} from "@opentelemetry/sdk-trace-base";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { CompressionAlgorithm } from "@opentelemetry/otlp-exporter-base";
+import { LoggerProvider } from "@opentelemetry/sdk-logs";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 
-import { runWithClient } from './active-client.js';
-import { registerClient, unregisterClient } from './client-registry.js';
-import { FilteringExporter } from './filtering-exporter.js';
-import { getLogger } from './logger.js';
-import { runWithFreshNeatlogsContext } from './provider.js';
-import { addVerificationMarkerResourceAttribute } from './resource.js';
-import { CompletionMarkerSpanProcessor, NeatlogsSpanProcessor } from './span-processor.js';
-import type { MaskFunction } from '../types.js';
-import { __version__ } from '../version.js';
+import { runWithClient } from "./active-client.js";
+import { registerClient, unregisterClient } from "./client-registry.js";
+import { FilteringExporter } from "./filtering-exporter.js";
+import { ByteLimitedSpanExporter } from "./byte-limited-exporter.js";
+import { MaskingLogExporter } from "./masking-log-exporter.js";
+import {
+  DeliveryDiagnostics,
+  type DeliveryDiagnosticsSnapshot,
+} from "./delivery-diagnostics.js";
+import {
+  ObservableBatchLogRecordProcessor,
+  ObservableBatchSpanProcessor,
+} from "./observable-batch-processors.js";
+import { getLogger } from "./logger.js";
+import { runWithFreshNeatlogsContext } from "./provider.js";
+import { addVerificationMarkerResourceAttribute } from "./resource.js";
+import {
+  CompletionMarkerSpanProcessor,
+  NeatlogsSpanProcessor,
+} from "./span-processor.js";
+import type { MaskFunction } from "../types.js";
+import { __version__ } from "../version.js";
+import { DEFAULT_INGEST_ENDPOINT, exportQueueCapacity } from "../constants.js";
+import { runByDeadline } from "./deadline.js";
 
 const logger = getLogger();
-const DEFAULT_ENDPOINT = 'https://ingest.neatlogs.com';
 
 export interface ClientOptions {
   apiKey?: string;
@@ -49,7 +63,7 @@ export interface ClientOptions {
   spanExporter?: SpanExporter;
 }
 
-type ClientState = 'running' | 'closing' | 'closed';
+type ClientState = "running" | "closing" | "closed";
 
 const closedTracer: Tracer = {
   startSpan(): Span {
@@ -61,8 +75,15 @@ const closedTracer: Tracer = {
     arg3?: Context | F,
     arg4?: F,
   ): ReturnType<F> {
-    const fn = typeof arg2 === 'function' ? arg2 : typeof arg3 === 'function' ? arg3 : arg4;
-    return fn!(otelTrace.wrapSpanContext(INVALID_SPAN_CONTEXT)) as ReturnType<F>;
+    const fn =
+      typeof arg2 === "function"
+        ? arg2
+        : typeof arg3 === "function"
+          ? arg3
+          : arg4;
+    return fn!(
+      otelTrace.wrapSpanContext(INVALID_SPAN_CONTEXT),
+    ) as ReturnType<F>;
   },
 };
 
@@ -100,36 +121,40 @@ export class Client {
   private readonly completionProcessor: CompletionMarkerSpanProcessor | null;
   private readonly tracers = new Map<string, Tracer>();
   private readonly otelLogger: any | null;
-  private state: ClientState = 'running';
+  private state: ClientState = "running";
   private shutdownPromise: Promise<boolean> | null = null;
+  private readonly diagnostics = new DeliveryDiagnostics();
 
   constructor(options: ClientOptions) {
-    const apiKey = (options.apiKey ?? '').trim();
-    const workflowName = (options.workflowName ?? '').trim();
+    const apiKey = (options.apiKey ?? "").trim();
+    const workflowName = (options.workflowName ?? "").trim();
     const disableExport = options.disableExport ?? false;
-    if (!workflowName) throw new Error('workflowName is required');
+    if (!workflowName) throw new Error("workflowName is required");
     if (!apiKey && !disableExport) {
-      throw new Error('apiKey is required unless disableExport is true');
+      throw new Error("apiKey is required unless disableExport is true");
     }
     if (
       options.tags !== undefined &&
-      (!Array.isArray(options.tags) || !options.tags.every((tag) => typeof tag === 'string'))
+      (!Array.isArray(options.tags) ||
+        !options.tags.every((tag) => typeof tag === "string"))
     ) {
-      throw new Error('tags must be a list of strings');
+      throw new Error("tags must be a list of strings");
     }
     const sampleRate = options.sampleRate ?? 1;
     if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
-      throw new RangeError('sampleRate must be a finite number between 0 and 1.');
+      throw new RangeError(
+        "sampleRate must be a finite number between 0 and 1.",
+      );
     }
 
     this.workflowName = workflowName;
     const resourceAttributes: Record<string, string | number | boolean> = {
       [ATTR_SERVICE_NAME]: workflowName,
-      'service.version': __version__,
-      'neatlogs.workflow_name': workflowName,
+      "service.version": __version__,
+      "neatlogs.workflow_name": workflowName,
     };
     if (options.tags?.length) {
-      resourceAttributes['neatlogs.tags'] = options.tags.join(',');
+      resourceAttributes["neatlogs.tags"] = options.tags.join(",");
     }
     addVerificationMarkerResourceAttribute(resourceAttributes);
     const resource = new Resource(resourceAttributes);
@@ -150,26 +175,40 @@ export class Client {
     this.tracerProvider.addSpanProcessor(this.spanProcessor);
     this.completionProcessor = null;
 
-    const endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
+    const endpoint = options.endpoint ?? DEFAULT_INGEST_ENDPOINT;
     const baseUrl = new URL(endpoint).origin;
     if (!disableExport) {
-      const traceUrl = endpoint.endsWith('/v1/traces') ? endpoint : `${baseUrl}/v1/traces`;
+      const traceUrl = endpoint.endsWith("/v1/traces")
+        ? endpoint
+        : `${baseUrl}/v1/traces`;
       const exporter = new FilteringExporter(
-        options.spanExporter ??
-          new OTLPTraceExporter({
-            url: traceUrl,
-            headers: { 'x-api-key': apiKey },
-          }),
+        new ByteLimitedSpanExporter(
+          options.spanExporter ??
+            new OTLPTraceExporter({
+              url: traceUrl,
+              headers: { "x-api-key": apiKey },
+              compression: CompressionAlgorithm.GZIP,
+            }),
+          undefined,
+          this.diagnostics,
+        ),
+        this.diagnostics,
       );
+      const batchSize = options.batchSize ?? 100;
       this.tracerProvider.addSpanProcessor(
-        new BatchSpanProcessor(exporter, {
-          maxExportBatchSize: options.batchSize ?? 100,
-          scheduledDelayMillis: (options.flushInterval ?? 5) * 1000,
-        }),
+        new ObservableBatchSpanProcessor(
+          exporter,
+          {
+            maxExportBatchSize: batchSize,
+            maxQueueSize: exportQueueCapacity(batchSize),
+            scheduledDelayMillis: (options.flushInterval ?? 5) * 1000,
+          },
+          this.diagnostics,
+        ),
       );
       const completionProcessor = new CompletionMarkerSpanProcessor(
         this.spanProcessor,
-        this.tracerProvider.getTracer('neatlogs.internal'),
+        this.tracerProvider.getTracer("neatlogs.internal"),
       );
       this.tracerProvider.addSpanProcessor(completionProcessor);
       this.completionProcessor = completionProcessor;
@@ -177,21 +216,29 @@ export class Client {
 
     const logProcessors = !disableExport
       ? [
-          new BatchLogRecordProcessor(
-            new OTLPLogExporter({
-              url: `${baseUrl}/v1/logs`,
-              headers: { 'x-api-key': apiKey },
-            }),
+          new ObservableBatchLogRecordProcessor(
+            new MaskingLogExporter(
+              new OTLPLogExporter({
+                url: `${baseUrl}/v1/logs`,
+                headers: { "x-api-key": apiKey },
+                compression: CompressionAlgorithm.GZIP,
+              }),
+              options.mask,
+              undefined,
+              this.diagnostics,
+            ),
             {
               maxExportBatchSize: options.batchSize ?? 100,
+              maxQueueSize: exportQueueCapacity(options.batchSize ?? 100),
               scheduledDelayMillis: (options.flushInterval ?? 5) * 1000,
             },
+            this.diagnostics,
           ),
         ]
       : [];
     if (options.captureLogs) {
       const supportsDynamicProcessors =
-        typeof LoggerProvider.prototype.addLogRecordProcessor === 'function';
+        typeof LoggerProvider.prototype.addLogRecordProcessor === "function";
       this.logProvider = supportsDynamicProcessors
         ? new LoggerProvider({ resource })
         : new LoggerProvider({
@@ -206,41 +253,50 @@ export class Client {
     } else {
       this.logProvider = null;
     }
-    this.otelLogger = this.logProvider?.getLogger('neatlogs') ?? null;
+    this.otelLogger = this.logProvider?.getLogger("neatlogs") ?? null;
     registerClient(this);
   }
 
   isRunning(): boolean {
-    return this.state === 'running';
+    return this.state === "running";
   }
 
   getTracer(scope: string): Tracer {
     let tracer = this.tracers.get(scope);
     if (!tracer) {
-      tracer = new ClientLifecycleTracer(this, this.tracerProvider.getTracer(scope));
+      tracer = new ClientLifecycleTracer(
+        this,
+        this.tracerProvider.getTracer(scope),
+      );
       this.tracers.set(scope, tracer);
     }
     return tracer;
   }
 
   getLogger(): any | null {
-    return this.state === 'running' ? this.otelLogger : null;
+    return this.state === "running" ? this.otelLogger : null;
+  }
+
+  getDeliveryDiagnostics(): DeliveryDiagnosticsSnapshot {
+    return this.diagnostics.snapshot();
   }
 
   activate<T>(fn: () => T): T {
-    if (!this.isRunning()) throw new Error('Client is closing or closed');
+    if (!this.isRunning()) throw new Error("Client is closing or closed");
     return runWithClient(this, () => runWithFreshNeatlogsContext(fn));
   }
 
   async flush(): Promise<boolean> {
-    if (this.state === 'closed') return true;
-    if (this.state === 'closing') return this.shutdownPromise ?? false;
+    if (this.state === "closed") return true;
+    if (this.state === "closing") return this.shutdownPromise ?? false;
     let success = true;
     if (this.logProvider) {
       try {
         await this.logProvider.forceFlush();
       } catch (error) {
-        logger.error(`[Client:${this.workflowName}] Error flushing logs: ${error}`);
+        logger.error(
+          `[Client:${this.workflowName}] Error flushing logs: ${error}`,
+        );
         success = false;
       }
     }
@@ -256,58 +312,71 @@ export class Client {
     try {
       await this.tracerProvider.forceFlush();
     } catch (error) {
-      logger.error(`[Client:${this.workflowName}] Error flushing spans: ${error}`);
+      logger.error(
+        `[Client:${this.workflowName}] Error flushing spans: ${error}`,
+      );
       success = false;
     }
     return success;
   }
 
-  shutdown(reason = 'shutdown'): Promise<boolean> {
+  shutdown(reason = "shutdown", timeoutMs = 30_000): Promise<boolean> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    if (this.state === 'closed') return Promise.resolve(true);
-    this.state = 'closing';
+    if (this.state === "closed") return Promise.resolve(true);
+    this.state = "closing";
     this.completionProcessor?.beginShutdown();
     this.spanProcessor.beginShutdown(reason);
-    const current = Promise.resolve().then(() => this.performShutdown(reason));
+    const current = Promise.resolve().then(() =>
+      this.performShutdown(reason, timeoutMs),
+    );
     this.shutdownPromise = current;
     return current;
   }
 
-  close(reason = 'shutdown'): Promise<boolean> {
-    return this.shutdown(reason);
+  close(reason = "shutdown", timeoutMs = 30_000): Promise<boolean> {
+    return this.shutdown(reason, timeoutMs);
   }
 
-  private async performShutdown(reason: string): Promise<boolean> {
+  private async performShutdown(
+    reason: string,
+    timeoutMs: number,
+  ): Promise<boolean> {
     let success = true;
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const attempt = async (
+      label: string,
+      operation: () => unknown | PromiseLike<unknown>,
+    ): Promise<void> => {
+      const outcome = await runByDeadline(operation, deadline);
+      if (!outcome.completed) {
+        logger.error(
+          `[Client:${this.workflowName}] ${label} failed or exceeded the shutdown deadline`,
+        );
+        success = false;
+      }
+    };
 
     // Drain logs before ending roots: root end creates the completion marker.
     if (this.logProvider) {
-      try {
-        await this.logProvider.shutdown();
-      } catch (error) {
-        logger.error(`[Client:${this.workflowName}] Error shutting down logs: ${error}`);
-        success = false;
-      }
+      await attempt("Log provider shutdown", () =>
+        this.logProvider!.shutdown(),
+      );
     }
     this.spanProcessor.endActiveSpans(reason);
     this.completionProcessor?.emitDeferred();
-    try {
-      await this.spanProcessor.forceFlush();
-      await this.completionProcessor?.forceFlush();
-    } catch (error) {
-      logger.error(
-        `[Client:${this.workflowName}] Error completing span masking/finalization: ${error}`,
+    await attempt("Span masking/finalization", () =>
+      this.spanProcessor.forceFlush(),
+    );
+    if (this.completionProcessor) {
+      await attempt("Completion processor flush", () =>
+        this.completionProcessor!.forceFlush(),
       );
-      success = false;
     }
-    try {
-      await this.tracerProvider.shutdown();
-    } catch (error) {
-      logger.error(`[Client:${this.workflowName}] Error shutting down traces: ${error}`);
-      success = false;
-    }
+    await attempt("Tracer provider shutdown", () =>
+      this.tracerProvider.shutdown(),
+    );
     this.tracers.clear();
-    this.state = 'closed';
+    this.state = "closed";
     unregisterClient(this);
     return success;
   }
