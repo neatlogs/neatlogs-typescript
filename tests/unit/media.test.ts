@@ -66,10 +66,11 @@ describe("typed media capture", () => {
       type: "file",
       file: { file_id: "file-chat-123" },
     } satisfies ChatCompletionContentPart;
+    const responseFileURL =
+      "https://alice:password@example.com/report.pdf?X-Amz-Credential=secret&X-Amz-Signature=signature#fragment";
     const responseFile = {
       type: "input_file",
-      file_url:
-        "https://alice:password@example.com/report.pdf?X-Amz-Credential=secret&X-Amz-Signature=signature#fragment",
+      file_url: responseFileURL,
     } satisfies ResponseInputFile;
 
     expect(mediaReferences(nestedFile, "input")).toEqual([
@@ -85,7 +86,7 @@ describe("typed media capture", () => {
         source: "url",
         reference: "https://example.com/report.pdf",
         id: `nl_media_${createHash("sha256")
-          .update("https://example.com/report.pdf")
+          .update(responseFileURL)
           .digest("hex")
           .slice(0, 24)}`,
       }),
@@ -93,5 +94,75 @@ describe("typed media capture", () => {
     expect(JSON.stringify(mediaReferences(responseFile, "input"))).not.toMatch(
       /alice|password|secret|signature|fragment/,
     );
+  });
+
+  it("sanitizes protocol-relative and non-HTTP hierarchical URLs", () => {
+    const records = mediaReferences(
+      [
+        {
+          type: "input_file",
+          file_url:
+            "//alice:password@example.com/report.pdf?token=secret#fragment",
+        },
+        {
+          type: "input_file",
+          file_url: "s3://alice:password@bucket/report.pdf?token=secret#fragment",
+        },
+      ],
+      "input",
+    );
+
+    expect(records).toEqual([
+      expect.objectContaining({
+        source: "url",
+        reference: "//example.com/report.pdf",
+      }),
+      expect.objectContaining({
+        source: "url",
+        reference: "s3://bucket/report.pdf",
+      }),
+    ]);
+    expect(JSON.stringify(records)).not.toMatch(
+      /alice|password|token|secret|fragment/,
+    );
+  });
+
+  it("recognizes data URL schemes case-insensitively", () => {
+    const bytes = Buffer.from("inline-secret");
+    const records = mediaReferences(
+      {
+        type: "image_url",
+        image_url: { url: `DATA:image/png;BASE64,${bytes.toString("base64")}` },
+      },
+      "input",
+    );
+
+    expect(records).toEqual([
+      expect.objectContaining({
+        source: "inline",
+        mime_type: "image/png",
+        byte_length: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+    ]);
+    expect(records[0]).not.toHaveProperty("reference");
+  });
+
+  it("keeps query-addressed media distinct without exporting query values", () => {
+    const records = mediaReferences(
+      [
+        { type: "input_file", file_url: "https://example.com/media?id=one" },
+        { type: "input_file", file_url: "https://example.com/media?id=two" },
+      ],
+      "input",
+    );
+
+    expect(records).toHaveLength(2);
+    expect(records.map((record) => record.reference)).toEqual([
+      "https://example.com/media",
+      "https://example.com/media",
+    ]);
+    expect(new Set(records.map((record) => record.id)).size).toBe(2);
+    expect(JSON.stringify(records)).not.toMatch(/id=(?:one|two)/);
   });
 });

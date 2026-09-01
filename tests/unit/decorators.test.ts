@@ -314,7 +314,7 @@ describe("decorateSpan", () => {
     expect(mockSpan.end).toHaveBeenCalledOnce();
   });
 
-  it("finalizes an async generator when return yields from finally", async () => {
+  it("keeps an async generator resumable when return yields from finally", async () => {
     const wrapped = decorateSpan({ kind: "CHAIN" }, async function* () {
       try {
         yield "first";
@@ -323,7 +323,14 @@ describe("decorateSpan", () => {
       }
     });
 
-    for await (const _chunk of wrapped()) break;
+    const stream = wrapped();
+    expect(await stream.next()).toEqual({ done: false, value: "first" });
+    expect(await stream.return("stopped")).toEqual({
+      done: false,
+      value: "cleanup",
+    });
+    expect(mockSpan.end).not.toHaveBeenCalled();
+    expect(await stream.next()).toEqual({ done: true, value: "stopped" });
 
     expect(mockSpan.setAttribute).toHaveBeenCalledWith(
       "neatlogs.stream.cancelled",
@@ -331,8 +338,33 @@ describe("decorateSpan", () => {
     );
     expect(mockSpan.setAttribute).toHaveBeenCalledWith(
       "output.value",
-      '["first","cleanup"]',
+      '["first"]',
     );
+    expect(mockSpan.addEvent).toHaveBeenCalledOnce();
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it("records an async error after return yields from finally", async () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, async function* () {
+      try {
+        yield "first";
+      } finally {
+        yield "cleanup";
+        throw new Error("async cleanup failed");
+      }
+    });
+    const stream = wrapped();
+
+    await stream.next();
+    expect(await stream.return()).toEqual({ done: false, value: "cleanup" });
+    expect(mockSpan.end).not.toHaveBeenCalled();
+    await expect(stream.next()).rejects.toThrow("async cleanup failed");
+
+    expect(mockSpan.setStatus).toHaveBeenCalledWith({
+      code: 2,
+      message: "async cleanup failed",
+    });
+    expect(mockSpan.recordException).toHaveBeenCalledOnce();
     expect(mockSpan.end).toHaveBeenCalledOnce();
   });
 
@@ -375,7 +407,7 @@ describe("decorateSpan", () => {
     expect(mockSpan.end).toHaveBeenCalledOnce();
   });
 
-  it("finalizes a synchronous generator when return yields from finally", () => {
+  it("keeps a synchronous generator resumable when return yields from finally", () => {
     const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
       try {
         yield "first";
@@ -384,7 +416,14 @@ describe("decorateSpan", () => {
       }
     });
 
-    for (const _chunk of wrapped()) break;
+    const stream = wrapped();
+    expect(stream.next()).toEqual({ done: false, value: "first" });
+    expect(stream.return("stopped")).toEqual({
+      done: false,
+      value: "cleanup",
+    });
+    expect(mockSpan.end).not.toHaveBeenCalled();
+    expect(stream.next()).toEqual({ done: true, value: "stopped" });
 
     expect(mockSpan.setAttribute).toHaveBeenCalledWith(
       "neatlogs.stream.cancelled",
@@ -392,8 +431,33 @@ describe("decorateSpan", () => {
     );
     expect(mockSpan.setAttribute).toHaveBeenCalledWith(
       "output.value",
-      '["first","cleanup"]',
+      '["first"]',
     );
+    expect(mockSpan.addEvent).toHaveBeenCalledOnce();
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it("records a synchronous error after return yields from finally", () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
+      try {
+        yield "first";
+      } finally {
+        yield "cleanup";
+        throw new Error("sync cleanup failed");
+      }
+    });
+    const stream = wrapped();
+
+    stream.next();
+    expect(stream.return()).toEqual({ done: false, value: "cleanup" });
+    expect(mockSpan.end).not.toHaveBeenCalled();
+    expect(() => stream.next()).toThrow("sync cleanup failed");
+
+    expect(mockSpan.setStatus).toHaveBeenCalledWith({
+      code: 2,
+      message: "sync cleanup failed",
+    });
+    expect(mockSpan.recordException).toHaveBeenCalledOnce();
     expect(mockSpan.end).toHaveBeenCalledOnce();
   });
 

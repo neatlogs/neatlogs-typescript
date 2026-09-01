@@ -20,14 +20,15 @@ function inlineRecord(
   declared: string,
   purpose: string,
 ): MediaRecord | null {
-  let encoded = input;
-  if (input.startsWith("data:")) {
-    const comma = input.indexOf(",");
+  const normalizedInput = input.trim();
+  let encoded = normalizedInput;
+  if (/^data:/i.test(normalizedInput)) {
+    const comma = normalizedInput.indexOf(",");
     if (comma < 0) return null;
-    const header = input.slice(5, comma);
-    if (!header.split(";").includes("base64")) return null;
+    const header = normalizedInput.slice(5, comma);
+    if (!header.toLowerCase().split(";").includes("base64")) return null;
     mimeType = header.split(";", 1)[0] || mimeType;
-    encoded = input.slice(comma + 1);
+    encoded = normalizedInput.slice(comma + 1);
   }
   try {
     const normalized = encoded.replace(/\s+/g, "");
@@ -62,27 +63,42 @@ function referenceRecord(
   purpose: string,
 ): MediaRecord | null {
   let safeReference = reference;
-  let hasNetworkScheme = false;
+  let isURLReference = false;
+  const normalizedReference = reference.trim();
+  const protocolRelative = normalizedReference.startsWith("//");
   try {
-    const parsed = new URL(reference);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      hasNetworkScheme = true;
+    const parsed = protocolRelative
+      ? new URL(normalizedReference, "https://neatlogs.invalid")
+      : new URL(normalizedReference);
+    if (parsed.protocol.toLowerCase() === "data:") return null;
+    const hierarchical =
+      protocolRelative ||
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      /^[a-z][a-z\d+.-]*:\/\//i.test(normalizedReference) ||
+      parsed.pathname.startsWith("/");
+    if (hierarchical) {
+      isURLReference = true;
       parsed.username = "";
       parsed.password = "";
       parsed.search = "";
       parsed.hash = "";
-      safeReference = parsed.toString();
+      safeReference = protocolRelative
+        ? `//${parsed.host}${parsed.pathname}`
+        : parsed.toString();
     }
   } catch {
-    // Malformed network URLs are unsafe to export verbatim because they can
-    // still contain credentials that URL parsing could not isolate.
-    if (/^\s*https?:/i.test(reference)) return null;
+    // Malformed URL-like references are unsafe to export verbatim because
+    // their authority or query credentials cannot be isolated reliably.
+    if (/^(?:\/\/|[a-z][a-z\d+.-]*:)/i.test(normalizedReference)) return null;
   }
-  const digest = createHash("sha256").update(safeReference).digest("hex");
+  // The original value is used only as one-way identity input. This keeps
+  // query-addressed media distinct without exporting query values.
+  const digest = createHash("sha256").update(reference).digest("hex");
   return {
     id: `nl_media_${digest.slice(0, 24)}`,
     type: mediaKind(mimeType, declared),
-    source: hasNetworkScheme ? "url" : "provider",
+    source: isURLReference ? "url" : "provider",
     mime_type: mimeType || "application/octet-stream",
     reference: safeReference,
     purpose,
@@ -109,7 +125,7 @@ export function mediaReferences(
     const image =
       typeof node.image_url === "object" ? node.image_url?.url : node.image_url;
     if (typeof image === "string") {
-      const record = image.startsWith("data:")
+      const record = /^\s*data:/i.test(image)
         ? inlineRecord(image, mimeType, "image", purpose)
         : referenceRecord(image, mimeType, "image", purpose);
       if (record) found.push(record);
@@ -165,7 +181,7 @@ export function mediaReferences(
   const unique = new Map<string, MediaRecord>();
   for (const record of found) {
     unique.set(
-      `${record.sha256 ?? ""}:${record.reference ?? ""}:${record.type}`,
+      `${record.id}:${record.sha256 ?? ""}:${record.reference ?? ""}:${record.type}`,
       record,
     );
   }
