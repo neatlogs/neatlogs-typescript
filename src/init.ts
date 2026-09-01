@@ -19,7 +19,9 @@ import {
   TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanProcessor,
+  type SpanExporter,
 } from "@opentelemetry/sdk-trace-base";
+import { ExportResultCode } from "@opentelemetry/core";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { CompressionAlgorithm } from "@opentelemetry/otlp-exporter-base";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
@@ -32,6 +34,7 @@ import {
 import { addVerificationMarkerResourceAttribute } from "./core/resource.js";
 import { getRegisteredClients } from "./core/client-registry.js";
 import { FilteringExporter } from "./core/filtering-exporter.js";
+import { capturePreparedSpans, clearDoctorCapture } from "./core/doctor-capture.js";
 import { ByteLimitedSpanExporter } from "./core/byte-limited-exporter.js";
 import { MaskingLogExporter } from "./core/masking-log-exporter.js";
 import { discardPendingMediaOwner } from "./core/media.js";
@@ -87,6 +90,9 @@ interface InitIdentity {
   uploadAuthority: UploadAuthorityOption | undefined;
 }
 let _initIdentity: InitIdentity | null = null;
+let _effectiveSampleRate = 1;
+let _exportEnabled = false;
+let _queueMaxSize = 2_048;
 
 // Track signal handlers so we can remove them in shutdown()
 let _sigHandlersRegistered = false;
@@ -153,6 +159,7 @@ const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
   "metadata",
   "debug",
   "disableExport",
+  "diagnosticCapture",
   "tracerProvider",
   "registerShutdownHandlers",
   "mask",
@@ -377,6 +384,8 @@ export function init(options: InitOptions = {}): Promise<void> {
 }
 
 async function _performInit(options: InitOptions): Promise<void> {
+  // A new runtime must not diagnose envelopes from a previous initialization.
+  clearDoctorCapture();
   const sampleRate = options.sampleRate ?? 1.0;
   if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
     throw new RangeError("sampleRate must be a finite number between 0 and 1.");
@@ -413,6 +422,9 @@ async function _performInit(options: InitOptions): Promise<void> {
       );
     }
   }
+  _effectiveSampleRate = sampleRate;
+  _exportEnabled = !disableExportResolved;
+  _queueMaxSize = 2_048;
 
   // 4. Debug mode
   if (options.debug) {
@@ -510,14 +522,25 @@ async function _performInit(options: InitOptions): Promise<void> {
   });
   provider.addSpanProcessor(_spanProcessor);
 
-  // 12. Add BatchSpanProcessor + OTLPSpanExporter (if export enabled)
-  if (!disableExportResolved) {
+  // 12. Add BatchSpanProcessor + exporter. Local Doctor uses the exact same
+  // final masking/filtering boundary with a successful in-memory sink, so it
+  // can inspect export-ready bytes without credentials or network access.
+  if (!disableExportResolved || options.diagnosticCapture) {
     const tracesEndpoint = endpoint.endsWith("/v1/traces")
       ? endpoint
       : `${baseUrl}/v1/traces`;
 
-    const otlpExporter = new FilteringExporter(
-      new ByteLimitedSpanExporter(
+    const diagnosticSink: SpanExporter = {
+      export(_spans, resultCallback) {
+        resultCallback({ code: ExportResultCode.SUCCESS });
+      },
+      async shutdown() {},
+      async forceFlush() {},
+    };
+
+    const transportExporter = options.diagnosticCapture
+      ? diagnosticSink
+      : new ByteLimitedSpanExporter(
         new OTLPTraceExporter({
           url: tracesEndpoint,
           headers: { "x-api-key": resolvedKey },
@@ -526,9 +549,12 @@ async function _performInit(options: InitOptions): Promise<void> {
         undefined,
         _deliveryDiagnostics,
         uploadAuthority,
-      ),
+      );
+    const otlpExporter = new FilteringExporter(
+      transportExporter,
       _deliveryDiagnostics,
       uploadAuthority,
+      options.diagnosticCapture ? capturePreparedSpans : undefined,
     );
 
     const batchSize = options.batchSize ?? 100;
@@ -550,8 +576,10 @@ async function _performInit(options: InitOptions): Promise<void> {
     _transportSpanProcessors = [batchProcessor, completionProcessor];
     _completionProcessor = completionProcessor;
 
-    if (options.debug) {
+    if (options.debug && !options.diagnosticCapture) {
       logger.debug(`OTLP trace exporter configured: ${tracesEndpoint}`);
+    } else if (options.debug) {
+      logger.debug('Local Doctor diagnostic capture configured (network disabled)');
     }
   } else if (options.debug) {
     logger.debug("Export disabled — spans will not be sent to backend");
@@ -945,6 +973,9 @@ async function _performShutdown(
   _transportSpanProcessors = [];
   _completionProcessor = null;
   _debugMode = false;
+  _effectiveSampleRate = 1;
+  _exportEnabled = false;
+  _queueMaxSize = 2_048;
   _signalShutdownStarted = false;
   _initIdentity = null;
 
@@ -987,3 +1018,30 @@ export function isDebugEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 export { getSessionConfig } from "./core/context.js";
+
+/** @internal Immutable, credential-free state used by the read-only doctor. */
+export function _doctorRuntimeSnapshot(): Readonly<{
+  state: LifecycleState;
+  initialized: boolean;
+  ownsTracerProvider: boolean;
+  exportHealth: { droppedSpans: number; exportFailures: number } | null;
+  effectiveSampler: string;
+  exportEnabled: boolean;
+  queueMaxSize: number;
+}> {
+  return {
+    state: _lifecycleState,
+    initialized: _initialized,
+    ownsTracerProvider: _ownsTracerProvider,
+    exportHealth: {
+      droppedSpans:
+        _deliveryDiagnostics.snapshot().spanQueueDrops +
+        _deliveryDiagnostics.snapshot().frameworkSpanDrops +
+        _deliveryDiagnostics.snapshot().maskedSpanDrops,
+      exportFailures: _deliveryDiagnostics.snapshot().spanExportFailures,
+    },
+    effectiveSampler: `parentbased_traceidratio:${_effectiveSampleRate}`,
+    exportEnabled: _exportEnabled,
+    queueMaxSize: _queueMaxSize,
+  };
+}
