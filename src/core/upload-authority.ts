@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type UploadPurpose = "typed_media" | "otlp_overflow";
 export type UploadContentEncoding = "identity" | "gzip";
 export type UploadPayloadSchema = "otlp.traces.v1" | "neatlogs.media.v1";
@@ -29,11 +31,19 @@ export interface UploadReceipt {
   reference: UploadReference;
 }
 
+export interface UploadRequestOptions {
+  /** Absolute wall-clock deadline shared by the caller's enclosing export. */
+  deadlineUnixMs?: number;
+}
+
 export interface UploadAuthority {
   readonly available: boolean;
   readonly unavailableReason: string;
   readonly maxPayloadBytes: number;
-  upload(payload: UploadPayload): Promise<UploadReceipt>;
+  upload(
+    payload: UploadPayload,
+    options?: UploadRequestOptions,
+  ): Promise<UploadReceipt>;
 }
 
 export type UploadAuthorityOption = boolean | UploadAuthority;
@@ -136,6 +146,13 @@ const TYPED_MEDIA_MIME_TYPES = new Set([
 ]);
 const SAFE_REASON_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const SENSITIVE_UPLOAD_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "x-api-key",
+]);
+const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 export function isSupportedTypedMediaMimeType(value: string): boolean {
   return TYPED_MEDIA_MIME_TYPES.has(value);
@@ -159,6 +176,7 @@ function requiredString(
 function validateReference(
   value: unknown,
   payload: UploadPayload,
+  expectedUploadId: string,
   expectedState: string,
   stage: TelemetryUploadError["stage"],
 ): WireReference {
@@ -178,6 +196,7 @@ function validateReference(
     throw new TelemetryUploadError(stage, "invalid_reference_id", false);
   }
   if (
+    reference.id !== expectedUploadId ||
     reference.purpose !== payload.purpose ||
     reference.sha256 !== payload.sha256 ||
     reference.byte_length !== payload.byteLength ||
@@ -206,6 +225,7 @@ export function assertReadyUploadReceipt(
   if (
     typeof reference.id !== "string" ||
     !UUID_PATTERN.test(reference.id) ||
+    reference.id !== uploadId ||
     reference.state !== "ready" ||
     reference.purpose !== payload.purpose ||
     reference.sha256 !== payload.sha256 ||
@@ -235,6 +255,11 @@ function validatePayload(payload: UploadPayload, maxPayloadBytes: number): void 
     throw new TelemetryUploadError("validate", "invalid_content", false);
   }
   if (!SHA256_PATTERN.test(payload.sha256)) {
+    throw new TelemetryUploadError("validate", "invalid_sha256", false);
+  }
+  if (
+    createHash("sha256").update(payload.content).digest("hex") !== payload.sha256
+  ) {
     throw new TelemetryUploadError("validate", "invalid_sha256", false);
   }
   if (
@@ -438,9 +463,18 @@ export class HttpUploadAuthority implements UploadAuthority {
     }
   }
 
-  async upload(payload: UploadPayload): Promise<UploadReceipt> {
+  async upload(
+    payload: UploadPayload,
+    options: UploadRequestOptions = {},
+  ): Promise<UploadReceipt> {
     validatePayload(payload, this.maxPayloadBytes);
-    const deadline = Date.now() + this.deadlineMs;
+    const deadline = Math.min(
+      Date.now() + this.deadlineMs,
+      options.deadlineUnixMs ?? Number.POSITIVE_INFINITY,
+    );
+    if (deadline <= Date.now()) {
+      throw new TelemetryUploadError("prepare", "deadline_exceeded", true);
+    }
     const prepared = await this.prepare(payload, deadline);
     if (!("uploadUrl" in prepared)) return prepared;
     await this.put(prepared, payload, deadline);
@@ -505,7 +539,13 @@ export class HttpUploadAuthority implements UploadAuthority {
       throw new TelemetryUploadError("prepare", "invalid_upload_id", false);
     }
     if (response.status === 200 && data.state === "ready") {
-      const reference = validateReference(data.reference, payload, "ready", "prepare");
+      const reference = validateReference(
+        data.reference,
+        payload,
+        uploadId,
+        "ready",
+        "prepare",
+      );
       return {
         uploadId,
         state: "ready",
@@ -521,7 +561,13 @@ export class HttpUploadAuthority implements UploadAuthority {
       };
     }
     if (["uploaded", "validating", "rejected"].includes(String(data.state))) {
-      validateReference(data.reference, payload, String(data.state), "prepare");
+      validateReference(
+        data.reference,
+        payload,
+        uploadId,
+        String(data.state),
+        "prepare",
+      );
     }
     if (response.status !== 201 || data.state !== "prepared" || !isObject(data.upload)) {
       const reason =
@@ -560,12 +606,23 @@ export class HttpUploadAuthority implements UploadAuthority {
     }
     const uploadHeaders: Record<string, string> = Object.create(null);
     for (const [key, value] of Object.entries(data.upload.headers)) {
-      if (typeof value !== "string" || /[\r\n]/.test(key) || /[\r\n]/.test(value)) {
+      if (
+        typeof value !== "string" ||
+        !HEADER_NAME_PATTERN.test(key) ||
+        /[\r\n]/.test(value) ||
+        SENSITIVE_UPLOAD_HEADERS.has(key.toLowerCase())
+      ) {
         throw new TelemetryUploadError("prepare", "invalid_upload_headers", false);
       }
       uploadHeaders[key] = value;
     }
-    const reference = validateReference(data.reference, payload, "prepared", "prepare");
+    const reference = validateReference(
+      data.reference,
+      payload,
+      uploadId,
+      "prepared",
+      "prepare",
+    );
     return { uploadId, uploadUrl, uploadHeaders, reference };
   }
 
@@ -574,7 +631,7 @@ export class HttpUploadAuthority implements UploadAuthority {
     payload: UploadPayload,
     deadline: number,
   ): Promise<void> {
-    await this.request(
+    const response = await this.request(
       "put",
       prepared.uploadUrl,
       {
@@ -586,6 +643,11 @@ export class HttpUploadAuthority implements UploadAuthority {
       },
       deadline,
     );
+    try {
+      void response.body?.cancel().catch(() => undefined);
+    } catch {
+      // A successful object PUT is authoritative; cleanup must not trigger a retry.
+    }
   }
 
   private async complete(
@@ -648,6 +710,7 @@ export class HttpUploadAuthority implements UploadAuthority {
     const reference = validateReference(
       data.reference,
       payload,
+      prepared.uploadId,
       String(data.state),
       "complete",
     );
@@ -658,7 +721,7 @@ export class HttpUploadAuthority implements UploadAuthority {
       throw new TelemetryUploadError(
         "complete",
         reason,
-        diagnostic?.retryable === true,
+        diagnostic?.retryable ?? data.state === "validating",
       );
     }
     return {

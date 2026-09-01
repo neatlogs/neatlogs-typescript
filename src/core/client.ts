@@ -25,6 +25,7 @@ import { registerClient, unregisterClient } from "./client-registry.js";
 import { FilteringExporter } from "./filtering-exporter.js";
 import { ByteLimitedSpanExporter } from "./byte-limited-exporter.js";
 import { MaskingLogExporter } from "./masking-log-exporter.js";
+import { discardPendingMediaOwner } from "./media.js";
 import {
   DeliveryDiagnostics,
   type DeliveryDiagnosticsSnapshot,
@@ -396,6 +397,7 @@ export class Client {
     await attempt("Tracer provider shutdown", () =>
       this.tracerProvider.shutdown(),
     );
+    discardPendingMediaOwner(this);
     this.tracers.clear();
     this.state = "closed";
     unregisterClient(this);

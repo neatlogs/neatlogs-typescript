@@ -34,6 +34,7 @@ import { getRegisteredClients } from "./core/client-registry.js";
 import { FilteringExporter } from "./core/filtering-exporter.js";
 import { ByteLimitedSpanExporter } from "./core/byte-limited-exporter.js";
 import { MaskingLogExporter } from "./core/masking-log-exporter.js";
+import { discardPendingMediaOwner } from "./core/media.js";
 import {
   DeliveryDiagnostics,
   type DeliveryDiagnosticsSnapshot,
@@ -936,6 +937,7 @@ async function _performShutdown(
   _tracerProvider = null;
   _ownsTracerProvider = false;
   _setNeatlogsProvider(null);
+  discardPendingMediaOwner();
   _logProvider = null;
   _spanProcessor = null;
   _transportSpanProcessors = [];

@@ -143,6 +143,7 @@ export {
   type UploadPurpose,
   type UploadReceipt,
   type UploadReference,
+  type UploadRequestOptions,
 } from "./core/upload-authority.js";
 
 // Version

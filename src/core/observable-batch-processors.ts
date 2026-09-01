@@ -12,6 +12,7 @@ import {
   type LogRecordExporter,
 } from '@opentelemetry/sdk-logs';
 import { DeliveryDiagnostics } from './delivery-diagnostics.js';
+import { discardPendingMedia } from './media.js';
 
 interface SpanQueueState {
   _finishedSpans: ReadableSpan[];
@@ -38,6 +39,7 @@ export class ObservableBatchSpanProcessor extends BatchSpanProcessor {
       (span.spanContext().traceFlags & TraceFlags.SAMPLED) !== 0 &&
       state._finishedSpans.length >= state._maxQueueSize
     ) {
+      discardPendingMedia(span as object);
       this.diagnostics.recordQueueDrop('span');
     }
     super.onEnd(span);

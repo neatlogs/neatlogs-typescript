@@ -9,7 +9,8 @@ import {
 } from "../../src/core/upload-authority.js";
 
 const uploadId = "018f47a6-7f32-7d67-8a1b-42d3f974c012";
-const referenceId = "018f47a6-7f32-7d67-8a1b-42d3f974c013";
+const referenceId = uploadId;
+const mismatchedReferenceId = "018f47a6-7f32-7d67-8a1b-42d3f974c013";
 
 function payload(): UploadPayload {
   const content = new TextEncoder().encode("masked protobuf bytes");
@@ -118,6 +119,125 @@ describe("HttpUploadAuthority", () => {
       },
     });
     expect(JSON.stringify(receipt)).not.toMatch(/signature|object-secret|project-secret|url|headers/);
+  });
+
+  it("rejects a reference whose id is not the response upload id", async () => {
+    const item = payload();
+    const fetch = vi.fn().mockResolvedValue(
+      json(200, {
+        upload_id: uploadId,
+        state: "ready",
+        reference: {
+          ...wireReference(item, "ready"),
+          id: mismatchedReferenceId,
+        },
+      }),
+    );
+    const authority = new HttpUploadAuthority({
+      baseUrl: "https://ingest.example.test",
+      apiKey: "key",
+      fetch: fetch as typeof globalThis.fetch,
+      maxAttempts: 1,
+    });
+
+    await expect(authority.upload(item)).rejects.toMatchObject({
+      stage: "prepare",
+      reasonCode: "reference_mismatch",
+      retryable: false,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a claimed digest that does not match the bytes before prepare", async () => {
+    const item = { ...payload(), sha256: "0".repeat(64) };
+    const fetch = vi.fn();
+    const authority = new HttpUploadAuthority({
+      baseUrl: "https://ingest.example.test",
+      apiKey: "key",
+      fetch: fetch as typeof globalThis.fetch,
+    });
+
+    await expect(authority.upload(item)).rejects.toMatchObject({
+      stage: "validate",
+      reasonCode: "invalid_sha256",
+      retryable: false,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["authorization", "cookie", "proxy-authorization", "x-api-key"])(
+    "rejects credential-bearing signed PUT header %s",
+    async (header) => {
+      const item = payload();
+      const fetch = vi.fn().mockResolvedValue(
+        json(201, {
+          upload_id: uploadId,
+          state: "prepared",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          upload: {
+            method: "PUT",
+            url: "https://objects.example.test/object",
+            headers: { [header]: "secret" },
+          },
+          reference: wireReference(item, "prepared"),
+        }),
+      );
+      const authority = new HttpUploadAuthority({
+        baseUrl: "https://ingest.example.test",
+        apiKey: "key",
+        fetch: fetch as typeof globalThis.fetch,
+        maxAttempts: 1,
+      });
+
+      await expect(authority.upload(item)).rejects.toMatchObject({
+        stage: "prepare",
+        reasonCode: "invalid_upload_headers",
+        retryable: false,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("cancels an otherwise unused successful PUT response body", async () => {
+    const item = payload();
+    let putBodyCancelled = false;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json(201, {
+          upload_id: uploadId,
+          state: "prepared",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
+          reference: wireReference(item, "prepared"),
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream({
+            cancel() {
+              putBodyCancelled = true;
+            },
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        json(200, {
+          upload_id: uploadId,
+          state: "ready",
+          reference: wireReference(item, "ready"),
+        }),
+      );
+    const authority = new HttpUploadAuthority({
+      baseUrl: "https://ingest.example.test",
+      apiKey: "key",
+      fetch: fetch as typeof globalThis.fetch,
+      maxAttempts: 1,
+    });
+
+    await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
+    expect(putBodyCancelled).toBe(true);
   });
 
   it("retries bounded transient failures with the same idempotency key", async () => {
@@ -284,6 +404,41 @@ describe("HttpUploadAuthority", () => {
     await expect(authority.upload(item)).rejects.toMatchObject<TelemetryUploadError>({
       stage: "complete",
       reasonCode: "scan_pending",
+      retryable: true,
+    });
+  });
+
+  it("treats validating completion as retryable when diagnostic is omitted", async () => {
+    const item = payload();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json(201, {
+          upload_id: uploadId,
+          state: "prepared",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
+          reference: wireReference(item, "prepared"),
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(
+        json(202, {
+          upload_id: uploadId,
+          state: "validating",
+          reference: { ...wireReference(item, "ready"), state: "validating" },
+        }),
+      );
+    const authority = new HttpUploadAuthority({
+      baseUrl: "https://ingest.example.test",
+      apiKey: "key",
+      fetch: fetch as typeof globalThis.fetch,
+      maxAttempts: 1,
+    });
+
+    await expect(authority.upload(item)).rejects.toMatchObject({
+      stage: "complete",
+      reasonCode: "validation_pending",
       retryable: true,
     });
   });

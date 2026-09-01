@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { getActiveClient } from "./active-client.js";
 import type { DeliveryDiagnostics } from "./delivery-diagnostics.js";
 import {
   assertReadyUploadReceipt,
@@ -12,6 +13,8 @@ import {
 export type MediaRecord = Record<string, string | number>;
 
 export const DEFAULT_INLINE_MEDIA_BYTES = 100_000;
+export const DEFAULT_MAX_PENDING_MEDIA_ITEMS = 32;
+export const DEFAULT_MEDIA_EXPORT_DEADLINE_MS = 15_000;
 
 interface DiscoveredMedia {
   record: MediaRecord;
@@ -24,13 +27,91 @@ interface PendingMedia {
   bytes: Uint8Array;
   prefixes: string[];
   record: MediaRecord;
+  token: string;
   sha256: string;
   byteLength: number;
   mimeType: string;
 }
 
-const pendingBySpan = new WeakMap<object, PendingMedia[]>();
-let retainedPendingBytes = 0;
+interface PendingMediaAccount {
+  bytes: number;
+  items: number;
+  released: boolean;
+  owner: PendingMediaOwnerState;
+  span: WeakRef<object>;
+}
+
+interface PendingMediaBucket {
+  items: PendingMedia[];
+  account: PendingMediaAccount;
+  unregisterToken: object;
+}
+
+const pendingBySpan = new WeakMap<object, PendingMediaBucket>();
+interface PendingMediaOwnerState {
+  bytes: number;
+  items: number;
+  accounts: Set<PendingMediaAccount>;
+}
+
+const defaultPendingMediaOwner = {};
+const pendingMediaOwners = new WeakMap<object, PendingMediaOwnerState>();
+
+function pendingOwnerState(owner: object): PendingMediaOwnerState {
+  const prior = pendingMediaOwners.get(owner);
+  if (prior) return prior;
+  const state = {
+    bytes: 0,
+    items: 0,
+    accounts: new Set<PendingMediaAccount>(),
+  };
+  pendingMediaOwners.set(owner, state);
+  return state;
+}
+
+function releasePendingAccount(account: PendingMediaAccount): void {
+  if (account.released) return;
+  account.released = true;
+  account.owner.bytes = Math.max(0, account.owner.bytes - account.bytes);
+  account.owner.items = Math.max(0, account.owner.items - account.items);
+  account.owner.accounts.delete(account);
+}
+
+const pendingFinalizer = typeof FinalizationRegistry === "undefined"
+  ? undefined
+  : new FinalizationRegistry<PendingMediaAccount>(releasePendingAccount);
+
+function pendingBucket(span: object): PendingMediaBucket {
+  const prior = pendingBySpan.get(span);
+  if (prior) return prior;
+  const owner = pendingOwnerState(getActiveClient() ?? defaultPendingMediaOwner);
+  const account: PendingMediaAccount = {
+    bytes: 0,
+    items: 0,
+    released: false,
+    owner,
+    span: new WeakRef(span),
+  };
+  const unregisterToken = {};
+  const bucket = { items: [], account, unregisterToken };
+  owner.accounts.add(account);
+  pendingBySpan.set(span, bucket);
+  pendingFinalizer?.register(span, account, unregisterToken);
+  return bucket;
+}
+
+function detachPendingBucket(span: object): PendingMediaBucket | undefined {
+  const bucket = pendingBySpan.get(span);
+  if (!bucket) return undefined;
+  pendingBySpan.delete(span);
+  pendingFinalizer?.unregister(bucket.unregisterToken);
+  return bucket;
+}
+
+function uploadToken(record: MediaRecord): string {
+  const material = `${record.sha256}:${record.mime_type}:${record.purpose}`;
+  return `nl_pending_media_${createHash("sha256").update(material).digest("hex").slice(0, 24)}`;
+}
 
 function mediaKind(mimeType: string, declared = ""): string {
   const value = declared
@@ -381,6 +462,7 @@ function placeholder(record: MediaRecord): Record<string, unknown> {
           "reference",
           "content_encoding",
           "safe_preview",
+          "upload_token",
         ].includes(key),
       ),
     ),
@@ -447,45 +529,72 @@ export function sanitizeMediaPayload(value: unknown, purpose = "capture"): unkno
 
 /** Capture typed media metadata and return a telemetry-safe clone of the value. */
 export function captureMedia(
-  span: { setAttribute(name: string, value: string | number): unknown },
+  span: {
+    setAttribute(name: string, value: string | number): unknown;
+    isRecording?(): boolean;
+  },
   prefix: string,
   value: unknown,
   purpose: string,
 ): unknown {
   const discovered = discoverMedia(value, purpose);
+  const recording = typeof span.isRecording !== "function" || span.isRecording();
   discovered.forEach((item, index) => {
     const recordPrefix = `${prefix}.media.${index}`;
     if (item.bytes && item.record.state === "pending-upload") {
-      const existing = pendingBySpan.get(span as object) ?? [];
-      const duplicate = existing.find(
-        (candidate) =>
-          candidate.sha256 === item.record.sha256 &&
-          candidate.mimeType === item.record.mime_type,
-      );
-      if (duplicate) {
-        if (!duplicate.prefixes.includes(recordPrefix)) {
-          duplicate.prefixes.push(recordPrefix);
-        }
-      } else if (
-        retainedPendingBytes + item.bytes.byteLength >
-        DEFAULT_MAX_TYPED_MEDIA_BYTES
-      ) {
+      if (!recording) {
         item.bytes = undefined;
         item.record.state = "failed";
-        item.record.safe_preview =
-          "upload failed: validate/pending_media_memory_limit";
+        item.record.safe_preview = "upload unavailable: span_not_recording";
       } else {
-        retainedPendingBytes += item.bytes.byteLength;
-        existing.push({
-          bytes: item.bytes,
-          prefixes: [recordPrefix],
-          record: { ...item.record },
-          sha256: String(item.record.sha256),
-          byteLength: Number(item.record.byte_length),
-          mimeType: String(item.record.mime_type),
-        });
+        const token = uploadToken(item.record);
+        item.record.upload_token = token;
+        const bucket = pendingBucket(span as object);
+        const duplicate = bucket.items.find(
+          (candidate) =>
+            candidate.sha256 === item.record.sha256 &&
+            candidate.mimeType === item.record.mime_type,
+        );
+        if (duplicate) {
+          if (!duplicate.prefixes.includes(recordPrefix)) {
+            duplicate.prefixes.push(recordPrefix);
+          }
+        } else if (bucket.account.owner.items >= DEFAULT_MAX_PENDING_MEDIA_ITEMS) {
+          item.bytes = undefined;
+          delete item.record.upload_token;
+          item.record.state = "failed";
+          item.record.safe_preview =
+            "upload failed: validate/pending_media_item_limit";
+        } else if (
+          bucket.account.owner.bytes + item.bytes.byteLength >
+          DEFAULT_MAX_TYPED_MEDIA_BYTES
+        ) {
+          item.bytes = undefined;
+          delete item.record.upload_token;
+          item.record.state = "failed";
+          item.record.safe_preview =
+            "upload failed: validate/pending_media_memory_limit";
+        } else {
+          bucket.account.owner.bytes += item.bytes.byteLength;
+          bucket.account.owner.items += 1;
+          bucket.account.bytes += item.bytes.byteLength;
+          bucket.account.items += 1;
+          bucket.items.push({
+            bytes: item.bytes,
+            prefixes: [recordPrefix],
+            record: { ...item.record },
+            token,
+            sha256: String(item.record.sha256),
+            byteLength: Number(item.record.byte_length),
+            mimeType: String(item.record.mime_type),
+          });
+        }
+        if (bucket.items.length === 0) {
+          pendingBySpan.delete(span as object);
+          pendingFinalizer?.unregister(bucket.unregisterToken);
+          releasePendingAccount(bucket.account);
+        }
       }
-      if (existing.length > 0) pendingBySpan.set(span as object, existing);
     }
     Object.entries(item.record).forEach(([key, field]) =>
       span.setAttribute(`${recordPrefix}.${key}`, field),
@@ -526,14 +635,136 @@ function rewritePendingPlaceholder(
   item: PendingMedia,
   update: MediaRecord,
 ): void {
-  const before = JSON.stringify(placeholder(item.record));
-  const afterRecord = { ...item.record, ...update };
-  if (afterRecord.state === "available") delete afterRecord.safe_preview;
-  const after = JSON.stringify(placeholder(afterRecord));
-  for (const [key, value] of Object.entries(attributes)) {
-    if (typeof value === "string" && value.includes(before)) {
-      attributes[key] = value.split(before).join(after);
+  const matches = (value: Record<string, any>): boolean =>
+    value.state === "pending-upload" &&
+    (value.upload_token === item.token ||
+      (value.id === item.record.id && value.sha256 === item.sha256));
+  const applyUpdate = (value: Record<string, any>): Record<string, any> => {
+    const after = { ...value, ...update };
+    delete after.upload_token;
+    if (after.state === "available") delete after.safe_preview;
+    return after;
+  };
+  const seen = new WeakSet<object>();
+  const rewrite = (value: any): any => {
+    if (typeof value === "string") {
+      if (!value.includes("pending-upload")) return value;
+      const trimmed = value.trimStart();
+      if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+      try {
+        const parsed = JSON.parse(value);
+        const rewritten = rewrite(parsed);
+        return rewritten === parsed ? value : JSON.stringify(rewritten);
+      } catch {
+        return value;
+      }
     }
+    if (!value || typeof value !== "object") return value;
+    if (seen.has(value)) return value;
+    seen.add(value);
+    if (!Array.isArray(value) && matches(value)) return applyUpdate(value);
+    let changed = false;
+    const output = Array.isArray(value) ? [...value] : { ...value };
+    for (const [key, child] of Object.entries(value)) {
+      const rewritten = rewrite(child);
+      if (rewritten !== child) {
+        (output as Record<string, any>)[key] = rewritten;
+        changed = true;
+      }
+    }
+    return changed ? output : value;
+  };
+
+  for (const [key, value] of Object.entries(attributes)) {
+    attributes[key] = rewrite(value);
+  }
+  for (const prefix of item.prefixes) {
+    const stateKey = `${prefix}.state`;
+    const tokenKey = `${prefix}.upload_token`;
+    const matchesFlat =
+      attributes[stateKey] === "pending-upload" &&
+      (attributes[tokenKey] === item.token ||
+        (attributes[`${prefix}.id`] === item.record.id &&
+          attributes[`${prefix}.sha256`] === item.sha256));
+    if (!matchesFlat) continue;
+    delete attributes[tokenKey];
+    for (const [field, fieldValue] of Object.entries(update)) {
+      attributes[`${prefix}.${field}`] = fieldValue;
+    }
+    if (update.state === "available") delete attributes[`${prefix}.safe_preview`];
+  }
+}
+
+function retainedPendingTokens(value: unknown): Set<string> {
+  const tokens = new Set<string>();
+  const seen = new WeakSet<object>();
+  const visit = (node: any): void => {
+    if (typeof node === "string") {
+      if (!node.includes("nl_pending_media_")) return;
+      const trimmed = node.trimStart();
+      if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return;
+      try {
+        visit(JSON.parse(node));
+      } catch {
+        // Invalid JSON cannot authorize an out-of-band upload.
+      }
+      return;
+    }
+    if (!node || typeof node !== "object" || seen.has(node)) return;
+    seen.add(node);
+    if (
+      !Array.isArray(node) &&
+      node.state === "pending-upload" &&
+      typeof node.upload_token === "string"
+    ) {
+      tokens.add(node.upload_token);
+    }
+    if (!Array.isArray(node)) {
+      for (const [key, token] of Object.entries(node)) {
+        if (!key.endsWith(".upload_token") || typeof token !== "string") continue;
+        const prefix = key.slice(0, -".upload_token".length);
+        if (node[`${prefix}.state`] === "pending-upload") tokens.add(token);
+      }
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(value);
+  return tokens;
+}
+
+async function uploadWithinDeadline(
+  authority: UploadAuthority,
+  payload: UploadPayload,
+  deadlineUnixMs: number,
+) {
+  const remaining = deadlineUnixMs - Date.now();
+  if (remaining <= 0) {
+    throw new TelemetryUploadError(
+      "prepare",
+      "media_export_deadline_exceeded",
+      true,
+    );
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      authority.upload(payload, { deadlineUnixMs }),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(
+            new TelemetryUploadError(
+              "prepare",
+              "media_export_deadline_exceeded",
+              true,
+            ),
+          ),
+          remaining,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -543,17 +774,24 @@ export async function resolvePendingMediaUploads(
   attributes: Record<string, any>,
   authority: UploadAuthority,
   diagnostics?: DeliveryDiagnostics,
-): Promise<void> {
-  const pending = pendingBySpan.get(span) ?? [];
-  pendingBySpan.delete(span);
+): Promise<boolean> {
+  const bucket = detachPendingBucket(span);
+  const pending = bucket?.items ?? [];
+  const deadlineUnixMs = Date.now() + DEFAULT_MEDIA_EXPORT_DEADLINE_MS;
+  let failed = false;
   try {
+    const retainedTokens = retainedPendingTokens(attributes);
     for (const item of pending) {
       const retained = item.prefixes.filter(
         (prefix) =>
-          attributes[`${prefix}.sha256`] === item.sha256 &&
+          attributes[`${prefix}.upload_token`] === item.token &&
           attributes[`${prefix}.state`] === "pending-upload",
       );
-      if (retained.length === 0) {
+      const retainedCount = Math.max(
+        retained.length,
+        retainedTokens.has(item.token) ? 1 : 0,
+      );
+      if (!retainedTokens.has(item.token)) {
         rewritePendingPlaceholder(attributes, item, {
           state: "failed",
           safe_preview: "upload skipped: media reference removed by mask",
@@ -562,14 +800,11 @@ export async function resolvePendingMediaUploads(
       }
       if (!authority.available) {
         const unavailableReason = safeUnavailableReason(authority.unavailableReason);
-        diagnostics?.recordTypedMedia("unavailable", retained.length);
-        diagnostics?.recordTypedMedia("failures", retained.length);
+        failed = true;
+        diagnostics?.recordTypedMedia("unavailable", retainedCount);
+        diagnostics?.recordTypedMedia("failures", retainedCount);
         diagnostics?.recordUploadFailure("prepare", unavailableReason);
         const safePreview = `upload unavailable: ${unavailableReason}`;
-        for (const prefix of retained) {
-          attributes[`${prefix}.state`] = "failed";
-          attributes[`${prefix}.safe_preview`] = safePreview;
-        }
         rewritePendingPlaceholder(attributes, item, {
           state: "failed",
           safe_preview: safePreview,
@@ -580,13 +815,10 @@ export async function resolvePendingMediaUploads(
         item.byteLength >
         Math.min(authority.maxPayloadBytes, DEFAULT_MAX_TYPED_MEDIA_BYTES)
       ) {
-        diagnostics?.recordTypedMedia("failures", retained.length);
+        failed = true;
+        diagnostics?.recordTypedMedia("failures", retainedCount);
         diagnostics?.recordUploadFailure("validate", "payload_too_large");
         const safePreview = "upload failed: validate/payload_too_large";
-        for (const prefix of retained) {
-          attributes[`${prefix}.state`] = "failed";
-          attributes[`${prefix}.safe_preview`] = safePreview;
-        }
         rewritePendingPlaceholder(attributes, item, {
           state: "failed",
           safe_preview: safePreview,
@@ -594,13 +826,10 @@ export async function resolvePendingMediaUploads(
         continue;
       }
       if (!isSupportedTypedMediaMimeType(item.mimeType)) {
-        diagnostics?.recordTypedMedia("failures", retained.length);
+        failed = true;
+        diagnostics?.recordTypedMedia("failures", retainedCount);
         diagnostics?.recordUploadFailure("validate", "unsupported_mime_type");
         const safePreview = "upload failed: validate/unsupported_mime_type";
-        for (const prefix of retained) {
-          attributes[`${prefix}.state`] = "failed";
-          attributes[`${prefix}.safe_preview`] = safePreview;
-        }
         rewritePendingPlaceholder(attributes, item, {
           state: "failed",
           safe_preview: safePreview,
@@ -618,32 +847,28 @@ export async function resolvePendingMediaUploads(
         payloadSchema: "neatlogs.media.v1",
       };
       try {
-        const receipt = assertReadyUploadReceipt(await authority.upload(payload), payload);
-        diagnostics?.recordTypedMedia("uploads", retained.length);
-        for (const prefix of retained) {
-          attributes[`${prefix}.id`] = receipt.reference.id;
-          attributes[`${prefix}.reference`] = receipt.reference.id;
-          attributes[`${prefix}.source`] = "uploaded";
-          attributes[`${prefix}.state`] = "available";
-          attributes[`${prefix}.content_encoding`] = receipt.reference.contentEncoding;
-          delete attributes[`${prefix}.safe_preview`];
-        }
+        const receipt = assertReadyUploadReceipt(
+          await uploadWithinDeadline(authority, payload, deadlineUnixMs),
+          payload,
+        );
+        diagnostics?.recordTypedMedia("uploads", retainedCount);
         rewritePendingPlaceholder(attributes, item, {
           id: receipt.reference.id,
           reference: receipt.reference.id,
           source: "uploaded",
+          sha256: receipt.reference.sha256,
+          byte_length: receipt.reference.byteLength,
+          mime_type: receipt.reference.mimeType,
+          purpose: receipt.reference.purpose,
           state: "available",
           content_encoding: receipt.reference.contentEncoding,
         });
       } catch (error) {
+        failed = true;
         const failure = safeFailure(error);
-        diagnostics?.recordTypedMedia("failures", retained.length);
+        diagnostics?.recordTypedMedia("failures", retainedCount);
         diagnostics?.recordUploadFailure(failure.stage, failure.reason);
         const safePreview = `upload failed: ${failure.stage}/${failure.reason}`;
-        for (const prefix of retained) {
-          attributes[`${prefix}.state`] = "failed";
-          attributes[`${prefix}.safe_preview`] = safePreview;
-        }
         rewritePendingPlaceholder(attributes, item, {
           state: "failed",
           safe_preview: safePreview,
@@ -651,19 +876,31 @@ export async function resolvePendingMediaUploads(
       }
     }
   } finally {
-    retainedPendingBytes = Math.max(
-      0,
-      retainedPendingBytes - pending.reduce((total, item) => total + item.byteLength, 0),
-    );
+    if (bucket) releasePendingAccount(bucket.account);
   }
+  return !failed;
 }
 
 /** Drop out-of-band bytes when a span is filtered or never exported. */
 export function discardPendingMedia(span: object): void {
-  const pending = pendingBySpan.get(span) ?? [];
-  pendingBySpan.delete(span);
-  retainedPendingBytes = Math.max(
-    0,
-    retainedPendingBytes - pending.reduce((total, item) => total + item.byteLength, 0),
-  );
+  const bucket = detachPendingBucket(span);
+  if (bucket) releasePendingAccount(bucket.account);
+}
+
+/** Release all staged bytes owned by one SDK pipeline during shutdown. */
+export function discardPendingMediaOwner(owner?: object): void {
+  const state = pendingMediaOwners.get(owner ?? defaultPendingMediaOwner);
+  if (!state) return;
+  for (const account of [...state.accounts]) {
+    const span = account.span.deref();
+    if (span) {
+      const bucket = pendingBySpan.get(span);
+      if (bucket?.account === account) {
+        pendingBySpan.delete(span);
+        pendingFinalizer?.unregister(bucket.unregisterToken);
+      }
+    }
+    releasePendingAccount(account);
+  }
+  pendingMediaOwners.delete(owner ?? defaultPendingMediaOwner);
 }

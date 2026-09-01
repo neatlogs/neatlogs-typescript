@@ -79,7 +79,7 @@ describe('ByteLimitedSpanExporter', () => {
           uploadId: '018f47a6-7f32-7d67-8a1b-42d3f974c012',
           state: 'ready',
           reference: {
-            id: '018f47a6-7f32-7d67-8a1b-42d3f974c013',
+            id: '018f47a6-7f32-7d67-8a1b-42d3f974c012',
             purpose: payload.purpose,
             sha256: payload.sha256,
             byteLength: payload.byteLength,
@@ -169,6 +169,35 @@ describe('ByteLimitedSpanExporter', () => {
       lastUploadFailureStage: 'complete',
       lastUploadFailureReason: 'invalid_receipt',
     });
+  });
+
+  it('does not accept an injected ready receipt with a different reference id', async () => {
+    const spans = await finishedSpans(1, 16_384);
+    const sink = new RecordingExporter();
+    const authority: UploadAuthority = {
+      available: true,
+      unavailableReason: '',
+      maxPayloadBytes: 1024 * 1024,
+      async upload(payload) {
+        return {
+          uploadId: '018f47a6-7f32-7d67-8a1b-42d3f974c012',
+          state: 'ready',
+          reference: {
+            id: '018f47a6-7f32-7d67-8a1b-42d3f974c013',
+            purpose: payload.purpose,
+            sha256: payload.sha256,
+            byteLength: payload.byteLength,
+            mimeType: payload.mimeType,
+            contentEncoding: payload.contentEncoding,
+            state: 'ready',
+          },
+        };
+      },
+    };
+    const exporter = new ByteLimitedSpanExporter(sink, 128, undefined, authority);
+
+    expect((await runExport(exporter, spans)).code).toBe(ExportResultCode.FAILED);
+    expect(sink.batches).toEqual([]);
   });
 
   it.each([

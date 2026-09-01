@@ -7,14 +7,19 @@ import {
 import { createHash } from "node:crypto";
 import type { ChatCompletionContentPart } from "openai/resources/chat/completions";
 import type { ResponseInputFile } from "openai/resources/responses/responses";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import {
   captureMedia,
+  DEFAULT_MAX_PENDING_MEDIA_ITEMS,
+  discardPendingMedia,
+  discardPendingMediaOwner,
   mediaReferences,
+  resolvePendingMediaUploads,
   setMediaAttributes,
 } from "../../src/core/media.js";
+import { runWithClient } from "../../src/core/active-client.js";
 import { FilteringExporter } from "../../src/core/filtering-exporter.js";
 import { DeliveryDiagnostics } from "../../src/core/delivery-diagnostics.js";
 import { scheduleMask } from "../../src/core/mask.js";
@@ -250,7 +255,18 @@ describe("typed media capture", () => {
     scheduleMask(
       finished as object,
       { attributes },
-      async (data) => ({ ...data, attributes: { ...data.attributes, masked: true } }),
+      async (data) => ({
+        ...data,
+        attributes: {
+          ...data.attributes,
+          "neatlogs.llm.input_messages.0.content": JSON.stringify(
+            JSON.parse(data.attributes["neatlogs.llm.input_messages.0.content"]),
+            null,
+            2,
+          ),
+          masked: true,
+        },
+      }),
     );
     const uploads: UploadPayload[] = [];
     const authority: UploadAuthority = {
@@ -263,7 +279,7 @@ describe("typed media capture", () => {
           uploadId: "018f47a6-7f32-7d67-8a1b-42d3f974c012",
           state: "ready",
           reference: {
-            id: "018f47a6-7f32-7d67-8a1b-42d3f974c013",
+            id: "018f47a6-7f32-7d67-8a1b-42d3f974c012",
             purpose: payload.purpose,
             sha256: payload.sha256,
             byteLength: payload.byteLength,
@@ -288,16 +304,17 @@ describe("typed media capture", () => {
     expect(sink.batches[0][0].attributes).toMatchObject({
       "masked": true,
       "neatlogs.llm.input_messages.0.media.0.id":
-        "018f47a6-7f32-7d67-8a1b-42d3f974c013",
+        "018f47a6-7f32-7d67-8a1b-42d3f974c012",
       "neatlogs.llm.input_messages.0.media.0.reference":
-        "018f47a6-7f32-7d67-8a1b-42d3f974c013",
+        "018f47a6-7f32-7d67-8a1b-42d3f974c012",
       "neatlogs.llm.input_messages.0.media.0.source": "uploaded",
       "neatlogs.llm.input_messages.0.media.0.state": "available",
     });
     const exportedAttributes = JSON.stringify(sink.batches[0][0].attributes);
     expect(exportedAttributes).not.toContain(encoded.slice(0, 100));
     expect(exportedAttributes).not.toContain("pending-upload");
-    expect(exportedAttributes).toContain("018f47a6-7f32-7d67-8a1b-42d3f974c013");
+    expect(exportedAttributes).not.toContain("upload_token");
+    expect(exportedAttributes).toContain("018f47a6-7f32-7d67-8a1b-42d3f974c012");
     expect(exportedAttributes).not.toMatch(/signature|headers/);
     expect(diagnostics.snapshot().typedMediaUploads).toBe(1);
   });
@@ -343,5 +360,215 @@ describe("typed media capture", () => {
     expect((await runExport(exporter, [finished!])).code).toBe(ExportResultCode.SUCCESS);
     expect(uploadCount).toBe(0);
     expect(sink.batches[0][0].attributes).toEqual({});
+  });
+
+  it("reports a failed media upload through the exporter callback", async () => {
+    const raw = Buffer.alloc(120_000, 10);
+    const provider = new BasicTracerProvider();
+    let finished: ReadableSpan | undefined;
+    provider.addSpanProcessor(
+      new SimpleSpanProcessor({
+        export(spans, callback) {
+          finished = spans[0];
+          callback({ code: ExportResultCode.SUCCESS });
+        },
+        async shutdown() {},
+      }),
+    );
+    const span = provider.getTracer("media").startSpan("media", undefined, ROOT_CONTEXT);
+    const safe = captureMedia(
+      span,
+      "neatlogs.llm.input_messages.0",
+      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      "input",
+    );
+    span.setAttribute("neatlogs.llm.input_messages.0.content", JSON.stringify(safe));
+    span.end();
+    await provider.forceFlush();
+    scheduleMask(finished as object, { attributes: finished!.attributes }, null);
+    const sink = new RecordingExporter();
+    const authority: UploadAuthority = {
+      available: true,
+      unavailableReason: "",
+      maxPayloadBytes: 1024 * 1024,
+      async upload() {
+        throw new Error("signed URL must not escape through diagnostics");
+      },
+    };
+
+    const result = await runExport(new FilteringExporter(sink, undefined, authority), [finished!]);
+
+    expect(result).toMatchObject({ code: ExportResultCode.FAILED });
+    expect(result.error?.message).toBe("one or more typed media uploads failed");
+    expect(sink.batches).toHaveLength(1);
+    const exported = JSON.stringify(sink.batches[0][0].attributes);
+    expect(exported).toContain("upload failed: upload/unexpected_error");
+    expect(exported).not.toContain("signed URL");
+    expect(exported).not.toContain("pending-upload");
+    expect(exported).not.toContain("upload_token");
+  });
+
+  it("does not stage bytes for a non-recording span", () => {
+    const attributes: Record<string, string | number> = {};
+    const span = {
+      isRecording: () => false,
+      setAttribute(name: string, value: string | number) {
+        attributes[name] = value;
+      },
+    };
+    const raw = Buffer.alloc(120_000, 11);
+    const safe = captureMedia(
+      span,
+      "media",
+      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      "input",
+    );
+
+    expect(attributes).toMatchObject({
+      "media.media.0.state": "failed",
+      "media.media.0.safe_preview": "upload unavailable: span_not_recording",
+    });
+    expect(JSON.stringify(safe)).not.toContain(raw.toString("base64").slice(0, 100));
+    expect(JSON.stringify(safe)).not.toContain("upload_token");
+  });
+
+  it("bounds staged media by item count and releases the quota on discard", () => {
+    const spans: Array<{ setAttribute(name: string, value: string | number): void }> = [];
+    try {
+      for (let index = 0; index < DEFAULT_MAX_PENDING_MEDIA_ITEMS; index += 1) {
+        const attributes: Record<string, string | number> = {};
+        const span = {
+          setAttribute(name: string, value: string | number) {
+            attributes[name] = value;
+          },
+        };
+        spans.push(span);
+        const raw = Buffer.alloc(100_001, index);
+        captureMedia(
+          span,
+          "media",
+          [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+          "input",
+        );
+        expect(attributes["media.media.0.state"]).toBe("pending-upload");
+      }
+
+      const rejected: Record<string, string | number> = {};
+      const rejectedSpan = {
+        setAttribute(name: string, value: string | number) {
+          rejected[name] = value;
+        },
+      };
+      const raw = Buffer.alloc(100_001, 99);
+      captureMedia(
+        rejectedSpan,
+        "media",
+        [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+        "input",
+      );
+      expect(rejected["media.media.0.safe_preview"]).toBe(
+        "upload failed: validate/pending_media_item_limit",
+      );
+
+      discardPendingMedia(spans.pop()!);
+      const accepted: Record<string, string | number> = {};
+      const acceptedSpan = {
+        setAttribute(name: string, value: string | number) {
+          accepted[name] = value;
+        },
+      };
+      spans.push(acceptedSpan);
+      captureMedia(
+        acceptedSpan,
+        "media",
+        [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+        "input",
+      );
+      expect(accepted["media.media.0.state"]).toBe("pending-upload");
+    } finally {
+      spans.forEach((span) => discardPendingMedia(span));
+    }
+  });
+
+  it("isolates staging quotas by client and clears one client's lifecycle state", () => {
+    const ownerA = { workflowName: "a" } as any;
+    const ownerB = { workflowName: "b" } as any;
+    const spans: object[] = [];
+    const stage = (owner: object, fill: number) => {
+      const attributes: Record<string, string | number> = {};
+      const span = {
+        setAttribute(name: string, value: string | number) {
+          attributes[name] = value;
+        },
+      };
+      spans.push(span);
+      runWithClient(owner as any, () => {
+        const raw = Buffer.alloc(100_001, fill);
+        captureMedia(
+          span,
+          "media",
+          [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+          "input",
+        );
+      });
+      return attributes;
+    };
+
+    try {
+      for (let index = 0; index < DEFAULT_MAX_PENDING_MEDIA_ITEMS; index += 1) {
+        expect(stage(ownerA, index)["media.media.0.state"]).toBe("pending-upload");
+      }
+      expect(stage(ownerA, 99)["media.media.0.state"]).toBe("failed");
+      expect(stage(ownerB, 100)["media.media.0.state"]).toBe("pending-upload");
+
+      discardPendingMediaOwner(ownerA);
+      expect(stage(ownerA, 101)["media.media.0.state"]).toBe("pending-upload");
+    } finally {
+      discardPendingMediaOwner(ownerA);
+      discardPendingMediaOwner(ownerB);
+      spans.forEach((span) => discardPendingMedia(span));
+    }
+  });
+
+  it("bounds all media uploads for a span to one aggregate deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.now();
+      const attributes: Record<string, string | number> = {};
+      const span = {
+        setAttribute(name: string, value: string | number) {
+          attributes[name] = value;
+        },
+      };
+      const raw = Buffer.alloc(120_000, 12);
+      const safe = captureMedia(
+        span,
+        "media",
+        [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+        "input",
+      );
+      attributes.content = JSON.stringify(safe);
+      let suppliedDeadline = 0;
+      const authority: UploadAuthority = {
+        available: true,
+        unavailableReason: "",
+        maxPayloadBytes: 1024 * 1024,
+        upload(_payload, options) {
+          suppliedDeadline = options?.deadlineUnixMs ?? 0;
+          return new Promise(() => undefined);
+        },
+      };
+
+      const resolution = resolvePendingMediaUploads(span, attributes, authority);
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      await expect(resolution).resolves.toBe(false);
+      expect(suppliedDeadline).toBe(startedAt + 15_000);
+      expect(attributes["media.media.0.state"]).toBe("failed");
+      expect(JSON.stringify(attributes)).not.toContain("pending-upload");
+      expect(JSON.stringify(attributes)).not.toContain("upload_token");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

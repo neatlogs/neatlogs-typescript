@@ -138,40 +138,58 @@ export class FilteringExporter implements SpanExporter {
         if (span.instrumentationLibrary.name === 'next.js') {
           discardPendingMedia(span as object);
           this.diagnostics?.recordFrameworkSpanDrop();
-          return null;
+          return { span: null, mediaReady: true };
         }
         const scheduled = getScheduledMask(span as object);
         if (!scheduled) {
           discardPendingMedia(span as object);
-          return span;
+          return { span, mediaReady: true };
         }
         const masked = await scheduled;
         if (masked === null) {
           discardPendingMedia(span as object);
           this.diagnostics?.recordMaskedDrop('span');
-          return null;
+          return { span: null, mediaReady: true };
         }
         const attributes = {
           ...(masked.attributes && typeof masked.attributes === 'object'
             ? masked.attributes
             : {}),
         };
-        await resolvePendingMediaUploads(
+        const mediaReady = await resolvePendingMediaUploads(
           span as object,
           attributes,
           this.uploadAuthority,
           this.diagnostics,
         );
-        return maskedReadableSpan(span, { ...masked, attributes });
+        return {
+          span: maskedReadableSpan(span, { ...masked, attributes }),
+          mediaReady,
+        };
       }),
     ).then(
       (prepared) => {
-        const filtered = prepared.filter((span): span is ReadableSpan => span !== null);
+        const filtered = prepared
+          .map((item) => item.span)
+          .filter((span): span is ReadableSpan => span !== null);
+        const mediaFailures = prepared.filter(
+          (item) => item.span !== null && !item.mediaReady,
+        ).length;
         if (filtered.length === 0) {
           resultCallback({ code: ExportResultCode.SUCCESS });
           return;
         }
-        this._delegate.export(filtered, resultCallback);
+        this._delegate.export(filtered, (result) => {
+          if (result.code === ExportResultCode.SUCCESS && mediaFailures > 0) {
+            this.diagnostics?.recordExportFailure('span', mediaFailures);
+            resultCallback({
+              code: ExportResultCode.FAILED,
+              error: new Error('one or more typed media uploads failed'),
+            });
+            return;
+          }
+          resultCallback(result);
+        });
       },
       (error) => {
         resultCallback({ code: ExportResultCode.FAILED, error });
