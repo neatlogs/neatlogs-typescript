@@ -26,6 +26,7 @@ export {
   init,
   flush,
   flushAll,
+  flushAllDetailed,
   shutdown,
   isDebugEnabled,
   getSessionConfig,

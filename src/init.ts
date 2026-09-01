@@ -177,48 +177,92 @@ function validateInitOptions(options: InitOptions): void {
       `Unknown Neatlogs init option: ${unknown}`,
     );
   }
+  if (
+    options.sampleRate !== undefined &&
+    (!Number.isFinite(options.sampleRate) ||
+      options.sampleRate < 0 ||
+      options.sampleRate > 1)
+  ) {
+    throw new RangeError("sampleRate must be a finite number between 0 and 1.");
+  }
 }
 
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, stableValue(item)]),
+function stableValue(
+  value: unknown,
+  ancestors = new WeakSet<object>(),
+  location = "init options",
+): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return `string:${JSON.stringify(value)}`;
+  if (typeof value === "boolean") return `boolean:${value}`;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError(`${location} must contain only finite numbers`);
+    }
+    return `number:${Object.is(value, -0) ? "-0" : String(value)}`;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(
+      `${location} contains unsupported value type ${typeof value}`,
     );
   }
-  return value;
+  if (ancestors.has(value)) {
+    throw new TypeError(`${location} contains a circular reference`);
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return `array:[${value
+        .map((item, index) => stableValue(item, ancestors, `${location}[${index}]`))
+        .join(",")}]`;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError(
+        `${location} contains unsupported value ${prototype?.constructor?.name ?? "object"}`,
+      );
+    }
+    const record = value as Record<string, unknown>;
+    return `object:{${Object.keys(record)
+      .sort((left, right) => left.localeCompare(right))
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${stableValue(record[key], ancestors, `${location}.${key}`)}`,
+      )
+      .join(",")}}`;
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function initIdentity(options: InitOptions): InitIdentity {
   const apiKey = (options.apiKey ?? process.env.NEATLOGS_API_KEY ?? "").trim();
   const apiKeyDigest = createHash("sha256").update(apiKey).digest("hex");
-  const serialized = JSON.stringify(
-    stableValue({
-      apiKeyDigest,
-      workflowName: _resolveWorkflowName(options.workflowName),
-      userId: options.userId ?? null,
-      tags: options.tags ?? [],
-      metadata: options.metadata ?? {},
-      debug: options.debug ?? false,
-      disableExport:
-        !!options.disableExport ||
-        ["true", "1", "yes"].includes(
-          (process.env.NEATLOGS_DISABLE_EXPORT ?? "").toLowerCase(),
-        ),
-      registerShutdownHandlers: options.registerShutdownHandlers ?? null,
-      sampleRate: options.sampleRate ?? 1,
-      captureLogs: options.captureLogs ?? false,
-      pii: options.pii ?? null,
-      version: options.version ?? null,
-      endpoint: options.endpoint ?? DEFAULT_INGEST_ENDPOINT,
-      batchSize: options.batchSize ?? 100,
-      flushInterval: options.flushInterval ?? 5,
-      piiEnabled: options.piiEnabled ?? null,
-      piiSpanTypes: options.piiSpanTypes ?? [],
-    }),
-  );
+  const serialized = stableValue({
+    apiKeyDigest,
+    workflowName: _resolveWorkflowName(options.workflowName),
+    userId: options.userId ?? null,
+    tags: options.tags ?? [],
+    metadata: options.metadata ?? {},
+    debug: options.debug ?? false,
+    disableExport:
+      !!options.disableExport ||
+      ["true", "1", "yes"].includes(
+        (process.env.NEATLOGS_DISABLE_EXPORT ?? "").toLowerCase(),
+      ),
+    registerShutdownHandlers: options.registerShutdownHandlers ?? null,
+    sampleRate: options.sampleRate ?? 1,
+    captureLogs: options.captureLogs ?? false,
+    pii: options.pii ?? null,
+    version: options.version ?? null,
+    endpoint: options.endpoint ?? DEFAULT_INGEST_ENDPOINT,
+    batchSize: options.batchSize ?? 100,
+    flushInterval: options.flushInterval ?? 5,
+    piiEnabled: options.piiEnabled ?? null,
+    piiSpanTypes: options.piiSpanTypes ?? [],
+  });
   return {
     serialized,
     mask: options.mask,
@@ -260,12 +304,13 @@ function conflictingInit(): Promise<void> {
  * across concurrent callers and future asynchronous transports.
  */
 export function init(options: InitOptions = {}): Promise<void> {
+  let identity: InitIdentity;
   try {
     validateInitOptions(options);
+    identity = initIdentity(options);
   } catch (error) {
     return Promise.reject(error);
   }
-  const identity = initIdentity(options);
   if (_lifecycleState === "initializing" && _initPromise) {
     return sameInitIdentity(_initIdentity, identity)
       ? _initPromise
@@ -640,7 +685,9 @@ export interface FlushAllResult {
   outcomes: FlushOutcome[];
 }
 
-export async function flushAll(timeoutMs = 30_000): Promise<FlushAllResult> {
+export async function flushAllDetailed(
+  timeoutMs = 30_000,
+): Promise<FlushAllResult> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
   const clients = getRegisteredClients();
   const operations: Array<{ pipeline: string; run: () => Promise<boolean> }> =
@@ -688,6 +735,11 @@ export async function flushAll(timeoutMs = 30_000): Promise<FlushAllResult> {
     }),
   );
   return { success: outcomes.every((outcome) => outcome.success), outcomes };
+}
+
+/** Preserve the original aggregate boolean contract for shutdown callers. */
+export async function flushAll(timeoutMs = 30_000): Promise<boolean> {
+  return (await flushAllDetailed(timeoutMs)).success;
 }
 
 /** Snapshot bounded-queue, masking, and final-export loss counters. */

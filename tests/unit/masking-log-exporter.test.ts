@@ -54,6 +54,34 @@ describe('MaskingLogExporter', () => {
     expect(sink.batches[0][0].resource.attributes).toEqual({ 'service.name': 'example' });
   });
 
+  it.each([
+    {
+      name: 'deletes body',
+      mask: (data: Record<string, any>) => {
+        delete data.body;
+        return data;
+      },
+    },
+    {
+      name: 'sets body to undefined',
+      mask: (data: Record<string, any>) => ({ ...data, body: undefined }),
+    },
+    {
+      name: 'returns a new object without body',
+      mask: (data: Record<string, any>) => ({
+        signal_type: data.signal_type,
+        attributes: data.attributes,
+        resource: data.resource,
+      }),
+    },
+  ])('treats the masked snapshot as authoritative when it $name', async ({ mask }) => {
+    const sink = new RecordingLogExporter();
+    const exporter = new MaskingLogExporter(sink, mask);
+
+    expect((await runExport(exporter, [record()])).code).toBe(ExportResultCode.SUCCESS);
+    expect(sink.batches[0][0].body).toBeUndefined();
+  });
+
   it('fails closed when the mask throws', async () => {
     const sink = new RecordingLogExporter();
     const exporter = new MaskingLogExporter(sink, () => {

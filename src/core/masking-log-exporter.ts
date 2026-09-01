@@ -72,7 +72,7 @@ function maskedReadableLogRecord(
       typeof data.severity_number === 'number'
         ? (data.severity_number as SeverityNumber)
         : log.severityNumber,
-    body: (data.body === undefined ? log.body : data.body) as LogBody,
+    body: data.body as LogBody,
     resource: new Resource(resourceAttributes(resourceData)),
     instrumentationScope: log.instrumentationScope,
     attributes: (data.attributes && typeof data.attributes === 'object'

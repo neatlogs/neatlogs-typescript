@@ -183,6 +183,24 @@ describe('init()', () => {
     await first;
   });
 
+  it('returns rejected Promises for unsupported or unsafe metadata identities', async () => {
+    const circular: Record<string, any> = {};
+    circular.self = circular;
+    const throwing: Record<string, any> = {};
+    Object.defineProperty(throwing, 'secret', {
+      enumerable: true,
+      get() {
+        throw new Error('getter failed');
+      },
+    });
+
+    for (const metadata of [circular, { value: 1n }, throwing]) {
+      const pending = init({ apiKey: 'key1', disableExport: true, metadata });
+      expect(pending).toBeInstanceOf(Promise);
+      await expect(pending).rejects.toThrow();
+    }
+  });
+
   it('with disableExport: true skips OTLP exporter', async () => {
     const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-proto');
     const { BatchSpanProcessor } = await import('@opentelemetry/sdk-trace-base');

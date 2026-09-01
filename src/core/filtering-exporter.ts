@@ -129,16 +129,19 @@ export class FilteringExporter implements SpanExporter {
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     void Promise.all(
       spans.map(async (span) => {
-        if (span.instrumentationLibrary.name === 'next.js') return null;
+        if (span.instrumentationLibrary.name === 'next.js') {
+          this.diagnostics?.recordFrameworkSpanDrop();
+          return null;
+        }
         const scheduled = getScheduledMask(span as object);
         if (!scheduled) return span;
         const masked = await scheduled;
+        if (masked === null) this.diagnostics?.recordMaskedDrop('span');
         return masked === null ? null : maskedReadableSpan(span, masked);
       }),
     ).then(
       (prepared) => {
         const filtered = prepared.filter((span): span is ReadableSpan => span !== null);
-        this.diagnostics?.recordMaskedDrop('span', prepared.length - filtered.length);
         if (filtered.length === 0) {
           resultCallback({ code: ExportResultCode.SUCCESS });
           return;

@@ -17,7 +17,6 @@ interface SpanQueueState {
   _finishedSpans: ReadableSpan[];
   _maxQueueSize: number;
 }
-
 interface LogQueueState {
   _finishedLogRecords: LogRecord[];
   _maxQueueSize: number;
@@ -63,4 +62,3 @@ export class ObservableBatchLogRecordProcessor extends BatchLogRecordProcessor {
     super.onEmit(logRecord);
   }
 }
-

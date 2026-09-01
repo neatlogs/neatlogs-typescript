@@ -5,6 +5,8 @@ import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import type { LogRecordExporter, ReadableLogRecord } from '@opentelemetry/sdk-logs';
 import { describe, expect, it } from 'vitest';
 import { DeliveryDiagnostics } from '../../src/core/delivery-diagnostics.js';
+import { FilteringExporter } from '../../src/core/filtering-exporter.js';
+import { scheduleMask } from '../../src/core/mask.js';
 import {
   ObservableBatchLogRecordProcessor,
   ObservableBatchSpanProcessor,
@@ -67,5 +69,25 @@ describe('delivery diagnostics', () => {
     (logs as any)._finishedLogRecords = [];
     await logs.shutdown();
   });
-});
 
+  it('tracks framework filtering separately from mask drops', async () => {
+    const diagnostics = new DeliveryDiagnostics();
+    const span = await finishedSpan();
+    const frameworkSpan = {
+      ...span,
+      instrumentationLibrary: { name: 'next.js' },
+    } as ReadableSpan;
+    scheduleMask(span as object, { attributes: {} }, () => null);
+    const exporter = new FilteringExporter(new Sink(), diagnostics);
+
+    const result = await new Promise<ExportResult>((resolve) =>
+      exporter.export([frameworkSpan, span], resolve),
+    );
+
+    expect(result.code).toBe(ExportResultCode.SUCCESS);
+    expect(diagnostics.snapshot()).toMatchObject({
+      frameworkSpanDrops: 1,
+      maskedSpanDrops: 1,
+    });
+  });
+});

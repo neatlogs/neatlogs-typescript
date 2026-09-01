@@ -39,7 +39,6 @@ export class ByteLimitedSpanExporter implements SpanExporter {
     if (current.length > 0) batches.push(current);
 
     void this.exportSequentially(batches).then(resultCallback, (error) => {
-      this.diagnostics?.recordExportFailure('span', spans.length);
       resultCallback({
         code: ExportResultCode.FAILED,
         error: error instanceof Error ? error : new Error(String(error)),
@@ -48,16 +47,30 @@ export class ByteLimitedSpanExporter implements SpanExporter {
   }
 
   private async exportSequentially(batches: ReadableSpan[][]): Promise<ExportResult> {
-    for (const batch of batches) {
-      const result = await new Promise<ExportResult>((resolve) => {
-        this.delegate.export(batch, resolve);
-      });
+    for (let index = 0; index < batches.length; index += 1) {
+      const batch = batches[index];
+      let result: ExportResult;
+      try {
+        result = await new Promise<ExportResult>((resolve) => {
+          this.delegate.export(batch, resolve);
+        });
+      } catch (error) {
+        this.recordUnsent(batches, index);
+        throw error;
+      }
       if (result.code !== ExportResultCode.SUCCESS) {
-        this.diagnostics?.recordExportFailure('span', batch.length);
+        this.recordUnsent(batches, index);
         return result;
       }
     }
     return { code: ExportResultCode.SUCCESS };
+  }
+
+  private recordUnsent(batches: ReadableSpan[][], failedIndex: number): void {
+    const count = batches
+      .slice(failedIndex)
+      .reduce((total, batch) => total + batch.length, 0);
+    this.diagnostics?.recordExportFailure('span', count);
   }
 
   async shutdown(): Promise<void> {

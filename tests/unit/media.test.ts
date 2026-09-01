@@ -5,6 +5,8 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { createHash } from "node:crypto";
+import type { ChatCompletionContentPart } from "openai/resources/chat/completions";
+import type { ResponseInputFile } from "openai/resources/responses/responses";
 import { describe, expect, it } from "vitest";
 import { mediaReferences, setMediaAttributes } from "../../src/core/media.js";
 
@@ -57,5 +59,31 @@ describe("typed media capture", () => {
         "input",
       ),
     ).toEqual([]);
+  });
+
+  it("recognizes typed OpenAI nested files and Responses file URLs", () => {
+    const nestedFile = {
+      type: "file",
+      file: { file_id: "file-chat-123" },
+    } satisfies ChatCompletionContentPart;
+    const responseFile = {
+      type: "input_file",
+      file_url: "https://example.com/report.pdf",
+    } satisfies ResponseInputFile;
+
+    expect(mediaReferences(nestedFile, "input")).toEqual([
+      expect.objectContaining({
+        type: "document",
+        source: "provider",
+        reference: "file-chat-123",
+      }),
+    ]);
+    expect(mediaReferences(responseFile, "input")).toEqual([
+      expect.objectContaining({
+        type: "document",
+        source: "url",
+        reference: "https://example.com/report.pdf",
+      }),
+    ]);
   });
 });

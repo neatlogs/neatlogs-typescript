@@ -264,6 +264,12 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
     );
 
     setInvocationParams(span, opts);
+    setMediaAttributes(
+      span,
+      "neatlogs.llm.input_messages.0",
+      opts?.input,
+      "input",
+    );
 
     let result: any;
     try {

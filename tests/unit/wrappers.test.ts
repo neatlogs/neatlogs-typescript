@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   trace as otelTrace,
   context as otelContext,
@@ -9,6 +10,8 @@ import {
   InMemorySpanExporter,
   type ReadableSpan,
 } from '@opentelemetry/sdk-trace-base';
+import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
+import type { ResponseInputFile } from 'openai/resources/responses/responses';
 
 import { wrapOpenAI, traceTool as traceToolOpenAI } from '../../src/openai.js';
 import { wrapAnthropic, traceTool as traceToolAnthropic } from '../../src/anthropic.js';
@@ -91,6 +94,59 @@ describe('wrapOpenAI', () => {
     expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello!');
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(10);
     expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(5);
+  });
+
+  it('captures typed OpenAI file inputs from Chat Completions and Responses', async () => {
+    const fileBytes = Buffer.from('report contents');
+    const chatFiles = [
+      {
+        type: 'file',
+        file: { file_id: 'file-chat-123' },
+      },
+      {
+        type: 'file',
+        file: {
+          file_data: fileBytes.toString('base64'),
+          filename: 'report.txt',
+        },
+      },
+    ] satisfies ChatCompletionContentPart[];
+    const responseFile = {
+      type: 'input_file',
+      file_url: 'https://example.com/report.pdf',
+    } satisfies ResponseInputFile;
+    const wrapped = wrapOpenAI({
+      chat: {
+        completions: {
+          create: async () => ({ choices: [{ message: { content: 'ok' } }] }),
+        },
+      },
+      responses: {
+        create: async () => ({ output_text: 'ok', output: [] }),
+      },
+    } as any);
+
+    await wrapped.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: chatFiles }],
+    });
+    await wrapped.responses.create({
+      model: 'gpt-5.1',
+      input: [{ role: 'user', content: [responseFile] }],
+    });
+
+    const [chatSpan, responsesSpan] = getSpans();
+    expect(attr(chatSpan, 'neatlogs.llm.input_messages.0.media.0.reference')).toBe(
+      'file-chat-123',
+    );
+    expect(attr(chatSpan, 'neatlogs.llm.input_messages.0.media.0.type')).toBe('document');
+    expect(attr(chatSpan, 'neatlogs.llm.input_messages.0.media.1.sha256')).toBe(
+      createHash('sha256').update(fileBytes).digest('hex'),
+    );
+    expect(attr(responsesSpan, 'neatlogs.llm.input_messages.0.media.0.reference')).toBe(
+      'https://example.com/report.pdf',
+    );
+    expect(attr(responsesSpan, 'neatlogs.llm.input_messages.0.media.0.source')).toBe('url');
   });
 
   it('traces streaming chat.completions.create', async () => {

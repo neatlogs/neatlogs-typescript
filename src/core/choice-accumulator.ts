@@ -144,7 +144,7 @@ export class ChoiceAccumulator {
       const content = choice.content.join("");
       if (content) span.setAttribute(`${prefix}.content`, content);
       const reasoning = choice.reasoning.join("");
-      if (reasoning) span.setAttribute(`${prefix}.reasoning`, reasoning);
+      if (reasoning) span.setAttribute(`${prefix}.thinking`, reasoning);
       if (choice.mediaValues.length > 0) {
         setMediaAttributes(span, prefix, choice.mediaValues, "output");
       }

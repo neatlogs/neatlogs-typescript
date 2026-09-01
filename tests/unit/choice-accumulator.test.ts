@@ -82,6 +82,43 @@ describe('ChoiceAccumulator', () => {
     expect(attributes['neatlogs.llm.tool_calls.1.choice_index']).toBe(1);
   });
 
+  it('emits non-streamed reasoning content under the backend thinking field', async () => {
+    const sink = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider();
+    provider.addSpanProcessor(new SimpleSpanProcessor(sink));
+    const span = provider.getTracer('choice-test').startSpan('llm', undefined, ROOT_CONTEXT);
+    const accumulator = new ChoiceAccumulator();
+    accumulator.addResponse({
+      choices: [{ message: { reasoning_content: 'private chain' } }],
+    });
+    accumulator.finish(span);
+    await provider.forceFlush();
+
+    const attributes = sink.getFinishedSpans()[0].attributes;
+    expect(attributes['neatlogs.llm.output_messages.0.thinking']).toBe('private chain');
+    expect(attributes['neatlogs.llm.output_messages.0.reasoning']).toBeUndefined();
+  });
+
+  it('emits streamed reasoning content under the backend thinking field', async () => {
+    const sink = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider();
+    provider.addSpanProcessor(new SimpleSpanProcessor(sink));
+    const span = provider.getTracer('choice-test').startSpan('llm', undefined, ROOT_CONTEXT);
+    const accumulator = new ChoiceAccumulator();
+    accumulator.addChunk(span, {
+      choices: [{ delta: { reasoning_content: 'private ' } }],
+    });
+    accumulator.addChunk(span, {
+      choices: [{ delta: { reasoning_content: 'chain' } }],
+    });
+    accumulator.finish(span);
+    await provider.forceFlush();
+
+    const attributes = sink.getFinishedSpans()[0].attributes;
+    expect(attributes['neatlogs.llm.output_messages.0.thinking']).toBe('private chain');
+    expect(attributes['neatlogs.llm.output_messages.0.reasoning']).toBeUndefined();
+  });
+
   it('reports flattened fidelity only when selected by an adapter', async () => {
     const sink = new InMemorySpanExporter();
     const provider = new BasicTracerProvider();

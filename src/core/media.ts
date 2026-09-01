@@ -4,6 +4,7 @@ export type MediaRecord = Record<string, string | number>;
 
 function mediaKind(mimeType: string, declared = ""): string {
   const value = declared.toLowerCase().replace(/^input_/, "");
+  if (value === "file") return "document";
   if (["image", "audio", "video", "document"].includes(value)) return value;
   if (mimeType.startsWith("image/")) return "image";
   if (mimeType.startsWith("audio/")) return "audio";
@@ -79,15 +80,15 @@ export function mediaReferences(
 ): MediaRecord[] {
   const found: MediaRecord[] = [];
   const visited = new WeakSet<object>();
-  const visit = (node: any): void => {
+  const visit = (node: any, inheritedDeclared = ""): void => {
     if (!node || typeof node !== "object") return;
     if (visited.has(node)) return;
     visited.add(node);
     if (Array.isArray(node)) {
-      node.forEach(visit);
+      node.forEach((item) => visit(item));
       return;
     }
-    const declared = String(node.type ?? "");
+    const declared = String(node.type ?? inheritedDeclared);
     const mimeType = String(node.mime_type ?? node.mimeType ?? "");
     const image =
       typeof node.image_url === "object" ? node.image_url?.url : node.image_url;
@@ -118,7 +119,12 @@ export function mediaReferences(
       );
       if (record) found.push(record);
     }
-    const reference = node.file_id ?? node.file_uri ?? node.fileUri ?? node.url;
+    const reference =
+      node.file_id ??
+      node.file_url ??
+      node.file_uri ??
+      node.fileUri ??
+      node.url;
     if (
       typeof reference === "string" &&
       (["file", "input_file"].includes(declared) || !!mimeType)
@@ -127,7 +133,13 @@ export function mediaReferences(
         referenceRecord(reference, mimeType, declared || "document", purpose),
       );
     }
-    Object.values(node).forEach(visit);
+    for (const [key, item] of Object.entries(node)) {
+      const childDeclared =
+        key === "file" && ["file", "input_file"].includes(declared)
+          ? declared
+          : "";
+      visit(item, childDeclared);
+    }
   };
   visit(value);
   const unique = new Map<string, MediaRecord>();

@@ -106,6 +106,18 @@ function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   );
 }
 
+function isSyncIterator(
+  value: unknown,
+): value is Iterator<unknown> & Iterable<unknown> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { next?: unknown }).next === "function" &&
+    typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] ===
+      "function"
+  );
+}
+
 function isReadableStreamLike(value: unknown): value is {
   getReader: (...args: any[]) => any;
   cancel: (...args: any[]) => Promise<unknown>;
@@ -144,6 +156,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
     const span = tracer.startSpan(spanName, {}, parentContext);
     return withNeatlogsSpan(span, () => {
       let finished = false;
+      let streamInterrupted = false;
       const streamChunks: any[] = [];
 
       const captureResult = (result: any): void => {
@@ -241,7 +254,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         span.end();
       };
 
-      const wrapIterator = (iterator: any): any => {
+      const wrapAsyncIterator = (iterator: any): any => {
         let proxy: any;
         proxy = new Proxy(iterator, {
           get(target, property) {
@@ -252,7 +265,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                   const item = await withNeatlogsSpan(span, () =>
                     target.next(...nextArgs),
                   );
-                  if (item.done) finishStream();
+                  if (item.done) finishStream(streamInterrupted);
                   else recordChunk(item.value);
                   return item;
                 } catch (error) {
@@ -264,12 +277,14 @@ export function decorateSpan<TArgs extends any[], TReturn>(
             if (property === "return") {
               return async (...returnArgs: any[]) => {
                 try {
+                  streamInterrupted = true;
                   const item = target.return
                     ? await withNeatlogsSpan(span, () =>
                         target.return(...returnArgs),
                       )
                     : { done: true, value: returnArgs[0] };
-                  finishStream(true);
+                  if (item.done) finishStream(true);
+                  else recordChunk(item.value);
                   return item;
                 } catch (error) {
                   finishError(error);
@@ -303,17 +318,92 @@ export function decorateSpan<TArgs extends any[], TReturn>(
 
       const wrapAsyncIterable = (source: AsyncIterable<unknown>): any => {
         if (typeof (source as any).next === "function") {
-          return wrapIterator(source);
+          return wrapAsyncIterator(source);
         }
         return new Proxy(source as any, {
           get(target, property) {
             if (property === Symbol.asyncIterator) {
-              return () => wrapIterator(target[Symbol.asyncIterator]());
+              return () => wrapAsyncIterator(target[Symbol.asyncIterator]());
             }
             const value = Reflect.get(target, property, target);
             return typeof value === "function" ? value.bind(target) : value;
           },
         });
+      };
+
+      const wrapSyncIterator = (
+        iterator: Iterator<unknown> & Iterable<unknown>,
+      ): any => {
+        let proxy: any;
+        proxy = new Proxy(iterator, {
+          get(target, property) {
+            if (property === Symbol.iterator) return () => proxy;
+            if (property === "next") {
+              return (...nextArgs: any[]) => {
+                try {
+                  const item = withNeatlogsSpan(span, () =>
+                    (
+                      target.next as (
+                        ...args: any[]
+                      ) => IteratorResult<unknown>
+                    )(...nextArgs),
+                  );
+                  if (item.done) finishStream(streamInterrupted);
+                  else recordChunk(item.value);
+                  return item;
+                } catch (error) {
+                  finishError(error);
+                  throw error;
+                }
+              };
+            }
+            if (property === "return") {
+              return (...returnArgs: any[]) => {
+                try {
+                  streamInterrupted = true;
+                  const item = target.return
+                    ? withNeatlogsSpan(span, () =>
+                        (
+                          target.return as (
+                            ...args: any[]
+                          ) => IteratorResult<unknown>
+                        )(...returnArgs),
+                      )
+                    : { done: true, value: returnArgs[0] };
+                  if (item.done) finishStream(true);
+                  else recordChunk(item.value);
+                  return item;
+                } catch (error) {
+                  finishError(error);
+                  throw error;
+                }
+              };
+            }
+            if (property === "throw") {
+              return (...throwArgs: any[]) => {
+                try {
+                  if (!target.throw) throw throwArgs[0];
+                  const item = withNeatlogsSpan(span, () =>
+                    (
+                      target.throw as (
+                        ...args: any[]
+                      ) => IteratorResult<unknown>
+                    )(...throwArgs),
+                  );
+                  if (item.done) finishStream(streamInterrupted);
+                  else recordChunk(item.value);
+                  return item;
+                } catch (error) {
+                  finishError(error);
+                  throw error;
+                }
+              };
+            }
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return proxy;
       };
 
       const wrapReader = (reader: any): any =>
@@ -370,7 +460,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
             if (property === Symbol.asyncIterator) {
               const iteratorFactory = target[Symbol.asyncIterator];
               if (typeof iteratorFactory === "function") {
-                return () => wrapIterator(iteratorFactory.call(target));
+                return () => wrapAsyncIterator(iteratorFactory.call(target));
               }
             }
             if (property === "cancel") {
@@ -441,6 +531,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
           if (isReadableStreamLike(resolved))
             return wrapReadableStream(resolved);
           if (isAsyncIterable(resolved)) return wrapAsyncIterable(resolved);
+          if (isSyncIterator(resolved)) return wrapSyncIterator(resolved);
           finishSuccess(resolved);
           return resolved;
         };

@@ -9,6 +9,8 @@ describe('barrel exports (src/index.ts)', () => {
     const mod = await import('../../src/index.js');
     expect(typeof mod.init).toBe('function');
     expect(typeof mod.flush).toBe('function');
+    expect(typeof mod.flushAll).toBe('function');
+    expect(typeof mod.flushAllDetailed).toBe('function');
     expect(typeof mod.shutdown).toBe('function');
   });
 

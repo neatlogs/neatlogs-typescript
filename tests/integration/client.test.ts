@@ -7,7 +7,7 @@ import {
 } from "@opentelemetry/sdk-logs";
 
 import { Client } from "../../src/core/client.js";
-import { flushAll } from "../../src/init.js";
+import { flushAll, flushAllDetailed } from "../../src/init.js";
 import { trace } from "../../src/core/context.js";
 import { _setOtelLogger, captureStdout, log } from "../../src/core/log.js";
 import { wrapOpenAI } from "../../src/openai.js";
@@ -119,7 +119,8 @@ describe("Client", () => {
     const firstFlush = vi.spyOn(first.client, "flush");
     const secondFlush = vi.spyOn(second.client, "flush");
 
-    await expect(flushAll()).resolves.toMatchObject({ success: true });
+    const result: Promise<boolean> = flushAll();
+    await expect(result).resolves.toBe(true);
 
     expect(firstFlush).toHaveBeenCalledOnce();
     expect(secondFlush).toHaveBeenCalledOnce();
@@ -131,7 +132,7 @@ describe("Client", () => {
     await entry.client.shutdown();
     clientFlush.mockClear();
 
-    await expect(flushAll()).resolves.toMatchObject({ success: true });
+    await expect(flushAll()).resolves.toBe(true);
 
     expect(clientFlush).not.toHaveBeenCalled();
   });
@@ -142,7 +143,7 @@ describe("Client", () => {
       .spyOn(entry.client, "flush")
       .mockReturnValue(new Promise<boolean>(() => {}));
 
-    const result = await flushAll(10);
+    const result = await flushAllDetailed(10);
     clientFlush.mockRestore();
 
     expect(result.success).toBe(false);

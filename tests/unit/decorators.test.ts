@@ -314,6 +314,86 @@ describe("decorateSpan", () => {
     expect(mockSpan.end).toHaveBeenCalledOnce();
   });
 
+  it("keeps a synchronous generator span open through iteration", () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
+      yield { text: "first" };
+      yield { text: "second" };
+    });
+
+    const stream = wrapped();
+    expect(mockSpan.end).not.toHaveBeenCalled();
+    expect([...stream]).toEqual([{ text: "first" }, { text: "second" }]);
+
+    expect(mockSpan.addEvent).toHaveBeenCalledTimes(2);
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "output.value",
+      '[{"text":"first"},{"text":"second"}]',
+    );
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it("marks synchronous generator return as an early cancellation", () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
+      yield "first";
+      yield "second";
+    });
+    const stream = wrapped();
+
+    expect(stream.next()).toEqual({ done: false, value: "first" });
+    expect(stream.return("stopped")).toEqual({ done: true, value: "stopped" });
+
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.stream.cancelled",
+      true,
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "output.value",
+      '["first"]',
+    );
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it("proxies handled throws through a synchronous generator", () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
+      try {
+        yield "ready";
+      } catch {
+        yield "recovered";
+      }
+    });
+    const stream = wrapped();
+
+    expect(stream.next()).toEqual({ done: false, value: "ready" });
+    expect(stream.throw(new Error("recoverable"))).toEqual({
+      done: false,
+      value: "recovered",
+    });
+    expect(mockSpan.end).not.toHaveBeenCalled();
+    expect(stream.next()).toEqual({ done: true, value: undefined });
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "output.value",
+      '["ready","recovered"]',
+    );
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it("records synchronous generator errors raised during next", () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
+      yield "first";
+      throw new Error("generator boom");
+    });
+    const stream = wrapped();
+
+    expect(stream.next()).toEqual({ done: false, value: "first" });
+    expect(() => stream.next()).toThrow("generator boom");
+    expect(mockSpan.setStatus).toHaveBeenCalledWith({
+      code: 2,
+      message: "generator boom",
+    });
+    expect(mockSpan.recordException).toHaveBeenCalledOnce();
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
   it("keeps a ReadableStream span open until its reader reaches EOF", async () => {
     const wrapped = decorateSpan(
       { kind: "CHAIN" },

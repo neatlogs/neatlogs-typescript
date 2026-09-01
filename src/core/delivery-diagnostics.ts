@@ -5,6 +5,7 @@ export interface DeliveryDiagnosticsSnapshot {
   logQueueDrops: number;
   spanExportFailures: number;
   logExportFailures: number;
+  frameworkSpanDrops: number;
   maskedSpanDrops: number;
   maskedLogDrops: number;
 }
@@ -16,6 +17,7 @@ export class DeliveryDiagnostics {
     logQueueDrops: 0,
     spanExportFailures: 0,
     logExportFailures: 0,
+    frameworkSpanDrops: 0,
     maskedSpanDrops: 0,
     maskedLogDrops: 0,
   };
@@ -35,8 +37,11 @@ export class DeliveryDiagnostics {
     else this.counters.maskedLogDrops += count;
   }
 
+  recordFrameworkSpanDrop(count = 1): void {
+    this.counters.frameworkSpanDrops += count;
+  }
+
   snapshot(): DeliveryDiagnosticsSnapshot {
     return { ...this.counters };
   }
 }
-
