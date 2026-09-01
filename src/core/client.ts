@@ -44,6 +44,11 @@ import type { MaskFunction } from "../types.js";
 import { __version__ } from "../version.js";
 import { DEFAULT_INGEST_ENDPOINT, exportQueueCapacity } from "../constants.js";
 import { runByDeadline } from "./deadline.js";
+import {
+  DisabledUploadAuthority,
+  resolveUploadAuthority,
+  type UploadAuthorityOption,
+} from "./upload-authority.js";
 
 const logger = getLogger();
 
@@ -61,6 +66,8 @@ export interface ClientOptions {
   debug?: boolean;
   /** Optional transport override, primarily for private collectors and tests. */
   spanExporter?: SpanExporter;
+  /** Explicitly gate or inject authenticated typed-media/overflow uploads. */
+  uploadAuthority?: UploadAuthorityOption;
 }
 
 type ClientState = "running" | "closing" | "closed";
@@ -177,6 +184,18 @@ export class Client {
 
     const endpoint = options.endpoint ?? DEFAULT_INGEST_ENDPOINT;
     const baseUrl = new URL(endpoint).origin;
+    const uploadAuthority = disableExport
+      ? new DisabledUploadAuthority("export_disabled")
+      : resolveUploadAuthority(
+          options.uploadAuthority,
+          process.env.NEATLOGS_UPLOADS_ENABLED,
+          baseUrl,
+          apiKey,
+        );
+    this.diagnostics.configureUploadAuthority(
+      uploadAuthority.available,
+      uploadAuthority.unavailableReason,
+    );
     if (!disableExport) {
       const traceUrl = endpoint.endsWith("/v1/traces")
         ? endpoint
@@ -191,8 +210,10 @@ export class Client {
             }),
           undefined,
           this.diagnostics,
+          uploadAuthority,
         ),
         this.diagnostics,
+        uploadAuthority,
       );
       const batchSize = options.batchSize ?? 100;
       this.tracerProvider.addSpanProcessor(

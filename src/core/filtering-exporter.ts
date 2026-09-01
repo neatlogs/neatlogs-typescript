@@ -12,6 +12,11 @@ import { Resource } from '@opentelemetry/resources';
 import type { SpanExporter, ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { getScheduledMask } from './mask.js';
 import type { DeliveryDiagnostics } from './delivery-diagnostics.js';
+import { discardPendingMedia, resolvePendingMediaUploads } from './media.js';
+import {
+  DisabledUploadAuthority,
+  type UploadAuthority,
+} from './upload-authority.js';
 
 function toHrTime(nanos: unknown, fallback: HrTime): HrTime {
   if (typeof nanos !== 'number' || !Number.isFinite(nanos)) return fallback;
@@ -124,20 +129,40 @@ export class FilteringExporter implements SpanExporter {
   constructor(
     private readonly _delegate: SpanExporter,
     private readonly diagnostics?: DeliveryDiagnostics,
+    private readonly uploadAuthority: UploadAuthority = new DisabledUploadAuthority(),
   ) {}
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     void Promise.all(
       spans.map(async (span) => {
         if (span.instrumentationLibrary.name === 'next.js') {
+          discardPendingMedia(span as object);
           this.diagnostics?.recordFrameworkSpanDrop();
           return null;
         }
         const scheduled = getScheduledMask(span as object);
-        if (!scheduled) return span;
+        if (!scheduled) {
+          discardPendingMedia(span as object);
+          return span;
+        }
         const masked = await scheduled;
-        if (masked === null) this.diagnostics?.recordMaskedDrop('span');
-        return masked === null ? null : maskedReadableSpan(span, masked);
+        if (masked === null) {
+          discardPendingMedia(span as object);
+          this.diagnostics?.recordMaskedDrop('span');
+          return null;
+        }
+        const attributes = {
+          ...(masked.attributes && typeof masked.attributes === 'object'
+            ? masked.attributes
+            : {}),
+        };
+        await resolvePendingMediaUploads(
+          span as object,
+          attributes,
+          this.uploadAuthority,
+          this.diagnostics,
+        );
+        return maskedReadableSpan(span, { ...masked, attributes });
       }),
     ).then(
       (prepared) => {

@@ -16,7 +16,7 @@
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
 import { getProviderTracer } from "./core/auto-root.js";
 import { ChoiceAccumulator } from "./core/choice-accumulator.js";
-import { setMediaAttributes } from "./core/media.js";
+import { captureMedia } from "./core/media.js";
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -156,17 +156,17 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
           msg.content,
         );
       } else if (msg.content) {
+        const capturedContent = captureMedia(
+          span,
+          `neatlogs.llm.input_messages.${i}`,
+          msg.content,
+          "input",
+        );
         span.setAttribute(
           `neatlogs.llm.input_messages.${i}.content`,
-          safeStringify(msg.content),
+          safeStringify(capturedContent),
         );
       }
-      setMediaAttributes(
-        span,
-        `neatlogs.llm.input_messages.${i}`,
-        msg.content,
-        "input",
-      );
       if (msg.tool_call_id) {
         span.setAttribute(
           `neatlogs.llm.input_messages.${i}.tool_call_id`,
@@ -257,19 +257,20 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
           "neatlogs.llm.system": "openai",
           "neatlogs.llm.model_name": model,
           "neatlogs.llm.is_streaming": isStream,
-          "input.value": safeStringify(opts?.input ?? ""),
+          "input.value": "",
         },
       },
       getNeatlogsParentContext(),
     );
 
-    setInvocationParams(span, opts);
-    setMediaAttributes(
+    const capturedInput = captureMedia(
       span,
       "neatlogs.llm.input_messages.0",
       opts?.input,
       "input",
     );
+    span.setAttribute("input.value", safeStringify(capturedInput ?? ""));
+    setInvocationParams(span, opts);
 
     let result: any;
     try {
@@ -442,6 +443,14 @@ function applyResponsesResponseAttributes(
   response: any,
   streamedText = "",
 ): void {
+  const capturedOutput = response?.output
+    ? captureMedia(
+        span,
+        "neatlogs.llm.output_messages.0",
+        response.output,
+        "output",
+      )
+    : response?.output;
   const text =
     response?.output_text ||
     streamedText ||
@@ -452,7 +461,7 @@ function applyResponsesResponseAttributes(
     span.setAttribute("output.value", text);
   } else if (response?.output) {
     // Tool-call-only responses still have a meaningful structured output.
-    span.setAttribute("output.value", safeStringify(response.output));
+    span.setAttribute("output.value", safeStringify(capturedOutput));
   }
 
   if (response?.model)

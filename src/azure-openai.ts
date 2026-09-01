@@ -19,6 +19,7 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import { captureMedia } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -132,7 +133,13 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
       if (typeof msg.content === 'string') {
         span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, msg.content);
       } else if (msg.content) {
-        span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, safeStringify(msg.content));
+        const captured = captureMedia(
+          span,
+          `neatlogs.llm.input_messages.${i}`,
+          msg.content,
+          'input',
+        );
+        span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, safeStringify(captured));
       }
       if (msg.tool_call_id) {
         span.setAttribute(`neatlogs.llm.input_messages.${i}.tool_call_id`, msg.tool_call_id);
@@ -191,17 +198,33 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         'neatlogs.llm.provider': PROVIDER,
         'neatlogs.llm.system': SYSTEM,
         'neatlogs.llm.model_name': model,
-        'input.value': safeStringify(opts?.input ?? ''),
+        'input.value': '',
       },
     }, getNeatlogsParentContext());
+
+    const capturedInput = captureMedia(
+      span,
+      'neatlogs.llm.input_messages.0',
+      opts?.input,
+      'input',
+    );
+    span.setAttribute('input.value', safeStringify(capturedInput ?? ''));
 
     const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
       (response: any) => {
+        const capturedOutput = captureMedia(
+          span,
+          'neatlogs.llm.output_messages.0',
+          response?.output,
+          'output',
+        );
         if (response?.output_text) {
           span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
           span.setAttribute('neatlogs.llm.output_messages.0.content', response.output_text);
+        } else if (response?.output) {
+          span.setAttribute('output.value', safeStringify(capturedOutput));
         }
         if (response?.model) span.setAttribute('neatlogs.llm.model_name', response.model);
         if (response?.usage) {
@@ -341,7 +364,16 @@ function finalizeChatResponse(span: Span, response: any): void {
 
     span.setAttribute(`neatlogs.llm.output_messages.${i}.role`, 'assistant');
     if (message.content) {
-      span.setAttribute(`neatlogs.llm.output_messages.${i}.content`, message.content);
+      const captured = captureMedia(
+        span,
+        `neatlogs.llm.output_messages.${i}`,
+        message.content,
+        'output',
+      );
+      span.setAttribute(
+        `neatlogs.llm.output_messages.${i}.content`,
+        typeof captured === 'string' ? captured : safeStringify(captured),
+      );
     }
     if (message.tool_calls) {
       for (let j = 0; j < message.tool_calls.length; j++) {

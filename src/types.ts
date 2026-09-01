@@ -1,3 +1,5 @@
+import type { UploadAuthorityOption } from "./core/upload-authority.js";
+
 /**
  * Span kind for categorizing instrumented operations.
  */
@@ -103,6 +105,12 @@ export interface InitOptions {
   piiEnabled?: boolean;
   /** Override which span types have server-side PII redaction applied. */
   piiSpanTypes?: string[];
+  /**
+   * Enable the authenticated Phase 8 typed-media and OTLP overflow authority,
+   * or inject a compatible authority. Defaults to NEATLOGS_UPLOADS_ENABLED and
+   * remains disabled when neither is set.
+   */
+  uploadAuthority?: UploadAuthorityOption;
 }
 
 /**

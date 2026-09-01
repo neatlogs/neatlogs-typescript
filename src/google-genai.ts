@@ -25,6 +25,7 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import { captureMedia } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -172,9 +173,15 @@ function tracedChatSend(
   // The chat sendMessage param shape is { message } (string or Part[]).
   const message = params?.message ?? params;
   span.setAttribute('neatlogs.llm.input_messages.0.role', 'user');
+  const capturedMessage = captureMedia(
+    span,
+    'neatlogs.llm.input_messages.0',
+    message,
+    'input',
+  );
   span.setAttribute(
     'neatlogs.llm.input_messages.0.content',
-    (typeof message === 'string' ? message : safeStringify(message)),
+    (typeof capturedMessage === 'string' ? capturedMessage : safeStringify(capturedMessage)),
   );
 
   const result = withNeatlogsSpan(span, () => original(params, ...rest));
@@ -300,10 +307,16 @@ function setInputAttributes(span: Span, opts: any): void {
   const config = opts?.config;
   const systemInstruction = config?.systemInstruction ?? config?.system_instruction;
   if (systemInstruction) {
+    const captured = captureMedia(
+      span,
+      `neatlogs.llm.input_messages.${idx}`,
+      systemInstruction,
+      'input',
+    );
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'system');
     span.setAttribute(
       `neatlogs.llm.input_messages.${idx}.content`,
-      typeof systemInstruction === 'string' ? systemInstruction : safeStringify(systemInstruction),
+      typeof captured === 'string' ? captured : safeStringify(captured),
     );
     idx++;
   }
@@ -322,6 +335,12 @@ function setInputAttributes(span: Span, opts: any): void {
         const role = item.role ?? 'user';
         span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, role);
         const parts = item.parts ?? [];
+        const capturedParts = captureMedia(
+          span,
+          `neatlogs.llm.input_messages.${idx}`,
+          parts,
+          'input',
+        );
         const textParts: string[] = [];
         for (const part of parts) {
           if (typeof part === 'string') textParts.push(part);
@@ -329,14 +348,20 @@ function setInputAttributes(span: Span, opts: any): void {
         }
         span.setAttribute(
           `neatlogs.llm.input_messages.${idx}.content`,
-          textParts.length ? textParts.join('\n') : safeStringify(parts),
+          textParts.length ? textParts.join('\n') : safeStringify(capturedParts),
         );
         idx++;
       }
     }
   } else if (contents) {
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'user');
-    span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, safeStringify(contents));
+    const captured = captureMedia(
+      span,
+      `neatlogs.llm.input_messages.${idx}`,
+      contents,
+      'input',
+    );
+    span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, safeStringify(captured));
   }
 
   // Tools (function declarations)
@@ -455,6 +480,12 @@ function finalizeStreamChunks(span: Span, chunks: any[]): void {
 // ---------------------------------------------------------------------------
 
 function finalizeResponse(span: Span, response: any): void {
+  captureMedia(
+    span,
+    'neatlogs.llm.output_messages.0',
+    response?.candidates,
+    'output',
+  );
   const textParts: string[] = [];
   let toolIdx = 0;
 

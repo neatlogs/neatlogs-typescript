@@ -16,6 +16,7 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import { captureMedia } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -350,6 +351,7 @@ function finalizeStreamEvents(span: Span, events: any[]): void {
 
 function finalizeMessageResponse(span: Span, response: any): void {
   const content: any[] = response?.content ?? [];
+  captureMedia(span, 'neatlogs.llm.output_messages.0', content, 'output');
   const textParts: string[] = [];
   const thinkingParts: string[] = [];
   const toolCalls: Array<{ id: string; name: string; input: string }> = [];
@@ -395,7 +397,13 @@ function finalizeMessageResponse(span: Span, response: any): void {
 function setInputMessages(span: Span, system: any, messages: any[]): void {
   let idx = 0;
   if (system) {
-    const content = typeof system === 'string' ? system : safeStringify(system);
+    const captured = captureMedia(
+      span,
+      `neatlogs.llm.input_messages.${idx}`,
+      system,
+      'input',
+    );
+    const content = typeof captured === 'string' ? captured : safeStringify(captured);
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'system');
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, content);
     idx++;
@@ -405,7 +413,13 @@ function setInputMessages(span: Span, system: any, messages: any[]): void {
     if (typeof msg.content === 'string') {
       span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, msg.content);
     } else if (msg.content) {
-      span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, safeStringify(msg.content));
+      const captured = captureMedia(
+        span,
+        `neatlogs.llm.input_messages.${idx}`,
+        msg.content,
+        'input',
+      );
+      span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, safeStringify(captured));
     }
     idx++;
   }

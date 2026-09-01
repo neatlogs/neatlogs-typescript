@@ -1,6 +1,6 @@
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
 import { createHash } from "node:crypto";
-import { setMediaAttributes } from "./media.js";
+import { sanitizeMediaPayload, setMediaAttributes } from "./media.js";
 
 interface ToolCallState {
   id: string;
@@ -69,7 +69,7 @@ export class ChoiceAccumulator {
       const state = this.choice(index);
       state.role = message.role || "assistant";
       if (message.content != null)
-        state.content.push(stringify(message.content));
+        state.content.push(stringify(sanitizeMediaPayload(message.content, "output")));
       if (message.content != null && typeof message.content !== "string") {
         state.mediaValues.push(message.content);
       }
@@ -95,7 +95,10 @@ export class ChoiceAccumulator {
       const delta = choice?.delta ?? {};
       const state = this.choice(index);
       if (delta.role) state.role = String(delta.role);
-      const content = delta.content == null ? "" : stringify(delta.content);
+      const content =
+        delta.content == null
+          ? ""
+          : stringify(sanitizeMediaPayload(delta.content, "output"));
       const reasoning =
         delta.reasoning_content == null
           ? ""

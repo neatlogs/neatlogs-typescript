@@ -18,6 +18,7 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import { captureMedia } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -163,6 +164,12 @@ function setConverseInput(span: Span, input: any): void {
   let idx = 0;
 
   if (Array.isArray(input?.system)) {
+    captureMedia(
+      span,
+      `neatlogs.llm.input_messages.${idx}`,
+      input.system,
+      'input',
+    );
     const text = input.system.map((b: any) => b?.text ?? '').join(' ').trim();
     if (text) {
       span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'system');
@@ -173,7 +180,13 @@ function setConverseInput(span: Span, input: any): void {
 
   for (const msg of input?.messages ?? []) {
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, msg?.role ?? 'user');
-    span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, converseBlocksToText(msg?.content));
+    const captured = captureMedia(
+      span,
+      `neatlogs.llm.input_messages.${idx}`,
+      msg?.content,
+      'input',
+    );
+    span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, converseBlocksToText(captured));
     idx++;
   }
 
@@ -210,6 +223,7 @@ function converseBlocksToText(content: any): string {
 
 function finalizeConverse(span: Span, response: any): void {
   const content = response?.output?.message?.content ?? [];
+  captureMedia(span, 'neatlogs.llm.output_messages.0', content, 'output');
   const textParts: string[] = [];
   let toolIdx = 0;
 
@@ -438,16 +452,31 @@ function setInvokeInput(span: Span, vendor: string, body: any): void {
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'system');
     span.setAttribute(
       `neatlogs.llm.input_messages.${idx}.content`,
-      typeof body.system === 'string' ? body.system : safeStringify(body.system),
+      typeof body.system === 'string'
+        ? body.system
+        : safeStringify(
+            captureMedia(
+              span,
+              `neatlogs.llm.input_messages.${idx}`,
+              body.system,
+              'input',
+            ),
+          ),
     );
     idx++;
   }
   if (Array.isArray(body?.messages)) {
     for (const msg of body.messages) {
       span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, msg?.role ?? 'user');
+      const captured = captureMedia(
+        span,
+        `neatlogs.llm.input_messages.${idx}`,
+        msg?.content,
+        'input',
+      );
       span.setAttribute(
         `neatlogs.llm.input_messages.${idx}.content`,
-        typeof msg?.content === 'string' ? msg.content : safeStringify(msg?.content),
+        typeof captured === 'string' ? captured : safeStringify(captured),
       );
       idx++;
     }
@@ -472,6 +501,7 @@ function setInvokeInput(span: Span, vendor: string, body: any): void {
 }
 
 function finalizeInvoke(span: Span, vendor: string, body: any): void {
+  captureMedia(span, 'neatlogs.llm.output_messages.0', body, 'output');
   let text: string | undefined;
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
