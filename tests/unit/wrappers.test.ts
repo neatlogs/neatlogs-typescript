@@ -113,7 +113,8 @@ describe('wrapOpenAI', () => {
     ] satisfies ChatCompletionContentPart[];
     const responseFile = {
       type: 'input_file',
-      file_url: 'https://example.com/report.pdf',
+      file_url:
+        'https://alice:password@example.com/report.pdf?X-Amz-Credential=secret&X-Amz-Signature=signature#fragment',
     } satisfies ResponseInputFile;
     const wrapped = wrapOpenAI({
       chat: {
@@ -146,6 +147,13 @@ describe('wrapOpenAI', () => {
     expect(attr(responsesSpan, 'neatlogs.llm.input_messages.0.media.0.reference')).toBe(
       'https://example.com/report.pdf',
     );
+    expect(
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(responsesSpan.attributes).filter(([key]) => key.includes('.media.')),
+        ),
+      ),
+    ).not.toMatch(/alice|password|secret|signature|fragment/);
     expect(attr(responsesSpan, 'neatlogs.llm.input_messages.0.media.0.source')).toBe('url');
   });
 

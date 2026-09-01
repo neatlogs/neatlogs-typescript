@@ -314,6 +314,28 @@ describe("decorateSpan", () => {
     expect(mockSpan.end).toHaveBeenCalledOnce();
   });
 
+  it("finalizes an async generator when return yields from finally", async () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, async function* () {
+      try {
+        yield "first";
+      } finally {
+        yield "cleanup";
+      }
+    });
+
+    for await (const _chunk of wrapped()) break;
+
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.stream.cancelled",
+      true,
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "output.value",
+      '["first","cleanup"]',
+    );
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
   it("keeps a synchronous generator span open through iteration", () => {
     const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
       yield { text: "first" };
@@ -349,6 +371,28 @@ describe("decorateSpan", () => {
     expect(mockSpan.setAttribute).toHaveBeenCalledWith(
       "output.value",
       '["first"]',
+    );
+    expect(mockSpan.end).toHaveBeenCalledOnce();
+  });
+
+  it("finalizes a synchronous generator when return yields from finally", () => {
+    const wrapped = decorateSpan({ kind: "CHAIN" }, function* () {
+      try {
+        yield "first";
+      } finally {
+        yield "cleanup";
+      }
+    });
+
+    for (const _chunk of wrapped()) break;
+
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.stream.cancelled",
+      true,
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "output.value",
+      '["first","cleanup"]',
     );
     expect(mockSpan.end).toHaveBeenCalledOnce();
   });

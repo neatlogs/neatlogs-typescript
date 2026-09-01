@@ -283,8 +283,8 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                         target.return(...returnArgs),
                       )
                     : { done: true, value: returnArgs[0] };
-                  if (item.done) finishStream(true);
-                  else recordChunk(item.value);
+                  if (!item.done) recordChunk(item.value);
+                  finishStream(true);
                   return item;
                 } catch (error) {
                   finishError(error);
@@ -370,8 +370,8 @@ export function decorateSpan<TArgs extends any[], TReturn>(
                         )(...returnArgs),
                       )
                     : { done: true, value: returnArgs[0] };
-                  if (item.done) finishStream(true);
-                  else recordChunk(item.value);
+                  if (!item.done) recordChunk(item.value);
+                  finishStream(true);
                   return item;
                 } catch (error) {
                   finishError(error);

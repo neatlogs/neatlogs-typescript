@@ -68,7 +68,8 @@ describe("typed media capture", () => {
     } satisfies ChatCompletionContentPart;
     const responseFile = {
       type: "input_file",
-      file_url: "https://example.com/report.pdf",
+      file_url:
+        "https://alice:password@example.com/report.pdf?X-Amz-Credential=secret&X-Amz-Signature=signature#fragment",
     } satisfies ResponseInputFile;
 
     expect(mediaReferences(nestedFile, "input")).toEqual([
@@ -83,7 +84,14 @@ describe("typed media capture", () => {
         type: "document",
         source: "url",
         reference: "https://example.com/report.pdf",
+        id: `nl_media_${createHash("sha256")
+          .update("https://example.com/report.pdf")
+          .digest("hex")
+          .slice(0, 24)}`,
       }),
     ]);
+    expect(JSON.stringify(mediaReferences(responseFile, "input"))).not.toMatch(
+      /alice|password|secret|signature|fragment/,
+    );
   });
 });

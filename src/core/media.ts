@@ -60,15 +60,31 @@ function referenceRecord(
   mimeType: string,
   declared: string,
   purpose: string,
-): MediaRecord {
-  const digest = createHash("sha256").update(reference).digest("hex");
-  const hasNetworkScheme = /^https?:\/\//i.test(reference);
+): MediaRecord | null {
+  let safeReference = reference;
+  let hasNetworkScheme = false;
+  try {
+    const parsed = new URL(reference);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      hasNetworkScheme = true;
+      parsed.username = "";
+      parsed.password = "";
+      parsed.search = "";
+      parsed.hash = "";
+      safeReference = parsed.toString();
+    }
+  } catch {
+    // Malformed network URLs are unsafe to export verbatim because they can
+    // still contain credentials that URL parsing could not isolate.
+    if (/^\s*https?:/i.test(reference)) return null;
+  }
+  const digest = createHash("sha256").update(safeReference).digest("hex");
   return {
     id: `nl_media_${digest.slice(0, 24)}`,
     type: mediaKind(mimeType, declared),
     source: hasNetworkScheme ? "url" : "provider",
     mime_type: mimeType || "application/octet-stream",
-    reference,
+    reference: safeReference,
     purpose,
     state: "available",
   };
@@ -129,9 +145,13 @@ export function mediaReferences(
       typeof reference === "string" &&
       (["file", "input_file"].includes(declared) || !!mimeType)
     ) {
-      found.push(
-        referenceRecord(reference, mimeType, declared || "document", purpose),
+      const record = referenceRecord(
+        reference,
+        mimeType,
+        declared || "document",
+        purpose,
       );
+      if (record) found.push(record);
     }
     for (const [key, item] of Object.entries(node)) {
       const childDeclared =
