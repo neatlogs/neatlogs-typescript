@@ -11,12 +11,14 @@ import { describe, expect, it, vi } from "vitest";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import {
+  aliasMediaCaptureSpan,
   captureMedia,
   DEFAULT_MAX_PENDING_MEDIA_ITEMS,
   discardPendingMedia,
   discardPendingMediaOwner,
   mediaReferences,
   resolvePendingMediaUploads,
+  sanitizeMediaPayload,
   setMediaCaptureAvailability,
   setMediaAttributes,
 } from "../../src/core/media.js";
@@ -24,10 +26,7 @@ import { runWithClient } from "../../src/core/active-client.js";
 import { FilteringExporter } from "../../src/core/filtering-exporter.js";
 import { DeliveryDiagnostics } from "../../src/core/delivery-diagnostics.js";
 import { scheduleMask } from "../../src/core/mask.js";
-import type {
-  UploadAuthority,
-  UploadPayload,
-} from "../../src/core/upload-authority.js";
+import type { UploadAuthority, UploadPayload } from "../../src/core/upload-authority.js";
 
 class RecordingExporter implements SpanExporter {
   readonly batches: ReadableSpan[][] = [];
@@ -72,9 +71,7 @@ describe("typed media capture", () => {
     const sink = new InMemorySpanExporter();
     const provider = new BasicTracerProvider();
     provider.addSpanProcessor(new SimpleSpanProcessor(sink));
-    const span = provider
-      .getTracer("media")
-      .startSpan("media", undefined, ROOT_CONTEXT);
+    const span = provider.getTracer("media").startSpan("media", undefined, ROOT_CONTEXT);
     setMediaAttributes(span, "neatlogs.llm.input_messages.0", payload, "input");
     span.end();
     await provider.forceFlush();
@@ -84,13 +81,46 @@ describe("typed media capture", () => {
     });
   });
 
-  it("does not invent media digests for malformed base64", () => {
-    expect(
-      mediaReferences(
-        [{ type: "image_url", image_url: { url: "data:image/png;base64,not-base64!" } }],
-        "input",
-      ),
-    ).toEqual([]);
+  it("fails closed without inventing a content digest for malformed base64", () => {
+    const secret = "data:image/png;base64,not-base64!";
+    const payload = [{ type: "image_url", image_url: { url: secret } }];
+    const records = mediaReferences(payload, "input");
+
+    expect(records).toEqual([
+      expect.objectContaining({
+        source: "inline",
+        state: "failed",
+        safe_preview: "upload failed: validate/invalid_inline_media",
+      }),
+    ]);
+    expect(records[0]).not.toHaveProperty("sha256");
+    expect(JSON.stringify(sanitizeMediaPayload(payload))).not.toContain(secret);
+  });
+
+  it("bounds cyclic, deeply nested, and hostile media-shaped values", () => {
+    const cyclic: Record<string, unknown> = { type: "image" };
+    cyclic.self = cyclic;
+    expect(JSON.stringify(sanitizeMediaPayload(cyclic))).toContain("[CIRCULAR]");
+
+    const secret = Buffer.from("deep-secret").toString("base64");
+    let deep: Record<string, unknown> = {
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${secret}` },
+    };
+    for (let index = 0; index < 40; index += 1) deep = { child: deep };
+    const sanitized = JSON.stringify(sanitizeMediaPayload(deep));
+    expect(sanitized).toContain("[REDACTED_MEDIA_STRUCTURE]");
+    expect(sanitized).not.toContain(secret);
+
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("hostile payload");
+        },
+      },
+    );
+    expect(sanitizeMediaPayload(hostile)).toBe("[REDACTED_MEDIA_STRUCTURE]");
   });
 
   it("recognizes typed OpenAI nested files and Responses file URLs", () => {
@@ -117,10 +147,7 @@ describe("typed media capture", () => {
         type: "document",
         source: "url",
         reference: "https://example.com/report.pdf",
-        id: `nl_media_${createHash("sha256")
-          .update(responseFileURL)
-          .digest("hex")
-          .slice(0, 24)}`,
+        id: `nl_media_${createHash("sha256").update(responseFileURL).digest("hex").slice(0, 24)}`,
       }),
     ]);
     expect(JSON.stringify(mediaReferences(responseFile, "input"))).not.toMatch(
@@ -133,8 +160,7 @@ describe("typed media capture", () => {
       [
         {
           type: "input_file",
-          file_url:
-            "//alice:password@example.com/report.pdf?token=secret#fragment",
+          file_url: "//alice:password@example.com/report.pdf?token=secret#fragment",
         },
         {
           type: "input_file",
@@ -154,9 +180,38 @@ describe("typed media capture", () => {
         reference: "s3://bucket/report.pdf",
       }),
     ]);
-    expect(JSON.stringify(records)).not.toMatch(
-      /alice|password|token|secret|fragment/,
-    );
+    expect(JSON.stringify(records)).not.toMatch(/alice|password|token|secret|fragment/);
+  });
+
+  it("strips credentials from relative media references", () => {
+    const reference = "/private/report.pdf?token=secret#fragment";
+    const payload = { type: "input_file", file_url: reference };
+
+    expect(mediaReferences(payload, "input")).toEqual([
+      expect.objectContaining({ source: "url", reference: "/private/report.pdf" }),
+    ]);
+    expect(JSON.stringify(sanitizeMediaPayload(payload))).not.toMatch(/token|secret|fragment/);
+  });
+
+  it("fails closed for malformed references and strips opaque URL payloads", () => {
+    const malformed = "https://%zz/private?token=secret";
+    const opaque = "custom:private-secret";
+    const payload = [
+      { type: "input_file", file_url: malformed },
+      { type: "input_file", file_url: opaque },
+    ];
+
+    const records = mediaReferences(payload, "input");
+    expect(records[0]).toMatchObject({
+      state: "failed",
+      safe_preview: "upload failed: validate/invalid_media_reference",
+    });
+    expect(records[1]).toMatchObject({
+      state: "available",
+      reference: "custom:",
+    });
+    const sanitized = JSON.stringify(sanitizeMediaPayload(payload));
+    expect(sanitized).not.toMatch(/private|secret|token/);
   });
 
   it("recognizes data URL schemes case-insensitively", () => {
@@ -180,6 +235,15 @@ describe("typed media capture", () => {
     expect(records[0]).not.toHaveProperty("reference");
   });
 
+  it("sanitizes data URLs even when user code does not provide a media field name", () => {
+    const secret = Buffer.alloc(120_000, 7).toString("base64");
+    const payload = { arbitrary_tool_argument: `data:image/png;base64,${secret}` };
+    const sanitized = JSON.stringify(sanitizeMediaPayload(payload, "input"));
+
+    expect(sanitized).toContain("neatlogs_media");
+    expect(sanitized).not.toContain(secret.slice(0, 200));
+  });
+
   it("detects Anthropic, Gemini, Bedrock, and generated-image media shapes", () => {
     const raw = Buffer.from("provider-media");
     const encoded = raw.toString("base64");
@@ -195,7 +259,10 @@ describe("typed media capture", () => {
         value: { inlineData: { mimeType: "application/pdf", data: encoded } },
         type: "document",
       },
-      { value: { image: { format: "png", source: { bytes: raw } } }, type: "image" },
+      {
+        value: { image: { format: "png", source: { bytes: raw } } },
+        type: "image",
+      },
       { value: { images: [encoded] }, type: "image" },
     ];
 
@@ -227,6 +294,18 @@ describe("typed media capture", () => {
     expect(JSON.stringify(records)).not.toMatch(/id=(?:one|two)/);
   });
 
+  it("fails the sanitized payload closed when the media-reference cap is exceeded", () => {
+    const payload = Array.from({ length: 100 }, (_, index) => ({
+      type: "input_file",
+      file_url: `https://user-${index}:secret-${index}@example.com/media/${index}`,
+    }));
+
+    expect(mediaReferences(payload, "input")).toHaveLength(64);
+    const sanitized = JSON.stringify(sanitizeMediaPayload(payload, "input"));
+    expect(sanitized).toBe('"[REDACTED_MEDIA_STRUCTURE]"');
+    expect(sanitized).not.toContain("secret-64");
+  });
+
   it("uploads large media after masking and exports only its canonical reference", async () => {
     const raw = Buffer.alloc(120_000, 7);
     const encoded = raw.toString("base64");
@@ -246,29 +325,30 @@ describe("typed media capture", () => {
     const safe = captureMedia(
       span,
       "neatlogs.llm.input_messages.0",
-      [{ type: "image_url", image_url: { url: `data:image/png;base64,${encoded}` } }],
+      [
+        {
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${encoded}` },
+        },
+      ],
       "input",
     );
     span.setAttribute("neatlogs.llm.input_messages.0.content", JSON.stringify(safe));
     span.end();
     await provider.forceFlush();
     const attributes = { ...finished!.attributes };
-    scheduleMask(
-      finished as object,
-      { attributes },
-      async (data) => ({
-        ...data,
-        attributes: {
-          ...data.attributes,
-          "neatlogs.llm.input_messages.0.content": JSON.stringify(
-            JSON.parse(data.attributes["neatlogs.llm.input_messages.0.content"]),
-            null,
-            2,
-          ),
-          masked: true,
-        },
-      }),
-    );
+    scheduleMask(finished as object, { attributes }, async (data) => ({
+      ...data,
+      attributes: {
+        ...data.attributes,
+        "neatlogs.llm.input_messages.0.content": JSON.stringify(
+          JSON.parse(data.attributes["neatlogs.llm.input_messages.0.content"]),
+          null,
+          2,
+        ),
+        masked: true,
+      },
+    }));
     const uploads: UploadPayload[] = [];
     const authority: UploadAuthority = {
       available: true,
@@ -303,11 +383,9 @@ describe("typed media capture", () => {
       payloadSchema: "neatlogs.media.v1",
     });
     expect(sink.batches[0][0].attributes).toMatchObject({
-      "masked": true,
-      "neatlogs.llm.input_messages.0.media.0.id":
-        "018f47a6-7f32-7d67-8a1b-42d3f974c012",
-      "neatlogs.llm.input_messages.0.media.0.reference":
-        "018f47a6-7f32-7d67-8a1b-42d3f974c012",
+      masked: true,
+      "neatlogs.llm.input_messages.0.media.0.id": "018f47a6-7f32-7d67-8a1b-42d3f974c012",
+      "neatlogs.llm.input_messages.0.media.0.reference": "018f47a6-7f32-7d67-8a1b-42d3f974c012",
       "neatlogs.llm.input_messages.0.media.0.source": "uploaded",
       "neatlogs.llm.input_messages.0.media.0.state": "available",
     });
@@ -337,7 +415,12 @@ describe("typed media capture", () => {
     captureMedia(
       span,
       "neatlogs.llm.input_messages.0",
-      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      [
+        {
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${raw.toString("base64")}` },
+        },
+      ],
       "input",
     );
     span.end();
@@ -374,7 +457,12 @@ describe("typed media capture", () => {
     captureMedia(
       span,
       "media",
-      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      [
+        {
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${raw.toString("base64")}` },
+        },
+      ],
       "input",
     );
     attributes["media.media.0.state"] = "available";
@@ -415,7 +503,12 @@ describe("typed media capture", () => {
     const safe = captureMedia(
       span,
       "neatlogs.llm.input_messages.0",
-      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      [
+        {
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${raw.toString("base64")}` },
+        },
+      ],
       "input",
     );
     span.setAttribute("neatlogs.llm.input_messages.0.content", JSON.stringify(safe));
@@ -456,7 +549,12 @@ describe("typed media capture", () => {
     const safe = captureMedia(
       span,
       "media",
-      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      [
+        {
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${raw.toString("base64")}` },
+        },
+      ],
       "input",
     );
 
@@ -481,14 +579,18 @@ describe("typed media capture", () => {
     const safe = captureMedia(
       span,
       "media",
-      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      [
+        {
+          type: "image_url",
+          image_url: { url: `data:image/png;base64,${raw.toString("base64")}` },
+        },
+      ],
       "input",
     );
 
     expect(attributes).toMatchObject({
       "media.media.0.state": "failed",
-      "media.media.0.safe_preview":
-        "upload unavailable: telemetry_uploads_disabled",
+      "media.media.0.safe_preview": "upload unavailable: telemetry_uploads_disabled",
     });
     expect(JSON.stringify(attributes)).not.toContain("upload_token");
     expect(JSON.stringify(safe)).not.toContain(raw.toString("base64").slice(0, 100));
@@ -505,7 +607,9 @@ describe("typed media capture", () => {
   });
 
   it("bounds staged media by item count and releases the quota on discard", () => {
-    const spans: Array<{ setAttribute(name: string, value: string | number): void }> = [];
+    const spans: Array<{
+      setAttribute(name: string, value: string | number): void;
+    }> = [];
     try {
       for (let index = 0; index < DEFAULT_MAX_PENDING_MEDIA_ITEMS; index += 1) {
         const attributes: Record<string, string | number> = {};
@@ -519,7 +623,14 @@ describe("typed media capture", () => {
         captureMedia(
           span,
           "media",
-          [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+          [
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/png;base64,${raw.toString("base64")}`,
+              },
+            },
+          ],
           "input",
         );
         expect(attributes["media.media.0.state"]).toBe("pending-upload");
@@ -535,7 +646,14 @@ describe("typed media capture", () => {
       captureMedia(
         rejectedSpan,
         "media",
-        [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+        [
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${raw.toString("base64")}`,
+            },
+          },
+        ],
         "input",
       );
       expect(rejected["media.media.0.safe_preview"]).toBe(
@@ -553,7 +671,14 @@ describe("typed media capture", () => {
       captureMedia(
         acceptedSpan,
         "media",
-        [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+        [
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${raw.toString("base64")}`,
+            },
+          },
+        ],
         "input",
       );
       expect(accepted["media.media.0.state"]).toBe("pending-upload");
@@ -579,7 +704,14 @@ describe("typed media capture", () => {
         captureMedia(
           span,
           "media",
-          [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+          [
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/png;base64,${raw.toString("base64")}`,
+              },
+            },
+          ],
           "input",
         );
       });
@@ -602,6 +734,96 @@ describe("typed media capture", () => {
     }
   });
 
+  it("keeps lifecycle ownership after the active-client context exits", async () => {
+    const owner = { workflowName: "stream-owner" } as any;
+    const attributes: Record<string, string | number> = {};
+    const span = {
+      setAttribute(name: string, value: string | number) {
+        attributes[name] = value;
+      },
+    };
+    setMediaCaptureAvailability(span, true, "", owner);
+    captureMedia(
+      span,
+      "media",
+      [
+        {
+          type: "image_url",
+          image_url: {
+            url: `data:image/png;base64,${Buffer.alloc(120_000, 23).toString("base64")}`,
+          },
+        },
+      ],
+      "output",
+    );
+    discardPendingMediaOwner(owner);
+    let uploads = 0;
+
+    expect(
+      await resolvePendingMediaUploads(span, attributes, {
+        available: true,
+        unavailableReason: "",
+        maxPayloadBytes: 1024 * 1024,
+        async upload() {
+          uploads += 1;
+          throw new Error("released media must not upload");
+        },
+      }),
+    ).toBe(true);
+    expect(uploads).toBe(0);
+  });
+
+  it("shares pending media between a span facade and its SDK span", async () => {
+    const attributes: Record<string, string | number> = {};
+    const target = {
+      isRecording: () => true,
+      setAttribute(name: string, value: string | number) {
+        attributes[name] = value;
+      },
+    };
+    const facade = new Proxy(target, {});
+    aliasMediaCaptureSpan(facade, target);
+    setMediaCaptureAvailability(target, true);
+    captureMedia(
+      facade,
+      "media",
+      {
+        type: "image_url",
+        image_url: {
+          url: `data:image/png;base64,${Buffer.alloc(120_000, 29).toString("base64")}`,
+        },
+      },
+      "output",
+    );
+    let uploads = 0;
+
+    expect(
+      await resolvePendingMediaUploads(target, attributes, {
+        available: true,
+        unavailableReason: "",
+        maxPayloadBytes: 1024 * 1024,
+        async upload(payload) {
+          uploads += 1;
+          return {
+            uploadId: "018f47a6-7f32-7d67-8a1b-42d3f974c012",
+            state: "ready",
+            reference: {
+              id: "018f47a6-7f32-7d67-8a1b-42d3f974c012",
+              purpose: payload.purpose,
+              sha256: payload.sha256,
+              byteLength: payload.byteLength,
+              mimeType: payload.mimeType,
+              contentEncoding: payload.contentEncoding,
+              state: "ready",
+            },
+          };
+        },
+      }),
+    ).toBe(true);
+    expect(uploads).toBe(1);
+    expect(attributes["media.media.0.state"]).toBe("available");
+  });
+
   it("bounds all media uploads for a span to one aggregate deadline", async () => {
     vi.useFakeTimers();
     try {
@@ -616,7 +838,14 @@ describe("typed media capture", () => {
       const safe = captureMedia(
         span,
         "media",
-        [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+        [
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${raw.toString("base64")}`,
+            },
+          },
+        ],
         "input",
       );
       attributes.content = JSON.stringify(safe);

@@ -24,6 +24,11 @@
  */
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
+import {
+  DEFAULT_MAX_STREAM_CAPTURE_BYTES,
+  DEFAULT_MAX_STREAM_CAPTURE_ITEMS,
+  utf8ByteLength,
+} from './constants.js';
 import { getProviderTracer } from './core/auto-root.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import {
@@ -64,15 +69,21 @@ export function traceTool<TArgs = any, TResult = any>(
         attributes: {
           'neatlogs.span.kind': 'TOOL',
           'neatlogs.tool.name': name,
-          'input.value': safeStringify(args),
         },
       },
       getNeatlogsParentContext(),
     );
+    span.setAttribute(
+      'input.value',
+      safeStringify(captureMedia(span, 'neatlogs.tool.input', args, 'input')),
+    );
     return withNeatlogsSpan(span, async () => {
       try {
         const result = await fn(args);
-        span.setAttribute('output.value', safeStringify(result));
+        span.setAttribute(
+          'output.value',
+          safeStringify(captureMedia(span, 'neatlogs.tool.output', result, 'output')),
+        );
         span.setStatus({ code: SpanStatusCode.OK });
         return result;
       } catch (err) {
@@ -408,9 +419,15 @@ function setInputAttributes(span: Span, opts: any): void {
 function wrapStream(stream: any, span: Span): any {
   const accumulated: StreamAccumulator = {
     textParts: [],
+    toolCalls: [],
     finishReason: '',
     usage: null,
     mediaCount: 0,
+    capturedBytes: 0,
+    capturedItems: 0,
+    droppedBytes: 0,
+    droppedItems: 0,
+    incompleteReasons: new Set(),
   };
   const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
 
@@ -440,8 +457,12 @@ function wrapStream(stream: any, span: Span): any {
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
-        finalizeStreamChunks(span, accumulated);
-        return iterator.return?.(value) ?? { done: true, value: undefined };
+        markStreamIncomplete(accumulated, 'consumer_cancelled');
+        span.setAttribute('neatlogs.stream.cancelled', true);
+        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+        if (result.done) finalizeStreamChunks(span, accumulated);
+        else addStreamChunk(span, accumulated, result.value);
+        return result;
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
         recordError(span, err);
@@ -455,23 +476,48 @@ function wrapStream(stream: any, span: Span): any {
 
 interface StreamAccumulator {
   textParts: string[];
+  toolCalls: Array<{ id: string; name: string; arguments: string }>;
   finishReason: string;
   usage: any;
   mediaCount: number;
+  capturedBytes: number;
+  capturedItems: number;
+  droppedBytes: number;
+  droppedItems: number;
+  incompleteReasons: Set<string>;
 }
 
 function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any): void {
-  const captured = captureMediaWithIndex(
-    span,
-    'neatlogs.llm.output_messages.0',
-    chunk?.candidates,
-    'output',
-    accumulated.mediaCount,
-  );
-  accumulated.mediaCount += captured.count;
   for (const candidate of chunk?.candidates ?? []) {
     for (const part of candidate?.content?.parts ?? []) {
-      if (part?.text && !part?.thought) accumulated.textParts.push(part.text);
+      if (part?.text && !part?.thought) {
+        retainStreamString(accumulated, String(part.text), (value) => {
+          accumulated.textParts.push(value);
+        });
+      }
+      if (part?.functionCall) {
+        const captured = captureMediaWithIndex(
+          span,
+          'neatlogs.llm.output_messages.0',
+          part.functionCall.args,
+          'output',
+          accumulated.mediaCount,
+        );
+        accumulated.mediaCount += captured.count;
+        retainStreamToolCall(accumulated, {
+          ...part.functionCall,
+          args: captured.value,
+        });
+      } else if (!part?.text) {
+        const captured = captureMediaWithIndex(
+          span,
+          'neatlogs.llm.output_messages.0',
+          part,
+          'output',
+          accumulated.mediaCount,
+        );
+        accumulated.mediaCount += captured.count;
+      }
     }
     if (candidate?.finishReason) {
       accumulated.finishReason = candidate.finishReason;
@@ -489,7 +535,14 @@ function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void 
   if (accumulated.finishReason) {
     span.setAttribute('neatlogs.llm.finish_reason', String(accumulated.finishReason));
   }
+  for (let i = 0; i < accumulated.toolCalls.length; i++) {
+    const tool = accumulated.toolCalls[i];
+    if (tool.id) span.setAttribute(`neatlogs.llm.tool_calls.${i}.id`, tool.id);
+    span.setAttribute(`neatlogs.llm.tool_calls.${i}.name`, tool.name);
+    span.setAttribute(`neatlogs.llm.tool_calls.${i}.arguments`, tool.arguments);
+  }
   setUsage(span, accumulated.usage);
+  applyStreamDiagnostics(span, accumulated);
 
   span.setStatus({ code: SpanStatusCode.OK });
   span.end();
@@ -500,16 +553,17 @@ function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void 
 // ---------------------------------------------------------------------------
 
 function finalizeResponse(span: Span, response: any): void {
-  captureMedia(
+  const captured = captureMedia(
     span,
     'neatlogs.llm.output_messages.0',
     response?.candidates,
     'output',
   );
+  const capturedCandidates = Array.isArray(captured) ? captured : [];
   const textParts: string[] = [];
   let toolIdx = 0;
 
-  for (const candidate of response?.candidates ?? []) {
+  for (const candidate of capturedCandidates ?? []) {
     for (const part of candidate?.content?.parts ?? []) {
       if (part?.text && !part?.thought) {
         textParts.push(part.text);
@@ -548,6 +602,67 @@ function setUsage(span: Span, usage: any): void {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+function markStreamIncomplete(accumulated: StreamAccumulator, reason: string): void {
+  accumulated.incompleteReasons.add(reason);
+}
+
+function retainStreamString(
+  accumulated: StreamAccumulator,
+  value: string,
+  retain: (value: string) => void,
+): boolean {
+  const remaining = Math.max(
+    0,
+    DEFAULT_MAX_STREAM_CAPTURE_BYTES - accumulated.capturedBytes,
+  );
+  const bytes = utf8ByteLength(value, remaining);
+  if (accumulated.capturedItems >= DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
+    accumulated.droppedItems += 1;
+    accumulated.droppedBytes += bytes;
+    markStreamIncomplete(accumulated, 'item_limit_exceeded');
+    return false;
+  }
+  if (accumulated.capturedBytes + bytes > DEFAULT_MAX_STREAM_CAPTURE_BYTES) {
+    accumulated.droppedItems += 1;
+    accumulated.droppedBytes += bytes;
+    markStreamIncomplete(accumulated, 'byte_limit_exceeded');
+    return false;
+  }
+  retain(value);
+  accumulated.capturedItems += 1;
+  accumulated.capturedBytes += bytes;
+  return true;
+}
+
+function retainStreamToolCall(accumulated: StreamAccumulator, functionCall: any): void {
+  const id = String(functionCall?.id ?? '');
+  const name = String(functionCall?.name ?? '');
+  const args = safeStringify(functionCall?.args ?? {});
+  const retained = retainStreamString(
+    accumulated,
+    `${id}\0${name}\0${args}`,
+    () => accumulated.toolCalls.push({ id, name, arguments: args }),
+  );
+  if (!retained) markStreamIncomplete(accumulated, 'tool_call_omitted');
+}
+
+function applyStreamDiagnostics(span: Span, accumulated: StreamAccumulator): void {
+  span.setAttribute('neatlogs.stream.capture_bytes', accumulated.capturedBytes);
+  span.setAttribute('neatlogs.stream.capture_items', accumulated.capturedItems);
+  if (accumulated.incompleteReasons.size === 0) return;
+  span.setAttribute('neatlogs.stream.incomplete', true);
+  span.setAttribute(
+    'neatlogs.stream.incomplete_reason',
+    [...accumulated.incompleteReasons].sort().join(','),
+  );
+  if (accumulated.droppedBytes > 0) {
+    span.setAttribute('neatlogs.stream.dropped_bytes', accumulated.droppedBytes);
+    span.setAttribute('neatlogs.stream.dropped_bytes_is_lower_bound', true);
+  }
+  span.setAttribute('neatlogs.stream.dropped_items', accumulated.droppedItems);
+  span.setAttribute('neatlogs.capture_fidelity', 'truncated');
+}
 
 function safeStringify(value: unknown): string {
   try {

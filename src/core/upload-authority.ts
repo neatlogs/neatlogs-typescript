@@ -40,10 +40,7 @@ export interface UploadAuthority {
   readonly available: boolean;
   readonly unavailableReason: string;
   readonly maxPayloadBytes: number;
-  upload(
-    payload: UploadPayload,
-    options?: UploadRequestOptions,
-  ): Promise<UploadReceipt>;
+  upload(payload: UploadPayload, options?: UploadRequestOptions): Promise<UploadReceipt>;
 }
 
 export type UploadAuthorityOption = boolean | UploadAuthority;
@@ -69,10 +66,7 @@ export class DisabledUploadAuthority implements UploadAuthority {
   readonly unavailableReason: string;
   readonly maxPayloadBytes: number;
 
-  constructor(
-    reason = UPLOADS_DISABLED_REASON,
-    maxPayloadBytes = DEFAULT_MAX_UPLOAD_BYTES,
-  ) {
+  constructor(reason = UPLOADS_DISABLED_REASON, maxPayloadBytes = DEFAULT_MAX_UPLOAD_BYTES) {
     this.unavailableReason = reason;
     this.maxPayloadBytes = maxPayloadBytes;
   }
@@ -136,10 +130,8 @@ export interface HttpUploadAuthorityOptions {
 }
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MIME_TYPE_PATTERN =
-  /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MIME_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 const TYPED_MEDIA_MIME_TYPES = new Set([
   "application/pdf",
   "audio/flac",
@@ -217,10 +209,7 @@ function validateReference(
 }
 
 /** Validate untrusted/injected authority output and return a credential-free clone. */
-export function assertReadyUploadReceipt(
-  value: unknown,
-  payload: UploadPayload,
-): UploadReceipt {
+export function assertReadyUploadReceipt(value: unknown, payload: UploadPayload): UploadReceipt {
   if (!isObject(value)) {
     throw new TelemetryUploadError("complete", "invalid_receipt", false);
   }
@@ -264,9 +253,7 @@ function validatePayload(payload: UploadPayload, maxPayloadBytes: number): void 
   if (!SHA256_PATTERN.test(payload.sha256)) {
     throw new TelemetryUploadError("validate", "invalid_sha256", false);
   }
-  if (
-    createHash("sha256").update(payload.content).digest("hex") !== payload.sha256
-  ) {
+  if (createHash("sha256").update(payload.content).digest("hex") !== payload.sha256) {
     throw new TelemetryUploadError("validate", "invalid_sha256", false);
   }
   if (
@@ -279,9 +266,10 @@ function validatePayload(payload: UploadPayload, maxPayloadBytes: number): void 
   if (!(["typed_media", "otlp_overflow"] as const).includes(payload.purpose)) {
     throw new TelemetryUploadError("validate", "invalid_purpose", false);
   }
-  const backendLimit = payload.purpose === "otlp_overflow"
-    ? DEFAULT_MAX_OTLP_OVERFLOW_BYTES
-    : DEFAULT_MAX_TYPED_MEDIA_BYTES;
+  const backendLimit =
+    payload.purpose === "otlp_overflow"
+      ? DEFAULT_MAX_OTLP_OVERFLOW_BYTES
+      : DEFAULT_MAX_TYPED_MEDIA_BYTES;
   if (payload.byteLength > Math.min(maxPayloadBytes, backendLimit)) {
     throw new TelemetryUploadError("validate", "payload_too_large", false);
   }
@@ -371,11 +359,8 @@ async function boundedJson(
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await withinDeadline(
-        reader.read(),
-        deadline,
-        stage,
-        () => reader.cancel(),
+      const { done, value } = await withinDeadline(reader.read(), deadline, stage, () =>
+        reader.cancel(),
       );
       if (done) break;
       total += value.byteLength;
@@ -470,10 +455,7 @@ export class HttpUploadAuthority implements UploadAuthority {
     }
   }
 
-  async upload(
-    payload: UploadPayload,
-    options: UploadRequestOptions = {},
-  ): Promise<UploadReceipt> {
+  async upload(payload: UploadPayload, options: UploadRequestOptions = {}): Promise<UploadReceipt> {
     validatePayload(payload, this.maxPayloadBytes);
     const deadline = Math.min(
       Date.now() + this.deadlineMs,
@@ -507,10 +489,7 @@ export class HttpUploadAuthority implements UploadAuthority {
     throw lastError ?? new TelemetryUploadError("prepare", "request_failed", true);
   }
 
-  private async prepareAttempt(
-    payload: UploadPayload,
-    deadline: number,
-  ): Promise<PrepareResult> {
+  private async prepareAttempt(payload: UploadPayload, deadline: number): Promise<PrepareResult> {
     const body: PrepareRequest = {
       version: 1,
       purpose: payload.purpose,
@@ -548,13 +527,7 @@ export class HttpUploadAuthority implements UploadAuthority {
       throw new TelemetryUploadError("prepare", "invalid_upload_id", false);
     }
     if (response.status === 200 && data.state === "ready") {
-      const reference = validateReference(
-        data.reference,
-        payload,
-        uploadId,
-        "ready",
-        "prepare",
-      );
+      const reference = validateReference(data.reference, payload, uploadId, "ready", "prepare");
       return {
         uploadId,
         state: "ready",
@@ -584,11 +557,7 @@ export class HttpUploadAuthority implements UploadAuthority {
     }
     if (data.state === "rejected") {
       validateReference(data.reference, payload, uploadId, "rejected", "prepare");
-      throw new TelemetryUploadError(
-        "prepare",
-        diagnostic?.reasonCode ?? "upload_rejected",
-        false,
-      );
+      throw new TelemetryUploadError("prepare", diagnostic?.reasonCode ?? "upload_rejected", false);
     }
     if (response.status !== 201 || data.state !== "prepared" || !isObject(data.upload)) {
       throw new TelemetryUploadError(
@@ -630,13 +599,7 @@ export class HttpUploadAuthority implements UploadAuthority {
       }
       uploadHeaders[key] = value;
     }
-    const reference = validateReference(
-      data.reference,
-      payload,
-      uploadId,
-      "prepared",
-      "prepare",
-    );
+    const reference = validateReference(data.reference, payload, uploadId, "prepared", "prepare");
     return { uploadId, state: "prepared", uploadUrl, uploadHeaders, reference };
   }
 
@@ -718,7 +681,7 @@ export class HttpUploadAuthority implements UploadAuthority {
     if (data.upload_id !== prepared.uploadId) {
       throw new TelemetryUploadError("complete", "upload_id_mismatch", false);
     }
-    if (!["ready", "validating", "rejected"].includes(String(data.state))) {
+    if (!["ready", "uploaded", "validating", "rejected"].includes(String(data.state))) {
       throw new TelemetryUploadError("complete", "invalid_state", false);
     }
     const reference = validateReference(
@@ -731,11 +694,13 @@ export class HttpUploadAuthority implements UploadAuthority {
     if (data.state !== "ready") {
       const reason =
         diagnostic?.reasonCode ??
-        (data.state === "validating" ? "validation_pending" : "upload_rejected");
+        (data.state === "uploaded" || data.state === "validating"
+          ? "validation_pending"
+          : "upload_rejected");
       throw new TelemetryUploadError(
         "complete",
         reason,
-        diagnostic?.retryable ?? data.state === "validating",
+        diagnostic?.retryable ?? (data.state === "uploaded" || data.state === "validating"),
       );
     }
     return {
@@ -798,11 +763,7 @@ export class HttpUploadAuthority implements UploadAuthority {
         } else {
           await response.body?.cancel().catch(() => undefined);
         }
-        lastError = new TelemetryUploadError(
-          stage,
-          reason,
-          retryable,
-        );
+        lastError = new TelemetryUploadError(stage, reason, retryable);
         if (!retryable) throw lastError;
       } catch (error) {
         if (error instanceof TelemetryUploadError && !error.retryable) throw error;
@@ -848,9 +809,6 @@ export function resolveUploadAuthority(
   apiKey: string,
 ): UploadAuthority {
   if (isUploadAuthority(option)) return option;
-  const enabled =
-    typeof option === "boolean" ? option : uploadsEnabledFromEnv(envValue);
-  return enabled
-    ? new HttpUploadAuthority({ baseUrl, apiKey })
-    : new DisabledUploadAuthority();
+  const enabled = typeof option === "boolean" ? option : uploadsEnabledFromEnv(envValue);
+  return enabled ? new HttpUploadAuthority({ baseUrl, apiKey }) : new DisabledUploadAuthority();
 }

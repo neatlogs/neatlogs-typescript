@@ -204,6 +204,7 @@ export interface NeatlogsSpanProcessorOptions {
   /** Gate raw typed-media staging for this processor's export pipeline. */
   mediaUploadsAvailable?: boolean;
   mediaUploadsUnavailableReason?: string;
+  mediaOwner?: object;
 }
 
 // ────────────────────────────────────────────────────────
@@ -218,6 +219,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   private readonly ownAllSpans: boolean;
   private readonly mediaUploadsAvailable: boolean;
   private readonly mediaUploadsUnavailableReason: string;
+  private readonly mediaOwner: object | undefined;
 
   private perfStats: PerfStats;
   private _retrieversToSuppress: Set<string>;
@@ -241,6 +243,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this.mediaUploadsAvailable = opts.mediaUploadsAvailable ?? false;
     this.mediaUploadsUnavailableReason =
       opts.mediaUploadsUnavailableReason ?? 'telemetry_uploads_disabled';
+    this.mediaOwner = opts.mediaOwner;
 
     this.unifiedProcessor = new UnifiedAttributeProcessor(
       opts.mapper ?? new AttributeMapper(),
@@ -326,6 +329,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
           span as object,
           this.mediaUploadsAvailable,
           this.mediaUploadsUnavailableReason,
+          this.mediaOwner,
         );
         this._activeSpans.set(span.spanContext().spanId, span);
         const verificationMarker = verificationMarkerFromEnv();

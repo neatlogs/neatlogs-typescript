@@ -81,6 +81,7 @@ describe('ChoiceAccumulator', () => {
     expect(attributes['neatlogs.llm.tool_calls.0.id']).toBe('a');
     expect(attributes['neatlogs.llm.tool_calls.1.id']).toBe('b');
     expect(attributes['neatlogs.llm.tool_calls.1.choice_index']).toBe(1);
+    expect(attributes['neatlogs.stream.capture_bytes']).toBeUndefined();
   });
 
   it('emits non-streamed reasoning content under the backend thinking field', async () => {
@@ -164,5 +165,57 @@ describe('ChoiceAccumulator', () => {
     await provider.forceFlush();
 
     expect(sink.getFinishedSpans()[0].attributes['neatlogs.capture_fidelity']).toBe('flattened');
+  });
+
+  it('bounds retained chat-stream content and marks the capture incomplete', async () => {
+    const sink = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider();
+    provider.addSpanProcessor(new SimpleSpanProcessor(sink));
+    const span = provider.getTracer('choice-test').startSpan('llm', undefined, ROOT_CONTEXT);
+    const accumulator = new ChoiceAccumulator();
+    const chunk = 'x'.repeat(600_000);
+
+    accumulator.addChunk(span, { choices: [{ delta: { content: chunk } }] });
+    accumulator.addChunk(span, { choices: [{ delta: { content: chunk } }] });
+    accumulator.addChunk(span, { choices: [{ delta: { content: chunk } }] });
+    accumulator.finish(span);
+    await provider.forceFlush();
+
+    const attributes = sink.getFinishedSpans()[0].attributes;
+    expect(attributes['neatlogs.llm.output_messages.0.content']).toBe(chunk);
+    expect(attributes['neatlogs.stream.chunk_count']).toBe(3);
+    expect(attributes['neatlogs.stream.incomplete']).toBe(true);
+    expect(attributes['neatlogs.stream.incomplete_reason']).toBe('byte_limit_exceeded');
+    expect(attributes['neatlogs.stream.dropped_items']).toBe(2);
+    expect(attributes['neatlogs.stream.dropped_bytes_is_lower_bound']).toBe(true);
+    expect(attributes['neatlogs.capture_fidelity']).toBe('truncated');
+  });
+
+  it('does not export a partial tool argument after its stream budget is exhausted', async () => {
+    const sink = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider();
+    provider.addSpanProcessor(new SimpleSpanProcessor(sink));
+    const span = provider.getTracer('choice-test').startSpan('llm', undefined, ROOT_CONTEXT);
+    const accumulator = new ChoiceAccumulator();
+
+    accumulator.addChunk(span, {
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              { index: 0, function: { name: 'large', arguments: 'x'.repeat(1_100_000) } },
+            ],
+          },
+        },
+      ],
+    });
+    accumulator.finish(span);
+    await provider.forceFlush();
+
+    const attributes = sink.getFinishedSpans()[0].attributes;
+    expect(attributes['neatlogs.llm.tool_calls.0.arguments']).toBe(
+      '[incomplete: stream capture limit reached]',
+    );
+    expect(attributes['neatlogs.stream.incomplete']).toBe(true);
   });
 });

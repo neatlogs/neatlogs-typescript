@@ -14,6 +14,12 @@
  */
 
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
+import {
+  DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
+  DEFAULT_MAX_STREAM_CAPTURE_BYTES,
+  DEFAULT_MAX_STREAM_CAPTURE_ITEMS,
+  utf8ByteLength,
+} from "./constants.js";
 import { getProviderTracer } from "./core/auto-root.js";
 import { ChoiceAccumulator } from "./core/choice-accumulator.js";
 import { captureMedia } from "./core/media.js";
@@ -53,15 +59,21 @@ export function traceTool<TArgs = any, TResult = any>(
         attributes: {
           "neatlogs.span.kind": "TOOL",
           "neatlogs.tool.name": name,
-          "input.value": safeStringify(args),
         },
       },
       getNeatlogsParentContext(),
     );
+    span.setAttribute(
+      "input.value",
+      safeStringify(captureMedia(span, "neatlogs.tool.input", args, "input")),
+    );
     return withNeatlogsSpan(span, async () => {
       try {
         const result = await fn(args);
-        span.setAttribute("output.value", safeStringify(result));
+        span.setAttribute(
+          "output.value",
+          safeStringify(captureMedia(span, "neatlogs.tool.output", result, "output")),
+        );
         span.setStatus({ code: SpanStatusCode.OK });
         return result;
       } catch (err) {
@@ -312,15 +324,21 @@ function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
   }
 
   const textParts: string[] = [];
+  const streamBudget = newStreamCaptureBudget();
   let completedResponse: any;
   let finalized = false;
   let eventCount = 0;
+  let cancellationRequested = false;
 
   const setEventCounts = () => {
     span.setAttribute("neatlogs.stream.chunk_count", eventCount);
-    if (eventCount > 128) {
-      span.setAttribute("neatlogs.stream.events_dropped", eventCount - 128);
+    if (eventCount > DEFAULT_MAX_SEMANTIC_STREAM_EVENTS) {
+      span.setAttribute(
+        "neatlogs.stream.events_dropped",
+        eventCount - DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
+      );
     }
+    applyStreamDiagnostics(span, streamBudget);
   };
 
   const finalize = (interrupted = false) => {
@@ -353,6 +371,31 @@ function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
     recordError(span, error);
   };
 
+  const addEvent = (event: any) => {
+    const index = eventCount++;
+    if (index < DEFAULT_MAX_SEMANTIC_STREAM_EVENTS) {
+      const delta = typeof event?.delta === "string" ? event.delta : "";
+      span.addEvent("neatlogs.stream.chunk", {
+        "neatlogs.stream.chunk.index": index,
+        "neatlogs.stream.chunk.summary": safeStringify({
+          type: event?.type ?? "unknown",
+          delta_bytes: utf8ByteLength(delta, DEFAULT_MAX_STREAM_CAPTURE_BYTES),
+          has_response: event?.response != null,
+        }),
+      });
+    }
+    if (
+      event?.type === "response.output_text.delta" &&
+      typeof event.delta === "string"
+    ) {
+      retainStreamString(streamBudget, event.delta, (value) => {
+        textParts.push(value);
+      });
+    } else if (event?.type === "response.completed") {
+      completedResponse = event.response;
+    }
+  };
+
   // A proxy preserves the OpenAI stream's public surface. Binding methods back
   // to the original object also avoids breaking SDK classes with private fields.
   return new Proxy(stream, {
@@ -365,32 +408,10 @@ function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
               try {
                 const result = await iterator.next();
                 if (result.done) {
-                  finalize();
+                  finalize(cancellationRequested);
                   return result;
                 }
-
-                const event = result.value;
-                const index = eventCount++;
-                if (index < 128) {
-                  const delta =
-                    typeof event?.delta === "string" ? event.delta : "";
-                  span.addEvent("neatlogs.stream.chunk", {
-                    "neatlogs.stream.chunk.index": index,
-                    "neatlogs.stream.chunk.summary": safeStringify({
-                      type: event?.type ?? "unknown",
-                      delta_bytes: new TextEncoder().encode(delta).byteLength,
-                      has_response: event?.response != null,
-                    }),
-                  });
-                }
-                if (
-                  event?.type === "response.output_text.delta" &&
-                  typeof event.delta === "string"
-                ) {
-                  textParts.push(event.delta);
-                } else if (event?.type === "response.completed") {
-                  completedResponse = event.response;
-                }
+                addEvent(result.value);
                 return result;
               } catch (err) {
                 fail(err);
@@ -398,14 +419,14 @@ function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
               }
             },
             async return(value?: any): Promise<IteratorResult<any>> {
-              try {
-                return await (iterator.return?.(value) ?? {
-                  done: true,
-                  value,
-                });
-              } finally {
-                finalize(true);
-              }
+              cancellationRequested = true;
+              const result = await (iterator.return?.(value) ?? {
+                done: true,
+                value,
+              });
+              if (result.done) finalize(true);
+              else addEvent(result.value);
+              return result;
             },
             async throw(err?: any): Promise<IteratorResult<any>> {
               fail(err);
@@ -515,11 +536,13 @@ function extractResponsesOutputText(output: any): string {
 
 function wrapAsyncIterableStream(stream: any, span: Span): any {
   const accumulator = new ChoiceAccumulator();
+  const safeSpan = mediaSafeAccumulatorSpan(span);
+  let cancellationRequested = false;
   const originalAsyncIterator = stream[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
     accumulator.addResponse(stream, span);
-    accumulator.finish(span);
+    accumulator.finish(safeSpan);
     return stream;
   }
 
@@ -533,28 +556,28 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
               try {
                 const result = await iterator.next();
                 if (result.done) {
-                  accumulator.finish(span);
+                  accumulator.finish(safeSpan, cancellationRequested);
                   return result;
                 }
                 accumulator.addChunk(span, result.value);
                 return result;
               } catch (err) {
-                accumulator.fail(span, err);
+                accumulator.fail(safeSpan, err);
                 throw err;
               }
             },
             async return(value?: any): Promise<IteratorResult<any>> {
-              try {
-                return await (iterator.return?.(value) ?? {
-                  done: true,
-                  value: undefined,
-                });
-              } finally {
-                accumulator.finish(span, true);
-              }
+              cancellationRequested = true;
+              const result = await (iterator.return?.(value) ?? {
+                done: true,
+                value: undefined,
+              });
+              if (result.done) accumulator.finish(safeSpan, true);
+              else accumulator.addChunk(span, result.value);
+              return result;
             },
             async throw(err?: any): Promise<IteratorResult<any>> {
-              accumulator.fail(span, err);
+              accumulator.fail(safeSpan, err);
               if (iterator.throw) return iterator.throw(err);
               throw err;
             },
@@ -574,12 +597,110 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
 function finalizeChatResponse(span: Span, response: any): void {
   const accumulator = new ChoiceAccumulator();
   accumulator.addResponse(response, span);
-  accumulator.finish(span);
+  accumulator.finish(mediaSafeAccumulatorSpan(span));
 }
 
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+interface StreamCaptureBudget {
+  capturedBytes: number;
+  capturedItems: number;
+  droppedBytes: number;
+  droppedItems: number;
+  incompleteReasons: Set<string>;
+}
+
+function newStreamCaptureBudget(): StreamCaptureBudget {
+  return {
+    capturedBytes: 0,
+    capturedItems: 0,
+    droppedBytes: 0,
+    droppedItems: 0,
+    incompleteReasons: new Set(),
+  };
+}
+
+function retainStreamString(
+  budget: StreamCaptureBudget,
+  value: string,
+  retain: (value: string) => void,
+): void {
+  const remaining = Math.max(0, DEFAULT_MAX_STREAM_CAPTURE_BYTES - budget.capturedBytes);
+  const bytes = utf8ByteLength(value, remaining);
+  if (budget.capturedItems >= DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
+    budget.droppedItems += 1;
+    budget.droppedBytes += bytes;
+    budget.incompleteReasons.add("item_limit_exceeded");
+    return;
+  }
+  if (budget.capturedBytes + bytes > DEFAULT_MAX_STREAM_CAPTURE_BYTES) {
+    budget.droppedItems += 1;
+    budget.droppedBytes += bytes;
+    budget.incompleteReasons.add("byte_limit_exceeded");
+    return;
+  }
+  retain(value);
+  budget.capturedItems += 1;
+  budget.capturedBytes += bytes;
+}
+
+function applyStreamDiagnostics(span: Span, budget: StreamCaptureBudget): void {
+  span.setAttribute("neatlogs.stream.capture_bytes", budget.capturedBytes);
+  span.setAttribute("neatlogs.stream.capture_items", budget.capturedItems);
+  if (budget.incompleteReasons.size === 0) return;
+  span.setAttribute("neatlogs.stream.incomplete", true);
+  span.setAttribute(
+    "neatlogs.stream.incomplete_reason",
+    [...budget.incompleteReasons].sort().join(","),
+  );
+  if (budget.droppedBytes > 0) {
+    span.setAttribute("neatlogs.stream.dropped_bytes", budget.droppedBytes);
+    span.setAttribute("neatlogs.stream.dropped_bytes_is_lower_bound", true);
+  }
+  span.setAttribute("neatlogs.stream.dropped_items", budget.droppedItems);
+  span.setAttribute("neatlogs.capture_fidelity", "truncated");
+}
+
+function sanitizedJsonToolArguments(
+  span: Span,
+  prefix: string,
+  value: unknown,
+): string {
+  if (typeof value !== "string") {
+    return safeStringify(captureMedia(span, prefix, value, "output"));
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    span.setAttribute("neatlogs.stream.incomplete", true);
+    span.setAttribute("neatlogs.stream.incomplete_reason", "invalid_tool_arguments");
+    return "[incomplete: invalid tool arguments omitted]";
+  }
+  const original = safeStringify(parsed);
+  const sanitized = safeStringify(captureMedia(span, prefix, parsed, "output"));
+  return original === sanitized ? value : sanitized;
+}
+
+function mediaSafeAccumulatorSpan(span: Span): Span {
+  return new Proxy(span, {
+    get(target, property) {
+      if (property === "setAttribute") {
+        return (name: string, value: unknown) =>
+          target.setAttribute(
+            name,
+            /^neatlogs\.llm\.tool_calls\.\d+\.arguments$/.test(name)
+              ? sanitizedJsonToolArguments(target, name, value)
+              : (value as any),
+          );
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
 
 function setInvocationParams(span: Span, opts: any): void {
   if (opts?.temperature != null)

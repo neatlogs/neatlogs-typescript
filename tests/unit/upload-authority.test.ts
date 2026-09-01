@@ -91,9 +91,15 @@ describe("HttpUploadAuthority", () => {
       "https://objects.example.test/private?signature=never-export",
       `https://ingest.example.test/v1/telemetry/uploads/${uploadId}/complete`,
     ]);
-    expect(calls[0].init?.headers).toMatchObject({ "x-api-key": "project-secret" });
-    expect(calls[1].init?.headers).toEqual({ "x-object-token": "object-secret" });
-    expect(calls[2].init?.headers).toMatchObject({ "x-api-key": "project-secret" });
+    expect(calls[0].init?.headers).toMatchObject({
+      "x-api-key": "project-secret",
+    });
+    expect(calls[1].init?.headers).toEqual({
+      "x-object-token": "object-secret",
+    });
+    expect(calls[2].init?.headers).toMatchObject({
+      "x-api-key": "project-secret",
+    });
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({
       version: 1,
       purpose: "otlp_overflow",
@@ -121,7 +127,9 @@ describe("HttpUploadAuthority", () => {
         state: "ready",
       },
     });
-    expect(JSON.stringify(receipt)).not.toMatch(/signature|object-secret|project-secret|url|headers/);
+    expect(JSON.stringify(receipt)).not.toMatch(
+      /signature|object-secret|project-secret|url|headers/,
+    );
   });
 
   it("rejects a reference whose id is not the response upload id", async () => {
@@ -211,7 +219,11 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "prepared",
           expires_at: new Date(Date.now() + 60_000).toISOString(),
-          upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
+          upload: {
+            method: "PUT",
+            url: "https://objects.example.test/object",
+            headers: {},
+          },
           reference: wireReference(item, "prepared"),
         }),
       )
@@ -239,7 +251,9 @@ describe("HttpUploadAuthority", () => {
       maxAttempts: 1,
     });
 
-    await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
+    await expect(authority.upload(item)).resolves.toMatchObject({
+      state: "ready",
+    });
     expect(putBodyCancelled).toBe(true);
   });
 
@@ -255,7 +269,11 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "prepared",
           expires_at: new Date(Date.now() + 60_000).toISOString(),
-          upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
+          upload: {
+            method: "PUT",
+            url: "https://objects.example.test/object",
+            headers: {},
+          },
           reference: wireReference(item, "prepared"),
         });
       }
@@ -274,9 +292,13 @@ describe("HttpUploadAuthority", () => {
       deadlineMs: 2_000,
     });
 
-    await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
+    await expect(authority.upload(item)).resolves.toMatchObject({
+      state: "ready",
+    });
     const prepareBodies = fetch.mock.calls
-      .filter(([, init]) => init?.method === "POST" && String(init.body).includes("idempotency_key"))
+      .filter(
+        ([, init]) => init?.method === "POST" && String(init.body).includes("idempotency_key"),
+      )
       .map(([, init]) => JSON.parse(String(init?.body)).idempotency_key);
     expect(prepareBodies).toEqual([item.idempotencyKey, item.idempotencyKey]);
     expect(fetch).toHaveBeenCalledTimes(4);
@@ -339,7 +361,9 @@ describe("HttpUploadAuthority", () => {
         maxAttempts: 1,
       });
 
-      await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
+      await expect(authority.upload(item)).resolves.toMatchObject({
+        state: "ready",
+      });
       expect(fetch).toHaveBeenCalledTimes(2);
       expect(String(fetch.mock.calls[1][0])).toBe(
         `https://ingest.example.test/v1/telemetry/uploads/${uploadId}/complete`,
@@ -391,7 +415,9 @@ describe("HttpUploadAuthority", () => {
       deadlineMs: 2_000,
     });
 
-    await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
+    await expect(authority.upload(item)).resolves.toMatchObject({
+      state: "ready",
+    });
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(fetch.mock.calls.every(([, init]) => init?.method === "POST")).toBe(true);
     expect(String(fetch.mock.calls[1][0])).toContain(`/${uploadId}/complete`);
@@ -407,7 +433,11 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "prepared",
           expires_at: new Date(Date.now() + 60_000).toISOString(),
-          upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
+          upload: {
+            method: "PUT",
+            url: "https://objects.example.test/object",
+            headers: {},
+          },
           reference: wireReference(item, "prepared"),
         }),
       )
@@ -417,7 +447,11 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "validating",
           reference: { ...wireReference(item, "ready"), state: "validating" },
-          diagnostic: { stage: "scanner", reason_code: "scan_pending", retryable: true },
+          diagnostic: {
+            stage: "scanner",
+            reason_code: "scan_pending",
+            retryable: true,
+          },
         }),
       );
     const authority = new HttpUploadAuthority({
@@ -443,7 +477,11 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "prepared",
           expires_at: new Date(Date.now() + 60_000).toISOString(),
-          upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
+          upload: {
+            method: "PUT",
+            url: "https://objects.example.test/object",
+            headers: {},
+          },
           reference: wireReference(item, "prepared"),
         }),
       )
@@ -478,7 +516,11 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "prepared",
           expires_at: new Date(Date.now() + 60_000).toISOString(),
-          upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
+          upload: {
+            method: "PUT",
+            url: "https://objects.example.test/object",
+            headers: {},
+          },
           reference: wireReference(item, "prepared"),
         }),
       )
@@ -488,7 +530,11 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "validating",
           reference: { ...wireReference(item, "ready"), state: "validating" },
-          diagnostic: { stage: "validation", reason_code: "scan_pending", retryable: true },
+          diagnostic: {
+            stage: "validation",
+            reason_code: "scan_pending",
+            retryable: true,
+          },
         }),
       )
       .mockResolvedValueOnce(
@@ -506,8 +552,57 @@ describe("HttpUploadAuthority", () => {
       deadlineMs: 2_000,
     });
 
-    await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
+    await expect(authority.upload(item)).resolves.toMatchObject({
+      state: "ready",
+    });
     expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries an uploaded completion response without repeating the PUT", async () => {
+    const item = payload();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json(201, {
+          upload_id: uploadId,
+          state: "prepared",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          upload: {
+            method: "PUT",
+            url: "https://objects.example.test/object",
+            headers: {},
+          },
+          reference: wireReference(item, "prepared"),
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(
+        json(202, {
+          upload_id: uploadId,
+          state: "uploaded",
+          reference: wireReference(item, "uploaded"),
+        }),
+      )
+      .mockResolvedValueOnce(
+        json(200, {
+          upload_id: uploadId,
+          state: "ready",
+          reference: wireReference(item, "ready"),
+        }),
+      );
+    const authority = new HttpUploadAuthority({
+      baseUrl: "https://ingest.example.test",
+      apiKey: "key",
+      fetch: fetch as typeof globalThis.fetch,
+      maxAttempts: 2,
+      deadlineMs: 2_000,
+    });
+
+    await expect(authority.upload(item)).resolves.toMatchObject({
+      state: "ready",
+    });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(1);
   });
 
   it("preserves a safe backend reason code and retryability on errors", async () => {
@@ -591,8 +686,15 @@ describe("HttpUploadAuthority", () => {
         upload_id: uploadId,
         state: "prepared",
         expires_at: new Date(Date.now() + 60_000).toISOString(),
-        upload: { method: "PUT", url: "https://objects.example.test/object", headers: {} },
-        reference: { ...wireReference(item, "prepared"), sha256: "0".repeat(64) },
+        upload: {
+          method: "PUT",
+          url: "https://objects.example.test/object",
+          headers: {},
+        },
+        reference: {
+          ...wireReference(item, "prepared"),
+          sha256: "0".repeat(64),
+        },
       }),
     );
     const authority = new HttpUploadAuthority({

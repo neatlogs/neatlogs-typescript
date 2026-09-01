@@ -196,6 +196,7 @@ export class Client {
       ownAllSpans: true,
       mediaUploadsAvailable: uploadAuthority.available,
       mediaUploadsUnavailableReason: uploadAuthority.unavailableReason,
+      mediaOwner: this,
     });
     this.tracerProvider.addSpanProcessor(this.spanProcessor);
     this.completionProcessor = null;

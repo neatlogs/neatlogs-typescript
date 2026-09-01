@@ -8,6 +8,7 @@ import { type Span as OtelSpan } from '@opentelemetry/api';
 import { VALID_SPAN_KINDS } from '../span-kinds/mapping.js';
 import { decorateSpan, safeJsonDumps, serializeObj, type DecorateSpanOptions } from './base.js';
 import { getLogger } from '../core/logger.js';
+import { captureMedia, mediaReferences } from '../core/media.js';
 import type { SpanOptions, SpanKind } from '../types.js';
 
 const logger = getLogger();
@@ -78,7 +79,17 @@ function _toolPostprocessor(options: SpanOptions) {
       span.setAttribute('tool.name', options.toolName);
     }
     if (options.parameters) {
-      span.setAttribute('tool.parameters', safeJsonDumps(options.parameters));
+      span.setAttribute(
+        'tool.parameters',
+        safeJsonDumps(
+          captureMedia(
+            span,
+            'neatlogs.tool.parameters',
+            serializeObj(options.parameters),
+            'input',
+          ),
+        ),
+      );
     }
   };
 }
@@ -173,16 +184,36 @@ function _createMcpToolWrapper<TArgs extends any[], TReturn>(
         span.setAttribute('tool.name', options.toolName);
       }
       if (options.parameters) {
-        span.setAttribute('mcp.tool.parameters', safeJsonDumps(options.parameters));
-        span.setAttribute('tool.parameters', safeJsonDumps(options.parameters));
+        const capturedParameters = captureMedia(
+          span,
+          'neatlogs.mcp_tool.parameters',
+          serializeObj(options.parameters),
+          'input',
+        );
+        const serializedParameters = safeJsonDumps(capturedParameters);
+        span.setAttribute('mcp.tool.parameters', serializedParameters);
+        span.setAttribute('tool.parameters', serializedParameters);
       }
       if (options.toolJsonSchema) {
-        span.setAttribute('tool.json_schema', safeJsonDumps(options.toolJsonSchema));
+        span.setAttribute(
+          'tool.json_schema',
+          safeJsonDumps(
+            captureMedia(
+              span,
+              'neatlogs.mcp_tool.schema',
+              serializeObj(options.toolJsonSchema),
+              'input',
+            ),
+          ),
+        );
       }
 
       // Wrap string results
       if (typeof result === 'string') {
-        span.setAttribute('output.value', safeJsonDumps({ result }));
+        span.setAttribute(
+          'output.value',
+          safeJsonDumps({ result: captureMcpStringResult(span, result) }),
+        );
       }
 
       // Extract input from first arg if it has toJSON or is a plain object
@@ -192,13 +223,45 @@ function _createMcpToolWrapper<TArgs extends any[], TReturn>(
           const serialized = typeof firstArg.toJSON === 'function'
             ? firstArg.toJSON()
             : serializeObj(firstArg);
-          span.setAttribute('mcp.tool.input', safeJsonDumps(serialized));
+          span.setAttribute(
+            'mcp.tool.input',
+            safeJsonDumps(
+              captureMedia(
+                span,
+                'neatlogs.mcp_tool.input',
+                serialized,
+                'input',
+              ),
+            ),
+          );
         }
       }
     },
   };
 
   return decorateSpan(decorateOpts, fn);
+}
+
+function captureMcpStringResult(span: OtelSpan, result: string): unknown {
+  if (/^\s*data:/i.test(result)) {
+    const captured = captureMedia(
+      span,
+      'neatlogs.mcp_tool.output',
+      { type: 'file', url: result },
+      'output',
+    ) as { url?: unknown };
+    return captured.url ?? '[REDACTED_MEDIA]';
+  }
+
+  try {
+    const parsed = JSON.parse(result);
+    if (mediaReferences(parsed, 'output').length === 0) return result;
+    return safeJsonDumps(
+      captureMedia(span, 'neatlogs.mcp_tool.output', parsed, 'output'),
+    );
+  } catch {
+    return result;
+  }
 }
 
 /**

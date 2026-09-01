@@ -26,6 +26,7 @@ import { registerMask } from './mask.js';
 import { applyEndUserAttributes } from './end-user.js';
 import { applySessionAttributes } from './session.js';
 import { currentSessionId } from './identity.js';
+import { captureMedia } from './media.js';
 
 import { getLogger } from './logger.js';
 import { safeJsonDumps, serializeObj } from '../decorators/base.js';
@@ -191,7 +192,13 @@ export function setTraceOutput(value: unknown): void {
   try {
     const span = getNeatlogsRootSpan() ?? getActiveNeatlogsSpan();
     if (!span) return;
-    span.setAttribute('neatlogs.trace.output', safeJsonDumps(serializeObj(value)));
+    const captured = captureMedia(
+      span,
+      'neatlogs.trace.output',
+      serializeObj(value),
+      'output',
+    );
+    span.setAttribute('neatlogs.trace.output', safeJsonDumps(captured));
   } catch (err) {
     logger.warn(`[setTraceOutput] failed to set trace output: ${err}`);
   }
@@ -388,7 +395,13 @@ export async function trace<T>(
     applyEndUserAttributes(span, endUserId, endUserMetadata, isRootTrace);
 
     if (input !== undefined && input !== null) {
-      span.setAttribute('input.value', safeJsonDumps(serializeObj(input)));
+      const capturedInput = captureMedia(
+        span,
+        `neatlogs.${String(kind ?? 'workflow').toLowerCase()}.input`,
+        serializeObj(input),
+        'input',
+      );
+      span.setAttribute('input.value', safeJsonDumps(capturedInput));
     }
 
     if (mask) {
@@ -407,7 +420,13 @@ export async function trace<T>(
           'output.value' in spanAttrs || 'neatlogs.output.value' in spanAttrs
         );
         if (!hasOutput) {
-          span.setAttribute('output.value', safeJsonDumps(serializeObj(result)));
+          const capturedOutput = captureMedia(
+            span,
+            `neatlogs.${String(kind ?? 'workflow').toLowerCase()}.output`,
+            serializeObj(result),
+            'output',
+          );
+          span.setAttribute('output.value', safeJsonDumps(capturedOutput));
         }
       }
 

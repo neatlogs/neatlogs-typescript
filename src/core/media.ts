@@ -15,12 +15,26 @@ export type MediaRecord = Record<string, string | number>;
 export const DEFAULT_INLINE_MEDIA_BYTES = 100_000;
 export const DEFAULT_MAX_PENDING_MEDIA_ITEMS = 32;
 export const DEFAULT_MEDIA_EXPORT_DEADLINE_MS = 15_000;
+const MAX_MEDIA_TRAVERSAL_DEPTH = 32;
+const MAX_MEDIA_TRAVERSAL_NODES = 4_096;
+const MAX_MEDIA_REPLACEMENT_KEY_CHARS = 1024 * 1024;
+const MAX_MEDIA_REFERENCE_CHARS = 8_192;
+const MAX_CAPTURED_MEDIA_REFERENCES = 64;
+const MAX_ENCODED_MEDIA_CHARS = Math.ceil((DEFAULT_MAX_TYPED_MEDIA_BYTES * 4) / 3) + 8;
+const REDACTED_MEDIA_STRUCTURE = "[REDACTED_MEDIA_STRUCTURE]";
+const MEDIA_PAYLOAD_SIGNAL =
+  /(?:data\s*:|"(?:image_url|input_audio|inline_data|inlineData|file_data|fileData|file_url|file_uri|fileUri|b64_json|mime_type|mimeType|media_type|mediaType)"\s*:|"type"\s*:\s*"(?:image|audio|video|document|file|input_file|image_generation_call)")/i;
 
 interface DiscoveredMedia {
   record: MediaRecord;
   original?: string;
   binaryOriginal?: Uint8Array;
   bytes?: Uint8Array;
+}
+
+interface MediaDiscoveryResult {
+  items: DiscoveredMedia[];
+  truncated: boolean;
 }
 
 interface PendingMedia {
@@ -46,31 +60,66 @@ interface PendingMediaBucket {
   account: PendingMediaAccount;
   unregisterToken: object;
 }
-
-const pendingBySpan = new WeakMap<object, PendingMediaBucket>();
 interface PendingMediaOwnerState {
   bytes: number;
   items: number;
   accounts: Set<PendingMediaAccount>;
 }
 
-const defaultPendingMediaOwner = {};
-const pendingMediaOwners = new WeakMap<object, PendingMediaOwnerState>();
-const mediaCaptureAvailability = new WeakMap<
-  object,
-  { available: boolean; reason: string }
->();
+interface MediaRuntimeState {
+  pendingBySpan: WeakMap<object, PendingMediaBucket>;
+  pendingMediaOwners: WeakMap<object, PendingMediaOwnerState>;
+  mediaCaptureAvailability: WeakMap<object, { available: boolean; reason: string }>;
+  mediaCaptureOwners: WeakMap<object, object>;
+  spanAliases: WeakMap<object, object>;
+  defaultPendingMediaOwner: object;
+}
+
+const MEDIA_RUNTIME_KEY = Symbol.for("neatlogs.media-runtime.v1");
+const runtimeGlobal = globalThis as typeof globalThis & Record<symbol, unknown>;
+const mediaRuntime =
+  (runtimeGlobal[MEDIA_RUNTIME_KEY] as MediaRuntimeState | undefined) ??
+  ({
+    pendingBySpan: new WeakMap(),
+    pendingMediaOwners: new WeakMap(),
+    mediaCaptureAvailability: new WeakMap(),
+    mediaCaptureOwners: new WeakMap(),
+    spanAliases: new WeakMap(),
+    defaultPendingMediaOwner: {},
+  } satisfies MediaRuntimeState);
+runtimeGlobal[MEDIA_RUNTIME_KEY] = mediaRuntime;
+
+const {
+  pendingBySpan,
+  pendingMediaOwners,
+  mediaCaptureAvailability,
+  mediaCaptureOwners,
+  spanAliases,
+  defaultPendingMediaOwner,
+} = mediaRuntime;
+
+function canonicalSpan(span: object): object {
+  return spanAliases.get(span) ?? span;
+}
+
+/** Make a transparent span facade share media state with its SDK span. */
+export function aliasMediaCaptureSpan(alias: object, target: object): void {
+  spanAliases.set(alias, canonicalSpan(target));
+}
 
 /** Bind a recording SDK span to the upload gate selected by its pipeline. */
 export function setMediaCaptureAvailability(
   span: object,
   available: boolean,
   reason = "telemetry_uploads_disabled",
+  owner?: object,
 ): void {
-  mediaCaptureAvailability.set(span, {
+  const target = canonicalSpan(span);
+  mediaCaptureAvailability.set(target, {
     available,
     reason: safeUnavailableReason(reason),
   });
+  if (owner) mediaCaptureOwners.set(target, owner);
 }
 
 function pendingOwnerState(owner: object): PendingMediaOwnerState {
@@ -93,14 +142,18 @@ function releasePendingAccount(account: PendingMediaAccount): void {
   account.owner.accounts.delete(account);
 }
 
-const pendingFinalizer = typeof FinalizationRegistry === "undefined"
-  ? undefined
-  : new FinalizationRegistry<PendingMediaAccount>(releasePendingAccount);
+const pendingFinalizer =
+  typeof FinalizationRegistry === "undefined"
+    ? undefined
+    : new FinalizationRegistry<PendingMediaAccount>(releasePendingAccount);
 
 function pendingBucket(span: object): PendingMediaBucket {
+  span = canonicalSpan(span);
   const prior = pendingBySpan.get(span);
   if (prior) return prior;
-  const owner = pendingOwnerState(getActiveClient() ?? defaultPendingMediaOwner);
+  const owner = pendingOwnerState(
+    mediaCaptureOwners.get(span) ?? getActiveClient() ?? defaultPendingMediaOwner,
+  );
   const account: PendingMediaAccount = {
     bytes: 0,
     items: 0,
@@ -117,9 +170,14 @@ function pendingBucket(span: object): PendingMediaBucket {
 }
 
 function detachPendingBucket(span: object): PendingMediaBucket | undefined {
+  const alias = span;
+  span = canonicalSpan(alias);
+  spanAliases.delete(alias);
   const bucket = pendingBySpan.get(span);
   if (!bucket) return undefined;
   pendingBySpan.delete(span);
+  mediaCaptureAvailability.delete(span);
+  mediaCaptureOwners.delete(span);
   pendingFinalizer?.unregister(bucket.unregisterToken);
   return bucket;
 }
@@ -166,6 +224,32 @@ interface DecodedBase64 {
   sha256: string;
 }
 
+function rejectedMediaRecord(
+  original: string,
+  mimeType: string,
+  declared: string,
+  purpose: string,
+  reason: string,
+  source: "inline" | "url",
+): DiscoveredMedia {
+  const fingerprint = createHash("sha256")
+    .update(original.slice(0, 4096))
+    .update(String(original.length))
+    .digest("hex");
+  return {
+    original,
+    record: {
+      id: `nl_media_rejected_${fingerprint.slice(0, 24)}`,
+      type: mediaKind(mimeType, declared),
+      source,
+      mime_type: mimeType || "application/octet-stream",
+      purpose,
+      state: "failed",
+      safe_preview: `upload failed: validate/${reason}`,
+    },
+  };
+}
+
 function decodeBase64(value: string, retainBytes = true): DecodedBase64 | null {
   const normalized = value.replace(/\s+/g, "");
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 === 1) {
@@ -176,10 +260,7 @@ function decodeBase64(value: string, retainBytes = true): DecodedBase64 | null {
     const estimatedBytes = Math.floor((normalized.length * 3) / 4) - padding;
     if (retainBytes && estimatedBytes <= DEFAULT_MAX_TYPED_MEDIA_BYTES) {
       const bytes = Buffer.from(normalized, "base64");
-      if (
-        bytes.toString("base64").replace(/=+$/, "") !==
-        normalized.replace(/=+$/, "")
-      ) {
+      if (bytes.toString("base64").replace(/=+$/, "") !== normalized.replace(/=+$/, "")) {
         return null;
       }
       return {
@@ -227,8 +308,27 @@ function inlineRecord(
       mimeType = canonicalMimeType(header.split(";", 1)[0] || mimeType);
       encoded = encoded.slice(comma + 1);
     }
+    if (encoded.length > MAX_ENCODED_MEDIA_CHARS) {
+      return rejectedMediaRecord(
+        original,
+        mimeType,
+        declared,
+        purpose,
+        "payload_too_large",
+        "inline",
+      );
+    }
     const decoded = decodeBase64(encoded, retainBytes);
-    if (!decoded) return null;
+    if (!decoded) {
+      return rejectedMediaRecord(
+        original,
+        mimeType,
+        declared,
+        purpose,
+        "invalid_inline_media",
+        "inline",
+      );
+    }
     bytes = decoded.bytes;
     byteLength = decoded.byteLength;
     sha256 = decoded.sha256;
@@ -241,8 +341,7 @@ function inlineRecord(
     }
   }
   const eligible =
-    byteLength > DEFAULT_INLINE_MEDIA_BYTES &&
-    byteLength <= DEFAULT_MAX_TYPED_MEDIA_BYTES;
+    byteLength > DEFAULT_INLINE_MEDIA_BYTES && byteLength <= DEFAULT_MAX_TYPED_MEDIA_BYTES;
   const tooLarge = byteLength > DEFAULT_MAX_TYPED_MEDIA_BYTES;
   return {
     original,
@@ -273,17 +372,43 @@ function referenceRecord(
   purpose: string,
 ): DiscoveredMedia | null {
   mimeType = canonicalMimeType(mimeType);
+  if (reference.length > MAX_MEDIA_REFERENCE_CHARS) {
+    return rejectedMediaRecord(
+      reference,
+      mimeType,
+      declared,
+      purpose,
+      "media_reference_too_large",
+      "url",
+    );
+  }
   let safeReference = reference;
   let isURLReference = false;
   const normalizedReference = reference.trim();
   const protocolRelative = normalizedReference.startsWith("//");
+  const relativeReference =
+    !protocolRelative &&
+    !/^[a-z][a-z\d+.-]*:/i.test(normalizedReference) &&
+    (normalizedReference.includes("/") ||
+      normalizedReference.includes("?") ||
+      normalizedReference.includes("#"));
   try {
-    const parsed = protocolRelative
+    const parsed = protocolRelative || relativeReference
       ? new URL(normalizedReference, "https://neatlogs.invalid")
       : new URL(normalizedReference);
-    if (parsed.protocol.toLowerCase() === "data:") return null;
+    if (parsed.protocol.toLowerCase() === "data:") {
+      return rejectedMediaRecord(
+        reference,
+        mimeType,
+        declared,
+        purpose,
+        "invalid_inline_media",
+        "inline",
+      );
+    }
     const hierarchical =
       protocolRelative ||
+      relativeReference ||
       parsed.protocol === "http:" ||
       parsed.protocol === "https:" ||
       /^[a-z][a-z\d+.-]*:\/\//i.test(normalizedReference) ||
@@ -296,10 +421,24 @@ function referenceRecord(
       parsed.hash = "";
       safeReference = protocolRelative
         ? `//${parsed.host}${parsed.pathname}`
-        : parsed.toString();
+        : relativeReference
+          ? parsed.pathname
+          : parsed.toString();
+    } else if (parsed.protocol) {
+      isURLReference = true;
+      safeReference = parsed.protocol;
     }
   } catch {
-    if (/^(?:\/\/|[a-z][a-z\d+.-]*:)/i.test(normalizedReference)) return null;
+    if (/^(?:\/\/|[a-z][a-z\d+.-]*:)/i.test(normalizedReference)) {
+      return rejectedMediaRecord(
+        reference,
+        mimeType,
+        declared,
+        purpose,
+        "invalid_media_reference",
+        "url",
+      );
+    }
   }
   const digest = createHash("sha256").update(reference).digest("hex");
   return {
@@ -320,12 +459,17 @@ function discoverMedia(
   value: unknown,
   purpose: string,
   retainBytes = true,
-): DiscoveredMedia[] {
+): MediaDiscoveryResult {
   const found: DiscoveredMedia[] = [];
   const discoveredKeys = new Set<string>();
   let retainedBytes = 0;
+  let truncated = false;
   const append = (item: DiscoveredMedia | null): void => {
     if (!item) return;
+    if (found.length >= MAX_CAPTURED_MEDIA_REFERENCES) {
+      truncated = true;
+      return;
+    }
     const key = `${item.record.id}:${item.record.mime_type}:${item.record.reference ?? ""}:${item.record.type}`;
     if (discoveredKeys.has(key)) return;
     discoveredKeys.add(key);
@@ -341,144 +485,156 @@ function discoverMedia(
     found.push(item);
   };
   const visited = new WeakSet<object>();
-  const visit = (
-    node: any,
-    inheritedDeclared = "",
-    inheritedMimeType = "",
-  ): void => {
-    if (!node || typeof node !== "object") return;
-    if (visited.has(node)) return;
-    visited.add(node);
-    if (node instanceof Uint8Array) return;
-    if (Array.isArray(node)) {
-      node.forEach((item) => {
-        if (
-          inheritedDeclared &&
-          (typeof item === "string" || item instanceof Uint8Array)
-        ) {
-          const record =
-            typeof item === "string" && /^(?:https?:|s3:|gs:|\/\/)/i.test(item)
-              ? referenceRecord(item, inheritedMimeType, inheritedDeclared, purpose)
-              : inlineRecord(
-                  item,
-                  inheritedMimeType,
-                  inheritedDeclared,
-                  purpose,
-                  retainBytes,
-                );
-          append(record);
-        } else {
-          visit(item, inheritedDeclared, inheritedMimeType);
-        }
-      });
+  let visitedNodes = 0;
+  const visit = (node: any, inheritedDeclared = "", inheritedMimeType = "", depth = 0): void => {
+    if (typeof node === "string" && /^\s*data:/i.test(node)) {
+      append(inlineRecord(node, inheritedMimeType, inheritedDeclared, purpose, retainBytes));
       return;
     }
-    const declared = String(node.type ?? inheritedDeclared);
-    const normalizedDeclared = declaredMediaKind(declared);
-    const mediaDeclared = normalizedDeclared || declaredMediaKind(inheritedDeclared);
-    let mimeType = canonicalMimeType(String(
-      node.mime_type ??
-        node.mimeType ??
-        node.media_type ??
-        node.mediaType ??
-        inheritedMimeType,
-    ));
-    const declaredFormat = node.format ?? node.output_format ?? node.outputFormat;
-    if (!mimeType && mediaDeclared && typeof declaredFormat === "string") {
-      const format = declaredFormat.toLowerCase();
-      mimeType = canonicalMimeType(
-        mediaDeclared === "document" && format === "pdf"
-          ? "application/pdf"
-          : `${mediaDeclared}/${format}`,
+    if (!node || typeof node !== "object") return;
+    if (found.length >= MAX_CAPTURED_MEDIA_REFERENCES) {
+      truncated = true;
+      return;
+    }
+    if (depth > MAX_MEDIA_TRAVERSAL_DEPTH || visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+      return;
+    }
+    if (visited.has(node)) return;
+    visited.add(node);
+    visitedNodes += 1;
+    try {
+      if (node instanceof Uint8Array) return;
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          if (visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) break;
+          if (inheritedDeclared && (typeof item === "string" || item instanceof Uint8Array)) {
+            const record =
+              typeof item === "string" && /^(?:https?:|s3:|gs:|\/\/)/i.test(item)
+                ? referenceRecord(item, inheritedMimeType, inheritedDeclared, purpose)
+                : inlineRecord(item, inheritedMimeType, inheritedDeclared, purpose, retainBytes);
+            append(record);
+          } else {
+            visit(item, inheritedDeclared, inheritedMimeType, depth + 1);
+          }
+        }
+        return;
+      }
+      const entries: [string, unknown][] = Object.entries(node);
+      const read = (key: string): unknown => entries.find(([name]) => name === key)?.[1];
+      const declared = String(read("type") ?? inheritedDeclared);
+      const normalizedDeclared = declaredMediaKind(declared);
+      const mediaDeclared = normalizedDeclared || declaredMediaKind(inheritedDeclared);
+      let mimeType = canonicalMimeType(
+        String(
+          read("mime_type") ??
+            read("mimeType") ??
+            read("media_type") ??
+            read("mediaType") ??
+            inheritedMimeType,
+        ),
       );
-    }
-    const image =
-      typeof node.image_url === "object" ? node.image_url?.url : node.image_url;
-    if (typeof image === "string") {
-      const record = /^\s*data:/i.test(image)
-        ? inlineRecord(image, mimeType, "image", purpose, retainBytes)
-        : referenceRecord(image, mimeType, "image", purpose);
-      append(record);
-    }
-    const audio = node.input_audio ?? node.inputAudio;
-    if (audio && typeof audio.data === "string") {
-      const format = String(audio.format ?? "unknown");
-      const record = inlineRecord(
-        audio.data,
-        mimeType || `audio/${format}`,
-        "audio",
-        purpose,
-        retainBytes,
-      );
-      append(record);
-    }
-    const inline = node.inline_data ?? node.inlineData;
-    if (inline && typeof inline.data === "string") {
-      const record = inlineRecord(
-        inline.data,
-        String(inline.mime_type ?? inline.mimeType ?? mimeType),
-        mediaDeclared,
-        purpose,
-        retainBytes,
-      );
-      append(record);
-    }
-    const fileData = node.file_data ?? node.fileData;
-    if (typeof fileData === "string") {
-      const record = inlineRecord(
-        fileData,
-        mimeType,
-        mediaDeclared || "document",
-        purpose,
-        retainBytes,
-      );
-      append(record);
-    }
-    const raw =
-      node.data ??
-      node.bytes ??
-      node.b64_json ??
-      (normalizedDeclared === "image" ? node.result : undefined);
-    if (
-      (typeof raw === "string" || raw instanceof Uint8Array) &&
-      (mediaDeclared || mimeType)
-    ) {
-      const record = inlineRecord(raw, mimeType, mediaDeclared, purpose, retainBytes);
-      append(record);
-    }
-    const reference =
-      node.file_id ?? node.file_url ?? node.file_uri ?? node.fileUri ?? node.url;
-    if (
-      typeof reference === "string" &&
-      (["file", "url"].includes(normalizedDeclared) ||
-        !!mediaDeclared ||
-        !!mimeType)
-    ) {
-      const record = referenceRecord(
-        reference,
-        mimeType,
-        mediaDeclared || "document",
-        purpose,
-      );
-      append(record);
-    }
-    for (const [key, item] of Object.entries(node)) {
-      const keyed = key.toLowerCase().replace(/^input_/, "").replace(/s$/, "");
-      const childDeclared = declaredMediaKind(keyed) || mediaDeclared;
-      let childMimeType = mimeType;
-      if (!childMimeType && childDeclared && typeof declaredFormat === "string") {
+      const declaredFormat = read("format") ?? read("output_format") ?? read("outputFormat");
+      if (!mimeType && mediaDeclared && typeof declaredFormat === "string") {
         const format = declaredFormat.toLowerCase();
-        childMimeType = canonicalMimeType(
-          childDeclared === "document" && format === "pdf"
+        mimeType = canonicalMimeType(
+          mediaDeclared === "document" && format === "pdf"
             ? "application/pdf"
-            : `${childDeclared}/${format}`,
+            : `${mediaDeclared}/${format}`,
         );
       }
-      visit(item, childDeclared, childMimeType);
+      const imageUrl = read("image_url");
+      let image = imageUrl;
+      if (imageUrl && typeof imageUrl === "object") {
+        try {
+          image = (imageUrl as Record<string, unknown>).url;
+        } catch {
+          image = undefined;
+        }
+      }
+      if (typeof image === "string") {
+        const record = /^\s*data:/i.test(image)
+          ? inlineRecord(image, mimeType, "image", purpose, retainBytes)
+          : referenceRecord(image, mimeType, "image", purpose);
+        append(record);
+      }
+      const audio = read("input_audio") ?? read("inputAudio");
+      if (audio && typeof audio === "object" && typeof (audio as any).data === "string") {
+        const format = String((audio as any).format ?? "unknown");
+        const record = inlineRecord(
+          (audio as any).data,
+          mimeType || `audio/${format}`,
+          "audio",
+          purpose,
+          retainBytes,
+        );
+        append(record);
+      }
+      const inline = read("inline_data") ?? read("inlineData");
+      if (inline && typeof inline === "object" && typeof (inline as any).data === "string") {
+        const record = inlineRecord(
+          (inline as any).data,
+          String((inline as any).mime_type ?? (inline as any).mimeType ?? mimeType),
+          mediaDeclared,
+          purpose,
+          retainBytes,
+        );
+        append(record);
+      }
+      const fileData = read("file_data") ?? read("fileData");
+      if (typeof fileData === "string") {
+        const record = inlineRecord(
+          fileData,
+          mimeType,
+          mediaDeclared || "document",
+          purpose,
+          retainBytes,
+        );
+        append(record);
+      }
+      const raw =
+        read("data") ??
+        read("bytes") ??
+        read("b64_json") ??
+        (normalizedDeclared === "image" ? read("result") : undefined);
+      if ((typeof raw === "string" || raw instanceof Uint8Array) && (mediaDeclared || mimeType)) {
+        const record = inlineRecord(raw, mimeType, mediaDeclared, purpose, retainBytes);
+        append(record);
+      }
+      const reference =
+        read("file_id") ?? read("file_url") ?? read("file_uri") ?? read("fileUri") ?? read("url");
+      if (
+        typeof reference === "string" &&
+        (["file", "url"].includes(normalizedDeclared) || !!mediaDeclared || !!mimeType)
+      ) {
+        const record = /^\s*data:/i.test(reference)
+          ? inlineRecord(reference, mimeType, mediaDeclared || "document", purpose, retainBytes)
+          : referenceRecord(reference, mimeType, mediaDeclared || "document", purpose);
+        append(record);
+      }
+      for (const [key, item] of entries) {
+        if (visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) break;
+        const keyed = key
+          .toLowerCase()
+          .replace(/^input_/, "")
+          .replace(/s$/, "");
+        const childDeclared = declaredMediaKind(keyed) || mediaDeclared;
+        let childMimeType = mimeType;
+        if (!childMimeType && childDeclared && typeof declaredFormat === "string") {
+          const format = declaredFormat.toLowerCase();
+          childMimeType = canonicalMimeType(
+            childDeclared === "document" && format === "pdf"
+              ? "application/pdf"
+              : `${childDeclared}/${format}`,
+          );
+        }
+        visit(item, childDeclared, childMimeType, depth + 1);
+      }
+    } catch {
+      return;
     }
   };
   visit(value);
-  return found;
+  return { items: found, truncated };
 }
 
 function placeholder(record: MediaRecord): Record<string, unknown> {
@@ -506,17 +662,33 @@ function placeholder(record: MediaRecord): Record<string, unknown> {
 
 function sanitizedCopy(value: unknown, discovered: DiscoveredMedia[]): unknown {
   const replacements = new Map<string, unknown>();
+  const largeReplacements: Array<[string, unknown]> = [];
   for (const item of discovered) {
     if (!item.original) continue;
     if (item.record.state === "pending-upload" || item.record.state === "failed") {
-      replacements.set(item.original, placeholder(item.record));
+      const replacement = placeholder(item.record);
+      if (item.original.length > MAX_MEDIA_REPLACEMENT_KEY_CHARS) {
+        largeReplacements.push([item.original, replacement]);
+      } else {
+        replacements.set(item.original, replacement);
+      }
     } else if (typeof item.record.reference === "string") {
-      replacements.set(item.original, item.record.reference);
+      if (item.original.length > MAX_MEDIA_REPLACEMENT_KEY_CHARS) {
+        largeReplacements.push([item.original, item.record.reference]);
+      } else {
+        replacements.set(item.original, item.record.reference);
+      }
     }
   }
   const visited = new WeakMap<object, unknown>();
-  const clone = (node: any): any => {
-    if (typeof node === "string") return replacements.get(node) ?? node;
+  let visitedNodes = 0;
+  const clone = (node: any, depth = 0): any => {
+    if (typeof node === "string") {
+      const direct =
+        node.length <= MAX_MEDIA_REPLACEMENT_KEY_CHARS ? replacements.get(node) : undefined;
+      if (direct !== undefined) return direct;
+      return largeReplacements.find(([original]) => original === node)?.[1] ?? node;
+    }
     if (node instanceof Uint8Array) {
       const match = discovered.find(
         (item) =>
@@ -528,24 +700,44 @@ function sanitizedCopy(value: unknown, discovered: DiscoveredMedia[]): unknown {
         : node;
     }
     if (!node || typeof node !== "object") return node;
+    if (depth > MAX_MEDIA_TRAVERSAL_DEPTH || visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+      return REDACTED_MEDIA_STRUCTURE;
+    }
     const prior = visited.get(node);
-    if (prior) return prior;
+    if (prior) return "[CIRCULAR]";
+    visitedNodes += 1;
     if (Array.isArray(node)) {
       const result: unknown[] = [];
       visited.set(node, result);
-      node.forEach((item) => result.push(clone(item)));
+      for (const item of node) {
+        if (visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+          result.push(REDACTED_MEDIA_STRUCTURE);
+          break;
+        }
+        result.push(clone(item, depth + 1));
+      }
       return result;
     }
     const result: Record<string, unknown> = {};
     visited.set(node, result);
-    for (const [key, item] of Object.entries(node)) result[key] = clone(item);
+    try {
+      for (const [key, item] of Object.entries(node)) {
+        if (visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+          result.neatlogs_truncated = REDACTED_MEDIA_STRUCTURE;
+          break;
+        }
+        result[key] = clone(item, depth + 1);
+      }
+    } catch {
+      return REDACTED_MEDIA_STRUCTURE;
+    }
     return result;
   };
   return clone(value);
 }
 
 export function mediaReferences(value: unknown, purpose: string): MediaRecord[] {
-  return discoverMedia(value, purpose, false).map(({ record }) =>
+  return discoverMedia(value, purpose, false).items.map(({ record }) =>
     record.state === "pending-upload"
       ? {
           ...record,
@@ -558,8 +750,14 @@ export function mediaReferences(value: unknown, purpose: string): MediaRecord[] 
 
 /** Remove large inline bytes and URL credentials from a captured value. */
 export function sanitizeMediaPayload(value: unknown, purpose = "capture"): unknown {
-  const discovered = discoverMedia(value, purpose, false);
-  return sanitizedCopy(value, discovered);
+  try {
+    const discovered = discoverMedia(value, purpose, false);
+    return discovered.truncated
+      ? REDACTED_MEDIA_STRUCTURE
+      : sanitizedCopy(value, discovered.items);
+  } catch {
+    return REDACTED_MEDIA_STRUCTURE;
+  }
 }
 
 export interface CapturedMediaValue {
@@ -578,11 +776,24 @@ export function captureMediaWithIndex(
   purpose: string,
   mediaIndexOffset = 0,
 ): CapturedMediaValue {
-  const recording = typeof span.isRecording !== "function" || span.isRecording();
-  const gate = mediaCaptureAvailability.get(span as object);
+  let recording = false;
+  try {
+    recording = typeof span.isRecording !== "function" || span.isRecording();
+  } catch {
+    span.setAttribute(`${prefix}.media.capture_error`, "media_capture_failed");
+    return { value: REDACTED_MEDIA_STRUCTURE, count: 0 };
+  }
+  const spanKey = canonicalSpan(span as object);
+  const gate = mediaCaptureAvailability.get(spanKey);
   const uploadsAvailable = gate?.available ?? true;
-  const discovered = discoverMedia(value, purpose, recording && uploadsAvailable);
-  discovered.forEach((item, index) => {
+  let discovery: MediaDiscoveryResult;
+  try {
+    discovery = discoverMedia(value, purpose, recording && uploadsAvailable);
+  } catch {
+    span.setAttribute(`${prefix}.media.capture_error`, "media_capture_failed");
+    return { value: REDACTED_MEDIA_STRUCTURE, count: 0 };
+  }
+  discovery.items.forEach((item, index) => {
     const recordPrefix = `${prefix}.media.${mediaIndexOffset + index}`;
     if (item.record.state === "pending-upload") {
       if (!recording) {
@@ -599,11 +810,10 @@ export function captureMediaWithIndex(
       } else {
         const token = uploadToken(item.record);
         item.record.upload_token = token;
-        const bucket = pendingBucket(span as object);
+        const bucket = pendingBucket(spanKey);
         const duplicate = bucket.items.find(
           (candidate) =>
-            candidate.sha256 === item.record.sha256 &&
-            candidate.mimeType === item.record.mime_type,
+            candidate.sha256 === item.record.sha256 && candidate.mimeType === item.record.mime_type,
         );
         if (duplicate) {
           if (!duplicate.prefixes.includes(recordPrefix)) {
@@ -613,8 +823,7 @@ export function captureMediaWithIndex(
           item.bytes = undefined;
           delete item.record.upload_token;
           item.record.state = "failed";
-          item.record.safe_preview =
-            "upload failed: validate/pending_media_item_limit";
+          item.record.safe_preview = "upload failed: validate/pending_media_item_limit";
         } else if (
           bucket.account.owner.bytes + item.bytes.byteLength >
           DEFAULT_MAX_TYPED_MEDIA_BYTES
@@ -622,8 +831,7 @@ export function captureMediaWithIndex(
           item.bytes = undefined;
           delete item.record.upload_token;
           item.record.state = "failed";
-          item.record.safe_preview =
-            "upload failed: validate/pending_media_memory_limit";
+          item.record.safe_preview = "upload failed: validate/pending_media_memory_limit";
         } else {
           bucket.account.owner.bytes += item.bytes.byteLength;
           bucket.account.owner.items += 1;
@@ -650,7 +858,12 @@ export function captureMediaWithIndex(
       span.setAttribute(`${recordPrefix}.${key}`, field),
     );
   });
-  return { value: sanitizedCopy(value, discovered), count: discovered.length };
+  return {
+    value: discovery.truncated
+      ? REDACTED_MEDIA_STRUCTURE
+      : sanitizedCopy(value, discovery.items),
+    count: discovery.items.length,
+  };
 }
 
 /** Capture typed media metadata and return a telemetry-safe clone of the value. */
@@ -675,6 +888,86 @@ export function setMediaAttributes(
   captureMedia(span, prefix, value, purpose);
 }
 
+/** Sanitize media that reached a completed span through a generic integration. */
+export function captureMediaInSnapshot(
+  span: object,
+  snapshot: Record<string, any>,
+  uploadsAvailable: boolean,
+  unavailableReason = "telemetry_uploads_disabled",
+): void {
+  setMediaCaptureAvailability(span, uploadsAvailable, unavailableReason);
+  const spanAttributes =
+    snapshot.attributes && typeof snapshot.attributes === "object"
+      ? snapshot.attributes
+      : (snapshot.attributes = {});
+  const setter = {
+    isRecording: () => true,
+    setAttribute(name: string, value: string | number) {
+      spanAttributes[name] = value;
+    },
+  };
+  aliasMediaCaptureSpan(setter, span);
+  let mediaIndex = 0;
+
+  const sanitizeAttributes = (attributes: unknown): void => {
+    if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) return;
+    for (const [key, original] of Object.entries(attributes)) {
+      let value: unknown = original;
+      let parsedJson = false;
+      if (typeof original === "string") {
+        if (!MEDIA_PAYLOAD_SIGNAL.test(original)) continue;
+        const trimmed = original.trimStart();
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+          try {
+            value = JSON.parse(original);
+            parsedJson = true;
+          } catch {
+            if (/data\s*:\s*(?:image|audio|video|application\/pdf)/i.test(original)) {
+              (attributes as Record<string, unknown>)[key] = REDACTED_MEDIA_STRUCTURE;
+            }
+            continue;
+          }
+        }
+      }
+
+      const purpose = key.includes("output") ? "output" : "input";
+      let safeValue: unknown;
+      let count = 0;
+      const sanitizeOnly = mediaIndex >= MAX_CAPTURED_MEDIA_REFERENCES;
+      if (sanitizeOnly) {
+        safeValue = sanitizeMediaPayload(value, purpose);
+      } else {
+        const captured = captureMediaWithIndex(
+          setter,
+          "neatlogs.content",
+          value,
+          purpose,
+          mediaIndex,
+        );
+        safeValue = captured.value;
+        count = captured.count;
+      }
+      mediaIndex += count;
+      if (count === 0 && !sanitizeOnly) continue;
+      const replacement =
+        typeof original === "string" && (parsedJson || typeof safeValue !== "string")
+          ? JSON.stringify(safeValue)
+          : safeValue;
+      if (replacement === original) continue;
+      (attributes as Record<string, unknown>)[key] = replacement;
+    }
+  };
+
+  sanitizeAttributes(spanAttributes);
+  sanitizeAttributes(snapshot.resource?.attributes ?? snapshot.resource);
+  if (Array.isArray(snapshot.events)) {
+    for (const event of snapshot.events) sanitizeAttributes(event?.attributes);
+  }
+  if (Array.isArray(snapshot.links)) {
+    for (const link of snapshot.links) sanitizeAttributes(link?.attributes);
+  }
+}
+
 function safeFailure(error: unknown): { stage: string; reason: string } {
   if (!(error instanceof TelemetryUploadError)) {
     return { stage: "upload", reason: "unexpected_error" };
@@ -688,9 +981,7 @@ function safeFailure(error: unknown): { stage: string; reason: string } {
 }
 
 function safeUnavailableReason(value: string): string {
-  return /^[a-zA-Z0-9_.-]{1,64}$/.test(value)
-    ? value
-    : "upload_authority_unavailable";
+  return /^[a-zA-Z0-9_.-]{1,64}$/.test(value) ? value : "upload_authority_unavailable";
 }
 
 function rewritePendingPlaceholder(
@@ -699,8 +990,8 @@ function rewritePendingPlaceholder(
   update: MediaRecord,
 ): void {
   const matches = (value: Record<string, any>): boolean =>
-    (value.upload_token === item.token ||
-      (value.id === item.record.id && value.sha256 === item.sha256));
+    value.upload_token === item.token ||
+    (value.id === item.record.id && value.sha256 === item.sha256);
   const applyUpdate = (value: Record<string, any>): Record<string, any> => {
     const after = { ...value, ...update };
     delete after.upload_token;
@@ -708,10 +999,14 @@ function rewritePendingPlaceholder(
     return after;
   };
   const seen = new WeakSet<object>();
-  const rewrite = (value: any): any => {
+  let visitedNodes = 0;
+  const rewrite = (value: any, depth = 0): any => {
     if (typeof value === "string") {
       if (!value.includes(item.token) && !value.includes(String(item.record.id))) {
         return value;
+      }
+      if (value.length > MAX_MEDIA_REPLACEMENT_KEY_CHARS) {
+        return REDACTED_MEDIA_STRUCTURE;
       }
       const trimmed = value.trimStart();
       if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
@@ -724,13 +1019,20 @@ function rewritePendingPlaceholder(
       }
     }
     if (!value || typeof value !== "object") return value;
-    if (seen.has(value)) return value;
+    if (depth > MAX_MEDIA_TRAVERSAL_DEPTH || visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+      return REDACTED_MEDIA_STRUCTURE;
+    }
+    if (seen.has(value)) return "[CIRCULAR]";
     seen.add(value);
+    visitedNodes += 1;
     if (!Array.isArray(value) && matches(value)) return applyUpdate(value);
     let changed = false;
     const output = Array.isArray(value) ? [...value] : { ...value };
     for (const [key, child] of Object.entries(value)) {
-      const rewritten = rewrite(child);
+      if (visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+        return REDACTED_MEDIA_STRUCTURE;
+      }
+      const rewritten = rewrite(child, depth + 1);
       if (rewritten !== child) {
         (output as Record<string, any>)[key] = rewritten;
         changed = true;
@@ -741,8 +1043,7 @@ function rewritePendingPlaceholder(
         const tokenKey = `${prefix}.upload_token`;
         const matchesFlat =
           value[tokenKey] === item.token ||
-          (value[`${prefix}.id`] === item.record.id &&
-            value[`${prefix}.sha256`] === item.sha256);
+          (value[`${prefix}.id`] === item.record.id && value[`${prefix}.sha256`] === item.sha256);
         if (!matchesFlat) continue;
         delete (output as Record<string, any>)[tokenKey];
         for (const [field, fieldValue] of Object.entries(update)) {
@@ -764,8 +1065,8 @@ function rewritePendingPlaceholder(
     const tokenKey = `${prefix}.upload_token`;
     const matchesFlat =
       attributes[tokenKey] === item.token ||
-        (attributes[`${prefix}.id`] === item.record.id &&
-          attributes[`${prefix}.sha256`] === item.sha256);
+      (attributes[`${prefix}.id`] === item.record.id &&
+        attributes[`${prefix}.sha256`] === item.sha256);
     if (!matchesFlat) continue;
     delete attributes[tokenKey];
     for (const [field, fieldValue] of Object.entries(update)) {
@@ -778,7 +1079,8 @@ function rewritePendingPlaceholder(
 function mediaUploadTokens(value: unknown, requirePendingState: boolean): Set<string> {
   const tokens = new Set<string>();
   const seen = new WeakSet<object>();
-  const visit = (node: any): void => {
+  let visitedNodes = 0;
+  const visit = (node: any, depth = 0): void => {
     if (typeof node === "string") {
       if (!node.includes("nl_pending_media_")) return;
       if (!requirePendingState && /^nl_pending_media_[0-9a-f]{24}$/.test(node)) {
@@ -787,14 +1089,18 @@ function mediaUploadTokens(value: unknown, requirePendingState: boolean): Set<st
       const trimmed = node.trimStart();
       if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return;
       try {
-        visit(JSON.parse(node));
+        visit(JSON.parse(node), depth + 1);
       } catch {
         // Invalid JSON cannot authorize an out-of-band upload.
       }
       return;
     }
     if (!node || typeof node !== "object" || seen.has(node)) return;
+    if (depth > MAX_MEDIA_TRAVERSAL_DEPTH || visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+      return;
+    }
     seen.add(node);
+    visitedNodes += 1;
     if (
       !Array.isArray(node) &&
       (!requirePendingState || node.state === "pending-upload") &&
@@ -811,7 +1117,14 @@ function mediaUploadTokens(value: unknown, requirePendingState: boolean): Set<st
         }
       }
     }
-    Object.values(node).forEach(visit);
+    try {
+      for (const child of Object.values(node)) {
+        if (visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) break;
+        visit(child, depth + 1);
+      }
+    } catch {
+      return;
+    }
   };
   visit(value);
   return tokens;
@@ -819,13 +1132,17 @@ function mediaUploadTokens(value: unknown, requirePendingState: boolean): Set<st
 
 function scrubUploadTokens(value: unknown): unknown {
   const seen = new WeakMap<object, unknown>();
-  const rewrite = (node: any): any => {
+  let visitedNodes = 0;
+  const rewrite = (node: any, depth = 0): any => {
     if (typeof node === "string") {
       if (!node.includes("nl_pending_media_")) return node;
       const trimmed = node.trimStart();
       if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
         try {
-          return JSON.stringify(rewrite(JSON.parse(node)));
+          if (node.length > MAX_MEDIA_REPLACEMENT_KEY_CHARS) {
+            return REDACTED_MEDIA_STRUCTURE;
+          }
+          return JSON.stringify(rewrite(JSON.parse(node), depth + 1));
         } catch {
           // Fall through to remove any opaque token embedded in plain text.
         }
@@ -833,13 +1150,24 @@ function scrubUploadTokens(value: unknown): unknown {
       return node.replace(/nl_pending_media_[0-9a-f]{24}/g, "[REDACTED_UPLOAD_TOKEN]");
     }
     if (!node || typeof node !== "object") return node;
+    if (depth > MAX_MEDIA_TRAVERSAL_DEPTH || visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+      return REDACTED_MEDIA_STRUCTURE;
+    }
     const prior = seen.get(node);
-    if (prior) return prior;
+    if (prior) return "[CIRCULAR]";
+    visitedNodes += 1;
     const output: any = Array.isArray(node) ? [] : {};
     seen.set(node, output);
-    for (const [key, child] of Object.entries(node)) {
-      if (key === "upload_token" || key.endsWith(".upload_token")) continue;
-      output[key] = rewrite(child);
+    try {
+      for (const [key, child] of Object.entries(node)) {
+        if (visitedNodes >= MAX_MEDIA_TRAVERSAL_NODES) {
+          return REDACTED_MEDIA_STRUCTURE;
+        }
+        if (key === "upload_token" || key.endsWith(".upload_token")) continue;
+        output[key] = rewrite(child, depth + 1);
+      }
+    } catch {
+      return REDACTED_MEDIA_STRUCTURE;
     }
     return output;
   };
@@ -853,11 +1181,7 @@ async function uploadWithinDeadline(
 ) {
   const remaining = deadlineUnixMs - Date.now();
   if (remaining <= 0) {
-    throw new TelemetryUploadError(
-      "prepare",
-      "media_export_deadline_exceeded",
-      true,
-    );
+    throw new TelemetryUploadError("prepare", "media_export_deadline_exceeded", true);
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -865,13 +1189,7 @@ async function uploadWithinDeadline(
       authority.upload(payload, { deadlineUnixMs }),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
-          () => reject(
-            new TelemetryUploadError(
-              "prepare",
-              "media_export_deadline_exceeded",
-              true,
-            ),
-          ),
+          () => reject(new TelemetryUploadError("prepare", "media_export_deadline_exceeded", true)),
           remaining,
         );
         timer.unref?.();
@@ -902,10 +1220,7 @@ export async function resolvePendingMediaUploads(
           attributes[`${prefix}.upload_token`] === item.token &&
           attributes[`${prefix}.state`] === "pending-upload",
       );
-      const retainedCount = Math.max(
-        retained.length,
-        retainedTokens.has(item.token) ? 1 : 0,
-      );
+      const retainedCount = Math.max(retained.length, retainedTokens.has(item.token) ? 1 : 0);
       if (!retainedTokens.has(item.token)) {
         const tokenWasRetainedInInvalidState = presentTokens.has(item.token);
         if (tokenWasRetainedInInvalidState) {
@@ -934,10 +1249,7 @@ export async function resolvePendingMediaUploads(
         });
         continue;
       }
-      if (
-        item.byteLength >
-        Math.min(authority.maxPayloadBytes, DEFAULT_MAX_TYPED_MEDIA_BYTES)
-      ) {
+      if (item.byteLength > Math.min(authority.maxPayloadBytes, DEFAULT_MAX_TYPED_MEDIA_BYTES)) {
         failed = true;
         diagnostics?.recordTypedMedia("failures", retainedCount);
         diagnostics?.recordUploadFailure("validate", "payload_too_large");
