@@ -16,7 +16,7 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
-import { captureMedia } from './core/media.js';
+import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -187,7 +187,7 @@ function tracedMessagesStream(original: (...args: any[]) => any) {
 // ---------------------------------------------------------------------------
 
 function wrapStreamIterable(stream: any, span: Span): any {
-  const events: any[] = [];
+  const accumulated = newAnthropicStreamAccumulator();
   const originalAsyncIterator = stream[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
@@ -206,10 +206,10 @@ function wrapStreamIterable(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamEvents(span, events);
+            finalizeStreamEvents(span, accumulated);
             return result;
           }
-          events.push(result.value);
+          addStreamEvent(span, accumulated, result.value);
           return result;
         } catch (err) {
           recordError(span, err);
@@ -217,7 +217,7 @@ function wrapStreamIterable(stream: any, span: Span): any {
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
-        finalizeStreamEvents(span, events);
+        finalizeStreamEvents(span, accumulated);
         return iterator.return?.(value) ?? { done: true, value: undefined };
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
@@ -276,70 +276,109 @@ function wrapMessageStream(messageStream: any, span: Span): any {
 // Stream event finalization
 // ---------------------------------------------------------------------------
 
-function finalizeStreamEvents(span: Span, events: any[]): void {
-  const textParts: string[] = [];
-  const thinkingParts: string[] = [];
-  const toolCalls: Array<{ id: string; name: string; input: string }> = [];
-  let currentToolInput = '';
-  let currentToolId = '';
-  let currentToolName = '';
-  let usage: any = null;
-  let model = '';
-  let stopReason = '';
+interface AnthropicStreamAccumulator {
+  textParts: string[];
+  thinkingParts: string[];
+  toolCalls: Array<{ id: string; name: string; input: string }>;
+  currentToolInput: string;
+  currentToolId: string;
+  currentToolName: string;
+  usage: any;
+  model: string;
+  stopReason: string;
+  mediaCount: number;
+}
 
-  for (const event of events) {
-    const type = event?.type ?? '';
+function newAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
+  return {
+    textParts: [],
+    thinkingParts: [],
+    toolCalls: [],
+    currentToolInput: '',
+    currentToolId: '',
+    currentToolName: '',
+    usage: null,
+    model: '',
+    stopReason: '',
+    mediaCount: 0,
+  };
+}
 
-    if (type === 'content_block_delta') {
-      const delta = event?.delta;
-      if (delta?.type === 'text_delta' && delta.text) textParts.push(delta.text);
-      else if (delta?.type === 'thinking_delta' && delta.thinking) thinkingParts.push(delta.thinking);
-      else if (delta?.type === 'input_json_delta' && delta.partial_json) currentToolInput += delta.partial_json;
-    } else if (type === 'content_block_start') {
-      const block = event?.content_block;
-      if (block?.type === 'tool_use') {
-        currentToolId = block.id ?? '';
-        currentToolName = block.name ?? '';
-        currentToolInput = '';
-      }
-    } else if (type === 'content_block_stop') {
-      if (currentToolName) {
-        toolCalls.push({ id: currentToolId, name: currentToolName, input: currentToolInput });
-        currentToolId = '';
-        currentToolName = '';
-        currentToolInput = '';
-      }
-    } else if (type === 'message_start') {
-      const msg = event?.message;
-      if (msg?.model) model = msg.model;
-      if (msg?.usage) usage = msg.usage;
-    } else if (type === 'message_delta') {
-      const delta = event?.delta;
-      if (delta?.stop_reason) stopReason = delta.stop_reason;
-      if (event?.usage) usage = { ...(usage ?? {}), ...event.usage };
+function addStreamEvent(
+  span: Span,
+  accumulated: AnthropicStreamAccumulator,
+  event: any,
+): void {
+  const captured = captureMediaWithIndex(
+    span,
+    'neatlogs.llm.output_messages.0',
+    event,
+    'output',
+    accumulated.mediaCount,
+  );
+  accumulated.mediaCount += captured.count;
+  const type = event?.type ?? '';
+  if (type === 'content_block_delta') {
+    const delta = event?.delta;
+    if (delta?.type === 'text_delta' && delta.text) accumulated.textParts.push(delta.text);
+    else if (delta?.type === 'thinking_delta' && delta.thinking) {
+      accumulated.thinkingParts.push(delta.thinking);
+    } else if (delta?.type === 'input_json_delta' && delta.partial_json) {
+      accumulated.currentToolInput += delta.partial_json;
+    }
+  } else if (type === 'content_block_start') {
+    const block = event?.content_block;
+    if (block?.type === 'tool_use') {
+      accumulated.currentToolId = block.id ?? '';
+      accumulated.currentToolName = block.name ?? '';
+      accumulated.currentToolInput = '';
+    }
+  } else if (type === 'content_block_stop') {
+    if (accumulated.currentToolName) {
+      accumulated.toolCalls.push({
+        id: accumulated.currentToolId,
+        name: accumulated.currentToolName,
+        input: accumulated.currentToolInput,
+      });
+      accumulated.currentToolId = '';
+      accumulated.currentToolName = '';
+      accumulated.currentToolInput = '';
+    }
+  } else if (type === 'message_start') {
+    const msg = event?.message;
+    if (msg?.model) accumulated.model = msg.model;
+    if (msg?.usage) accumulated.usage = msg.usage;
+  } else if (type === 'message_delta') {
+    const delta = event?.delta;
+    if (delta?.stop_reason) accumulated.stopReason = delta.stop_reason;
+    if (event?.usage) {
+      accumulated.usage = { ...(accumulated.usage ?? {}), ...event.usage };
     }
   }
+}
 
-  const fullText = textParts.join('');
+function finalizeStreamEvents(span: Span, accumulated: AnthropicStreamAccumulator): void {
+
+  const fullText = accumulated.textParts.join('');
   if (fullText) {
     span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
     span.setAttribute('neatlogs.llm.output_messages.0.content', fullText);
   }
 
-  const thinking = thinkingParts.join('');
+  const thinking = accumulated.thinkingParts.join('');
   if (thinking) {
     span.setAttribute('neatlogs.llm.output_messages.0.thinking', thinking);
   }
 
-  for (let j = 0; j < toolCalls.length; j++) {
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.id`, toolCalls[j].id);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.name`, toolCalls[j].name);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.arguments`, toolCalls[j].input);
+  for (let j = 0; j < accumulated.toolCalls.length; j++) {
+    span.setAttribute(`neatlogs.llm.tool_calls.${j}.id`, accumulated.toolCalls[j].id);
+    span.setAttribute(`neatlogs.llm.tool_calls.${j}.name`, accumulated.toolCalls[j].name);
+    span.setAttribute(`neatlogs.llm.tool_calls.${j}.arguments`, accumulated.toolCalls[j].input);
   }
 
-  if (model) span.setAttribute('neatlogs.llm.model_name', model);
-  if (stopReason) span.setAttribute('neatlogs.llm.stop_reason', stopReason);
-  setUsageAttrs(span, usage);
+  if (accumulated.model) span.setAttribute('neatlogs.llm.model_name', accumulated.model);
+  if (accumulated.stopReason) span.setAttribute('neatlogs.llm.stop_reason', accumulated.stopReason);
+  setUsageAttrs(span, accumulated.usage);
 
   span.setStatus({ code: SpanStatusCode.OK });
   span.end();

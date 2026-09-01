@@ -105,12 +105,19 @@ interface WireReference {
 
 interface PreparedUpload {
   uploadId: string;
+  state: "prepared";
   uploadUrl: string;
   uploadHeaders: Record<string, string>;
   reference: WireReference;
 }
 
-type PrepareResult = PreparedUpload | UploadReceipt;
+interface ResumableUpload {
+  uploadId: string;
+  state: "uploaded" | "validating";
+  reference: WireReference;
+}
+
+type PrepareResult = PreparedUpload | ResumableUpload | UploadReceipt;
 
 interface WireDiagnostic {
   stage: string;
@@ -476,8 +483,10 @@ export class HttpUploadAuthority implements UploadAuthority {
       throw new TelemetryUploadError("prepare", "deadline_exceeded", true);
     }
     const prepared = await this.prepare(payload, deadline);
-    if (!("uploadUrl" in prepared)) return prepared;
-    await this.put(prepared, payload, deadline);
+    if (prepared.state === "ready") return prepared;
+    if (prepared.state === "prepared") {
+      await this.put(prepared, payload, deadline);
+    }
     return this.complete(prepared, payload, deadline);
   }
 
@@ -560,28 +569,33 @@ export class HttpUploadAuthority implements UploadAuthority {
         },
       };
     }
-    if (["uploaded", "validating", "rejected"].includes(String(data.state))) {
-      validateReference(
+    if (data.state === "uploaded" || data.state === "validating") {
+      if (response.status !== 200 && response.status !== 202) {
+        throw new TelemetryUploadError("prepare", "invalid_response", false);
+      }
+      const reference = validateReference(
         data.reference,
         payload,
         uploadId,
         String(data.state),
         "prepare",
       );
+      return { uploadId, state: data.state, reference };
+    }
+    if (data.state === "rejected") {
+      validateReference(data.reference, payload, uploadId, "rejected", "prepare");
+      throw new TelemetryUploadError(
+        "prepare",
+        diagnostic?.reasonCode ?? "upload_rejected",
+        false,
+      );
     }
     if (response.status !== 201 || data.state !== "prepared" || !isObject(data.upload)) {
-      const reason =
-        diagnostic?.reasonCode ??
-        (data.state === "uploaded" || data.state === "validating"
-          ? "validation_pending"
-          : data.state === "rejected"
-            ? "upload_rejected"
-            : "invalid_response");
-      const retryable =
-        data.state === "uploaded" ||
-        data.state === "validating" ||
-        diagnostic?.retryable === true;
-      throw new TelemetryUploadError("prepare", reason, retryable);
+      throw new TelemetryUploadError(
+        "prepare",
+        diagnostic?.reasonCode ?? "invalid_response",
+        diagnostic?.retryable ?? false,
+      );
     }
     const expiresAt = requiredString(data.expires_at, "expires_at", "prepare");
     const expires = Date.parse(expiresAt);
@@ -623,7 +637,7 @@ export class HttpUploadAuthority implements UploadAuthority {
       "prepared",
       "prepare",
     );
-    return { uploadId, uploadUrl, uploadHeaders, reference };
+    return { uploadId, state: "prepared", uploadUrl, uploadHeaders, reference };
   }
 
   private async put(
@@ -651,7 +665,7 @@ export class HttpUploadAuthority implements UploadAuthority {
   }
 
   private async complete(
-    prepared: PreparedUpload,
+    prepared: PreparedUpload | ResumableUpload,
     payload: UploadPayload,
     deadline: number,
   ): Promise<UploadReceipt> {
@@ -672,7 +686,7 @@ export class HttpUploadAuthority implements UploadAuthority {
   }
 
   private async completeAttempt(
-    prepared: PreparedUpload,
+    prepared: PreparedUpload | ResumableUpload,
     payload: UploadPayload,
     deadline: number,
   ): Promise<UploadReceipt> {
@@ -775,7 +789,9 @@ export class HttpUploadAuthority implements UploadAuthority {
           try {
             const errorBody = await boundedJson(response, deadline, stage);
             reason = responseReason(errorBody) ?? reason;
-            if (isObject(errorBody) && errorBody.retryable === true) retryable = true;
+            if (isObject(errorBody) && typeof errorBody.retryable === "boolean") {
+              retryable = errorBody.retryable;
+            }
           } catch {
             // HTTP status remains authoritative when an error body is malformed.
           }

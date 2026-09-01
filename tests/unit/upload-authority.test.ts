@@ -27,7 +27,10 @@ function payload(): UploadPayload {
   };
 }
 
-function wireReference(item: UploadPayload, state: "prepared" | "ready") {
+function wireReference(
+  item: UploadPayload,
+  state: "prepared" | "uploaded" | "validating" | "rejected" | "ready",
+) {
   return {
     id: referenceId,
     purpose: item.purpose,
@@ -305,21 +308,30 @@ describe("HttpUploadAuthority", () => {
   });
 
   it.each(["uploaded", "validating"])(
-    "treats a prepare response in %s as retryable but not successful",
+    "resumes a prepare response in %s through complete without another PUT",
     async (state) => {
       const item = payload();
-      const fetch = vi.fn().mockResolvedValue(
-        json(state === "validating" ? 202 : 200, {
-          upload_id: uploadId,
-          state,
-          reference: { ...wireReference(item, "ready"), state },
-          diagnostic: {
-            stage: "validation",
-            reason_code: "validation_pending",
-            retryable: true,
-          },
-        }),
-      );
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          json(state === "validating" ? 202 : 200, {
+            upload_id: uploadId,
+            state,
+            reference: wireReference(item, state as "uploaded" | "validating"),
+            diagnostic: {
+              stage: "validation",
+              reason_code: "validation_pending",
+              retryable: true,
+            },
+          }),
+        )
+        .mockResolvedValueOnce(
+          json(200, {
+            upload_id: uploadId,
+            state: "ready",
+            reference: wireReference(item, "ready"),
+          }),
+        );
       const authority = new HttpUploadAuthority({
         baseUrl: "https://ingest.example.test",
         apiKey: "key",
@@ -327,16 +339,16 @@ describe("HttpUploadAuthority", () => {
         maxAttempts: 1,
       });
 
-      await expect(authority.upload(item)).rejects.toMatchObject({
-        stage: "prepare",
-        reasonCode: "validation_pending",
-        retryable: true,
-      });
-      expect(fetch).toHaveBeenCalledTimes(1);
+      await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(String(fetch.mock.calls[1][0])).toBe(
+        `https://ingest.example.test/v1/telemetry/uploads/${uploadId}/complete`,
+      );
+      expect(fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
     },
   );
 
-  it("retries an in-progress prepare and short-circuits when it becomes ready", async () => {
+  it("retries complete, not prepare, while a resumed upload is validating", async () => {
     const item = payload();
     const fetch = vi
       .fn()
@@ -345,6 +357,18 @@ describe("HttpUploadAuthority", () => {
           upload_id: uploadId,
           state: "validating",
           reference: { ...wireReference(item, "ready"), state: "validating" },
+          diagnostic: {
+            stage: "validation",
+            reason_code: "validation_pending",
+            retryable: true,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        json(202, {
+          upload_id: uploadId,
+          state: "validating",
+          reference: wireReference(item, "validating"),
           diagnostic: {
             stage: "validation",
             reason_code: "validation_pending",
@@ -368,8 +392,10 @@ describe("HttpUploadAuthority", () => {
     });
 
     await expect(authority.upload(item)).resolves.toMatchObject({ state: "ready" });
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
     expect(fetch.mock.calls.every(([, init]) => init?.method === "POST")).toBe(true);
+    expect(String(fetch.mock.calls[1][0])).toContain(`/${uploadId}/complete`);
+    expect(String(fetch.mock.calls[2][0])).toContain(`/${uploadId}/complete`);
   });
 
   it("rejects validating completion until the backend returns ready", async () => {
@@ -503,6 +529,28 @@ describe("HttpUploadAuthority", () => {
     await expect(authority.upload(payload())).rejects.toMatchObject({
       stage: "prepare",
       reasonCode: "IDEMPOTENCY_KEY_COLLISION",
+      retryable: false,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors an explicit non-retryable backend diagnostic on a retryable status", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      json(503, {
+        reason_code: "DO_NOT_RETRY",
+        retryable: false,
+      }),
+    );
+    const authority = new HttpUploadAuthority({
+      baseUrl: "https://ingest.example.test",
+      apiKey: "key",
+      fetch: fetch as typeof globalThis.fetch,
+      maxAttempts: 2,
+    });
+
+    await expect(authority.upload(payload())).rejects.toMatchObject({
+      stage: "prepare",
+      reasonCode: "DO_NOT_RETRY",
       retryable: false,
     });
     expect(fetch).toHaveBeenCalledTimes(1);

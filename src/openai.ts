@@ -518,7 +518,7 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
   const originalAsyncIterator = stream[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
-    accumulator.addResponse(stream);
+    accumulator.addResponse(stream, span);
     accumulator.finish(span);
     return stream;
   }
@@ -573,7 +573,7 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
 
 function finalizeChatResponse(span: Span, response: any): void {
   const accumulator = new ChoiceAccumulator();
-  accumulator.addResponse(response);
+  accumulator.addResponse(response, span);
   accumulator.finish(span);
 }
 

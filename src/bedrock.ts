@@ -18,7 +18,7 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
-import { captureMedia } from './core/media.js';
+import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -273,6 +273,7 @@ function wrapConverseStream(response: any, span: Span): any {
   const toolCalls: Record<number, { id: string; name: string; arguments: string }> = {};
   let finishReason = '';
   let usage: any = null;
+  let mediaCount = 0;
 
   const wrappedStream = {
     [Symbol.asyncIterator]() {
@@ -286,6 +287,14 @@ function wrapConverseStream(response: any, span: Span): any {
               return result;
             }
             const ev = result.value;
+            const captured = captureMediaWithIndex(
+              span,
+              'neatlogs.llm.output_messages.0',
+              ev,
+              'output',
+              mediaCount,
+            );
+            mediaCount += captured.count;
             const delta = ev?.contentBlockDelta?.delta;
             if (delta?.text) textParts.push(delta.text);
             if (delta?.toolUse?.input) {

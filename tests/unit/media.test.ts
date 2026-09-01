@@ -17,6 +17,7 @@ import {
   discardPendingMediaOwner,
   mediaReferences,
   resolvePendingMediaUploads,
+  setMediaCaptureAvailability,
   setMediaAttributes,
 } from "../../src/core/media.js";
 import { runWithClient } from "../../src/core/active-client.js";
@@ -362,6 +363,41 @@ describe("typed media capture", () => {
     expect(sink.batches[0][0].attributes).toEqual({});
   });
 
+  it("fails closed and scrubs the token when a mask changes pending media state", async () => {
+    const attributes: Record<string, string | number> = {};
+    const span = {
+      setAttribute(name: string, value: string | number) {
+        attributes[name] = value;
+      },
+    };
+    const raw = Buffer.alloc(120_000, 17);
+    captureMedia(
+      span,
+      "media",
+      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      "input",
+    );
+    attributes["media.media.0.state"] = "available";
+    let uploadCount = 0;
+    const authority: UploadAuthority = {
+      available: true,
+      unavailableReason: "",
+      maxPayloadBytes: 1024 * 1024,
+      async upload() {
+        uploadCount += 1;
+        throw new Error("must not upload an invalid masked state");
+      },
+    };
+
+    await expect(resolvePendingMediaUploads(span, attributes, authority)).resolves.toBe(false);
+    expect(uploadCount).toBe(0);
+    expect(attributes["media.media.0.state"]).toBe("failed");
+    expect(attributes["media.media.0.safe_preview"]).toBe(
+      "upload failed: validate/masked_pending_state",
+    );
+    expect(JSON.stringify(attributes)).not.toContain("nl_pending_media_");
+  });
+
   it("reports a failed media upload through the exporter callback", async () => {
     const raw = Buffer.alloc(120_000, 10);
     const provider = new BasicTracerProvider();
@@ -430,6 +466,42 @@ describe("typed media capture", () => {
     });
     expect(JSON.stringify(safe)).not.toContain(raw.toString("base64").slice(0, 100));
     expect(JSON.stringify(safe)).not.toContain("upload_token");
+  });
+
+  it("does not stage bytes when the owning pipeline has uploads disabled", async () => {
+    const attributes: Record<string, string | number> = {};
+    const span = {
+      isRecording: () => true,
+      setAttribute(name: string, value: string | number) {
+        attributes[name] = value;
+      },
+    };
+    setMediaCaptureAvailability(span, false, "telemetry_uploads_disabled");
+    const raw = Buffer.alloc(120_000, 18);
+    const safe = captureMedia(
+      span,
+      "media",
+      [{ type: "image_url", image_url: { url: `data:image/png;base64,${raw.toString("base64")}` } }],
+      "input",
+    );
+
+    expect(attributes).toMatchObject({
+      "media.media.0.state": "failed",
+      "media.media.0.safe_preview":
+        "upload unavailable: telemetry_uploads_disabled",
+    });
+    expect(JSON.stringify(attributes)).not.toContain("upload_token");
+    expect(JSON.stringify(safe)).not.toContain(raw.toString("base64").slice(0, 100));
+    await expect(
+      resolvePendingMediaUploads(span, attributes, {
+        available: true,
+        unavailableReason: "",
+        maxPayloadBytes: 1024 * 1024,
+        async upload() {
+          throw new Error("disabled capture must not create pending work");
+        },
+      }),
+    ).resolves.toBe(true);
   });
 
   it("bounds staged media by item count and releases the quota on discard", () => {

@@ -13,6 +13,7 @@ import { wrapBedrock, traceTool as traceToolBedrock } from '../../src/bedrock.js
 import { wrapClaudeAgentSDK } from '../../src/claude-agent-sdk.js';
 import { wrapOpenRouterAgent } from '../../src/openrouter-agent.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
+import { discardPendingMedia } from '../../src/core/media.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
@@ -192,6 +193,53 @@ describe('wrapGoogleGenAI', () => {
     expect(attr(spans[0], 'neatlogs.llm.provider')).toBe('google');
     expect(attr(spans[0], 'neatlogs.llm.input_messages.0.media.0.mime_type')).toBe('image/png');
   });
+
+  it.each([
+    ['google', wrapGoogleGenAI],
+    ['vertex_ai', wrapVertexAI],
+  ] as const)(
+    'captures %s streamed typed media without retaining provider chunks',
+    async (expectedProvider, wrapProvider) => {
+      const raw = Buffer.alloc(120_000, expectedProvider === 'google' ? 31 : 32);
+      const stream = (async function* () {
+        yield {
+          candidates: [{
+            content: {
+              parts: [{
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: raw.toString('base64'),
+                },
+              }],
+            },
+          }],
+        };
+        yield {
+          candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+        };
+      })();
+      const wrapped = wrapProvider({
+        models: { generateContentStream: async () => stream },
+      } as any);
+
+      const response = await (wrapped as any).models.generateContentStream({
+        model: 'gemini-test',
+        contents: 'hello',
+      });
+      for await (const _chunk of response) {
+        // Consume the provider stream to finalization.
+      }
+
+      const span = getSpans()[0];
+      expect(attr(span, 'neatlogs.llm.provider')).toBe(expectedProvider);
+      expect(attr(span, 'neatlogs.llm.output_messages.0.media.0.state')).toBe(
+        'pending-upload',
+      );
+      expect(attr(span, 'neatlogs.llm.output_messages.0.content')).toBe('done');
+      expect(JSON.stringify(span.attributes)).not.toContain(raw.toString('base64').slice(0, 100));
+      discardPendingMedia(span as object);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

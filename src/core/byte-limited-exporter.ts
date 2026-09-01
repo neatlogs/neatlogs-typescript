@@ -14,6 +14,7 @@ import {
 } from "./upload-authority.js";
 
 export const DEFAULT_MAX_EXPORT_BYTES = 4 * 1024 * 1024;
+export const DEFAULT_OVERFLOW_EXPORT_DEADLINE_MS = 15_000;
 
 const logger = getLogger();
 
@@ -28,9 +29,13 @@ export class ByteLimitedSpanExporter implements SpanExporter {
     private readonly maxExportBytes = DEFAULT_MAX_EXPORT_BYTES,
     private readonly diagnostics?: DeliveryDiagnostics,
     private readonly uploadAuthority: UploadAuthority = new DisabledUploadAuthority(),
+    private readonly overflowExportDeadlineMs = DEFAULT_OVERFLOW_EXPORT_DEADLINE_MS,
   ) {
     if (!Number.isSafeInteger(maxExportBytes) || maxExportBytes <= 0) {
       throw new RangeError("maxExportBytes must be a positive safe integer");
+    }
+    if (!Number.isFinite(overflowExportDeadlineMs) || overflowExportDeadlineMs <= 0) {
+      throw new RangeError("overflowExportDeadlineMs must be positive");
     }
     diagnostics?.configureUploadAuthority(
       uploadAuthority.available,
@@ -49,6 +54,7 @@ export class ByteLimitedSpanExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
+    const deadlineUnixMs = Date.now() + this.overflowExportDeadlineMs;
     let actions: ExportAction[];
     try {
       actions = this.actions(spans);
@@ -60,7 +66,7 @@ export class ByteLimitedSpanExporter implements SpanExporter {
       });
       return;
     }
-    void this.exportSequentially(actions).then(resultCallback, (error) => {
+    void this.exportSequentially(actions, deadlineUnixMs).then(resultCallback, (error) => {
       resultCallback({
         code: ExportResultCode.FAILED,
         error: error instanceof Error ? error : new Error(String(error)),
@@ -98,14 +104,15 @@ export class ByteLimitedSpanExporter implements SpanExporter {
     return actions;
   }
 
-  private async exportSequentially(actions: ExportAction[]): Promise<ExportResult> {
+  private async exportSequentially(
+    actions: ExportAction[],
+    deadlineUnixMs: number,
+  ): Promise<ExportResult> {
     let overflowFailed = false;
     for (let index = 0; index < actions.length; index += 1) {
       const action = actions[index];
       if (action.type === "overflow") {
-        const success = await this.exportOverflow(
-          ByteLimitedSpanExporter.encoded(action.span),
-        );
+        const success = await this.exportOverflow(action.span, deadlineUnixMs);
         if (!success) overflowFailed = true;
         continue;
       }
@@ -131,7 +138,14 @@ export class ByteLimitedSpanExporter implements SpanExporter {
     };
   }
 
-  private async exportOverflow(content: Uint8Array): Promise<boolean> {
+  private async exportOverflow(
+    span: ReadableSpan,
+    deadlineUnixMs: number,
+  ): Promise<boolean> {
+    if (deadlineUnixMs <= Date.now()) {
+      this.recordOverflowFailure("prepare", "overflow_export_deadline_exceeded");
+      return false;
+    }
     if (!this.uploadAuthority.available) {
       const unavailableReason = /^[a-zA-Z0-9_.-]{1,64}$/.test(
         this.uploadAuthority.unavailableReason,
@@ -143,8 +157,13 @@ export class ByteLimitedSpanExporter implements SpanExporter {
       this.diagnostics?.recordExportFailure("span", 1);
       this.diagnostics?.recordUploadFailure("prepare", unavailableReason);
       logger.error(
-        `oversized span rejected: bytes=${content.byteLength} limit=${this.maxExportBytes} reason=${unavailableReason}`,
+        `oversized span rejected: limit=${this.maxExportBytes} reason=${unavailableReason}`,
       );
+      return false;
+    }
+    const content = ByteLimitedSpanExporter.encoded(span);
+    if (deadlineUnixMs <= Date.now()) {
+      this.recordOverflowFailure("prepare", "overflow_export_deadline_exceeded");
       return false;
     }
     const uploadLimit = Math.min(
@@ -161,6 +180,10 @@ export class ByteLimitedSpanExporter implements SpanExporter {
       return false;
     }
     const sha256 = createHash("sha256").update(content).digest("hex");
+    if (deadlineUnixMs <= Date.now()) {
+      this.recordOverflowFailure("prepare", "overflow_export_deadline_exceeded");
+      return false;
+    }
     const payload: UploadPayload = {
       content,
       purpose: "otlp_overflow",
@@ -172,7 +195,10 @@ export class ByteLimitedSpanExporter implements SpanExporter {
       payloadSchema: "otlp.traces.v1",
     };
     try {
-      assertReadyUploadReceipt(await this.uploadAuthority.upload(payload), payload);
+      assertReadyUploadReceipt(
+        await this.uploadWithinDeadline(payload, deadlineUnixMs),
+        payload,
+      );
       this.diagnostics?.recordOverflow("span", "uploads");
       return true;
     } catch (error) {
@@ -188,6 +214,49 @@ export class ByteLimitedSpanExporter implements SpanExporter {
       logger.error(`oversized span upload failed: ${stage}/${reason}`);
       return false;
     }
+  }
+
+  private async uploadWithinDeadline(
+    payload: UploadPayload,
+    deadlineUnixMs: number,
+  ) {
+    const remaining = deadlineUnixMs - Date.now();
+    if (remaining <= 0) {
+      throw new TelemetryUploadError(
+        "prepare",
+        "overflow_export_deadline_exceeded",
+        true,
+      );
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.uploadAuthority.upload(payload, { deadlineUnixMs }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new TelemetryUploadError(
+                  "prepare",
+                  "overflow_export_deadline_exceeded",
+                  true,
+                ),
+              ),
+            remaining,
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private recordOverflowFailure(stage: string, reason: string): void {
+    this.diagnostics?.recordOverflow("span", "failures");
+    this.diagnostics?.recordExportFailure("span", 1);
+    this.diagnostics?.recordUploadFailure(stage, reason);
+    logger.error(`oversized span upload failed: ${stage}/${reason}`);
   }
 
   private recordUnsent(actions: ExportAction[], failedIndex: number): void {

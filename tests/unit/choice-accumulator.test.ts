@@ -3,6 +3,7 @@ import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-tr
 import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
 import { describe, expect, it } from 'vitest';
 import { ChoiceAccumulator } from '../../src/core/choice-accumulator.js';
+import { discardPendingMedia } from '../../src/core/media.js';
 
 describe('ChoiceAccumulator', () => {
   it('preserves multi-choice content and interleaved tool fragments', async () => {
@@ -117,6 +118,39 @@ describe('ChoiceAccumulator', () => {
     const attributes = sink.getFinishedSpans()[0].attributes;
     expect(attributes['neatlogs.llm.output_messages.0.thinking']).toBe('private chain');
     expect(attributes['neatlogs.llm.output_messages.0.reasoning']).toBeUndefined();
+  });
+
+  it('stages streamed media immediately with stable indexes and retains no raw chunk values', async () => {
+    const sink = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider();
+    provider.addSpanProcessor(new SimpleSpanProcessor(sink));
+    const span = provider.getTracer('choice-test').startSpan('llm', undefined, ROOT_CONTEXT);
+    const accumulator = new ChoiceAccumulator();
+    const first = Buffer.alloc(120_000, 21).toString('base64');
+    const second = Buffer.alloc(120_000, 22).toString('base64');
+
+    accumulator.addChunk(span, {
+      choices: [{ index: 0, delta: { content: [{ type: 'image', data: first, mime_type: 'image/png' }] } }],
+    });
+    expect((span as any).attributes['neatlogs.llm.output_messages.0.media.0.state']).toBe(
+      'pending-upload',
+    );
+    expect((accumulator as any).choices.get(0)).not.toHaveProperty('mediaValues');
+
+    accumulator.addChunk(span, {
+      choices: [{ index: 0, delta: { content: [{ type: 'image', data: second, mime_type: 'image/png' }] } }],
+    });
+    expect((span as any).attributes['neatlogs.llm.output_messages.0.media.1.state']).toBe(
+      'pending-upload',
+    );
+    accumulator.finish(span);
+    await provider.forceFlush();
+
+    const serialized = JSON.stringify(sink.getFinishedSpans()[0].attributes);
+    expect(serialized).not.toContain(first.slice(0, 100));
+    expect(serialized).not.toContain(second.slice(0, 100));
+    discardPendingMedia(span as object);
+    await provider.shutdown();
   });
 
   it('reports flattened fidelity only when selected by an adapter', async () => {

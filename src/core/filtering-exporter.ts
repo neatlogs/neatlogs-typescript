@@ -156,14 +156,15 @@ export class FilteringExporter implements SpanExporter {
             ? masked.attributes
             : {}),
         };
+        const maskedData = { ...masked, attributes };
         const mediaReady = await resolvePendingMediaUploads(
           span as object,
-          attributes,
+          maskedData,
           this.uploadAuthority,
           this.diagnostics,
         );
         return {
-          span: maskedReadableSpan(span, { ...masked, attributes }),
+          span: maskedReadableSpan(span, maskedData),
           mediaReady,
         };
       }),

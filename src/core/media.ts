@@ -56,6 +56,22 @@ interface PendingMediaOwnerState {
 
 const defaultPendingMediaOwner = {};
 const pendingMediaOwners = new WeakMap<object, PendingMediaOwnerState>();
+const mediaCaptureAvailability = new WeakMap<
+  object,
+  { available: boolean; reason: string }
+>();
+
+/** Bind a recording SDK span to the upload gate selected by its pipeline. */
+export function setMediaCaptureAvailability(
+  span: object,
+  available: boolean,
+  reason = "telemetry_uploads_disabled",
+): void {
+  mediaCaptureAvailability.set(span, {
+    available,
+    reason: safeUnavailableReason(reason),
+  });
+}
 
 function pendingOwnerState(owner: object): PendingMediaOwnerState {
   const prior = pendingMediaOwners.get(owner);
@@ -150,7 +166,7 @@ interface DecodedBase64 {
   sha256: string;
 }
 
-function decodeBase64(value: string): DecodedBase64 | null {
+function decodeBase64(value: string, retainBytes = true): DecodedBase64 | null {
   const normalized = value.replace(/\s+/g, "");
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 === 1) {
     return null;
@@ -158,7 +174,7 @@ function decodeBase64(value: string): DecodedBase64 | null {
   try {
     const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
     const estimatedBytes = Math.floor((normalized.length * 3) / 4) - padding;
-    if (estimatedBytes <= DEFAULT_MAX_TYPED_MEDIA_BYTES) {
+    if (retainBytes && estimatedBytes <= DEFAULT_MAX_TYPED_MEDIA_BYTES) {
       const bytes = Buffer.from(normalized, "base64");
       if (
         bytes.toString("base64").replace(/=+$/, "") !==
@@ -192,6 +208,7 @@ function inlineRecord(
   mimeType: string,
   declared: string,
   purpose: string,
+  retainBytes = true,
 ): DiscoveredMedia | null {
   mimeType = canonicalMimeType(mimeType);
   let original: string | undefined;
@@ -210,7 +227,7 @@ function inlineRecord(
       mimeType = canonicalMimeType(header.split(";", 1)[0] || mimeType);
       encoded = encoded.slice(comma + 1);
     }
-    const decoded = decodeBase64(encoded);
+    const decoded = decodeBase64(encoded, retainBytes);
     if (!decoded) return null;
     bytes = decoded.bytes;
     byteLength = decoded.byteLength;
@@ -219,7 +236,7 @@ function inlineRecord(
     binaryOriginal = input;
     byteLength = input.byteLength;
     sha256 = createHash("sha256").update(input).digest("hex");
-    if (byteLength <= DEFAULT_MAX_TYPED_MEDIA_BYTES) {
+    if (retainBytes && byteLength <= DEFAULT_MAX_TYPED_MEDIA_BYTES) {
       bytes = Uint8Array.from(input);
     }
   }
@@ -299,7 +316,11 @@ function referenceRecord(
   };
 }
 
-function discoverMedia(value: unknown, purpose: string): DiscoveredMedia[] {
+function discoverMedia(
+  value: unknown,
+  purpose: string,
+  retainBytes = true,
+): DiscoveredMedia[] {
   const found: DiscoveredMedia[] = [];
   const discoveredKeys = new Set<string>();
   let retainedBytes = 0;
@@ -338,7 +359,13 @@ function discoverMedia(value: unknown, purpose: string): DiscoveredMedia[] {
           const record =
             typeof item === "string" && /^(?:https?:|s3:|gs:|\/\/)/i.test(item)
               ? referenceRecord(item, inheritedMimeType, inheritedDeclared, purpose)
-              : inlineRecord(item, inheritedMimeType, inheritedDeclared, purpose);
+              : inlineRecord(
+                  item,
+                  inheritedMimeType,
+                  inheritedDeclared,
+                  purpose,
+                  retainBytes,
+                );
           append(record);
         } else {
           visit(item, inheritedDeclared, inheritedMimeType);
@@ -369,7 +396,7 @@ function discoverMedia(value: unknown, purpose: string): DiscoveredMedia[] {
       typeof node.image_url === "object" ? node.image_url?.url : node.image_url;
     if (typeof image === "string") {
       const record = /^\s*data:/i.test(image)
-        ? inlineRecord(image, mimeType, "image", purpose)
+        ? inlineRecord(image, mimeType, "image", purpose, retainBytes)
         : referenceRecord(image, mimeType, "image", purpose);
       append(record);
     }
@@ -381,6 +408,7 @@ function discoverMedia(value: unknown, purpose: string): DiscoveredMedia[] {
         mimeType || `audio/${format}`,
         "audio",
         purpose,
+        retainBytes,
       );
       append(record);
     }
@@ -391,12 +419,19 @@ function discoverMedia(value: unknown, purpose: string): DiscoveredMedia[] {
         String(inline.mime_type ?? inline.mimeType ?? mimeType),
         mediaDeclared,
         purpose,
+        retainBytes,
       );
       append(record);
     }
     const fileData = node.file_data ?? node.fileData;
     if (typeof fileData === "string") {
-      const record = inlineRecord(fileData, mimeType, mediaDeclared || "document", purpose);
+      const record = inlineRecord(
+        fileData,
+        mimeType,
+        mediaDeclared || "document",
+        purpose,
+        retainBytes,
+      );
       append(record);
     }
     const raw =
@@ -408,7 +443,7 @@ function discoverMedia(value: unknown, purpose: string): DiscoveredMedia[] {
       (typeof raw === "string" || raw instanceof Uint8Array) &&
       (mediaDeclared || mimeType)
     ) {
-      const record = inlineRecord(raw, mimeType, mediaDeclared, purpose);
+      const record = inlineRecord(raw, mimeType, mediaDeclared, purpose, retainBytes);
       append(record);
     }
     const reference =
@@ -510,7 +545,7 @@ function sanitizedCopy(value: unknown, discovered: DiscoveredMedia[]): unknown {
 }
 
 export function mediaReferences(value: unknown, purpose: string): MediaRecord[] {
-  return discoverMedia(value, purpose).map(({ record }) =>
+  return discoverMedia(value, purpose, false).map(({ record }) =>
     record.state === "pending-upload"
       ? {
           ...record,
@@ -523,12 +558,17 @@ export function mediaReferences(value: unknown, purpose: string): MediaRecord[] 
 
 /** Remove large inline bytes and URL credentials from a captured value. */
 export function sanitizeMediaPayload(value: unknown, purpose = "capture"): unknown {
-  const discovered = discoverMedia(value, purpose);
+  const discovered = discoverMedia(value, purpose, false);
   return sanitizedCopy(value, discovered);
 }
 
-/** Capture typed media metadata and return a telemetry-safe clone of the value. */
-export function captureMedia(
+export interface CapturedMediaValue {
+  value: unknown;
+  count: number;
+}
+
+/** Capture typed media metadata from a stable index and return a telemetry-safe clone. */
+export function captureMediaWithIndex(
   span: {
     setAttribute(name: string, value: string | number): unknown;
     isRecording?(): boolean;
@@ -536,16 +576,26 @@ export function captureMedia(
   prefix: string,
   value: unknown,
   purpose: string,
-): unknown {
-  const discovered = discoverMedia(value, purpose);
+  mediaIndexOffset = 0,
+): CapturedMediaValue {
   const recording = typeof span.isRecording !== "function" || span.isRecording();
+  const gate = mediaCaptureAvailability.get(span as object);
+  const uploadsAvailable = gate?.available ?? true;
+  const discovered = discoverMedia(value, purpose, recording && uploadsAvailable);
   discovered.forEach((item, index) => {
-    const recordPrefix = `${prefix}.media.${index}`;
-    if (item.bytes && item.record.state === "pending-upload") {
+    const recordPrefix = `${prefix}.media.${mediaIndexOffset + index}`;
+    if (item.record.state === "pending-upload") {
       if (!recording) {
         item.bytes = undefined;
         item.record.state = "failed";
         item.record.safe_preview = "upload unavailable: span_not_recording";
+      } else if (!uploadsAvailable) {
+        item.bytes = undefined;
+        item.record.state = "failed";
+        item.record.safe_preview = `upload unavailable: ${gate?.reason ?? "telemetry_uploads_disabled"}`;
+      } else if (!item.bytes) {
+        item.record.state = "failed";
+        item.record.safe_preview = "upload failed: validate/staged_payload_missing";
       } else {
         const token = uploadToken(item.record);
         item.record.upload_token = token;
@@ -600,7 +650,20 @@ export function captureMedia(
       span.setAttribute(`${recordPrefix}.${key}`, field),
     );
   });
-  return sanitizedCopy(value, discovered);
+  return { value: sanitizedCopy(value, discovered), count: discovered.length };
+}
+
+/** Capture typed media metadata and return a telemetry-safe clone of the value. */
+export function captureMedia(
+  span: {
+    setAttribute(name: string, value: string | number): unknown;
+    isRecording?(): boolean;
+  },
+  prefix: string,
+  value: unknown,
+  purpose: string,
+): unknown {
+  return captureMediaWithIndex(span, prefix, value, purpose).value;
 }
 
 export function setMediaAttributes(
@@ -636,7 +699,6 @@ function rewritePendingPlaceholder(
   update: MediaRecord,
 ): void {
   const matches = (value: Record<string, any>): boolean =>
-    value.state === "pending-upload" &&
     (value.upload_token === item.token ||
       (value.id === item.record.id && value.sha256 === item.sha256));
   const applyUpdate = (value: Record<string, any>): Record<string, any> => {
@@ -648,7 +710,9 @@ function rewritePendingPlaceholder(
   const seen = new WeakSet<object>();
   const rewrite = (value: any): any => {
     if (typeof value === "string") {
-      if (!value.includes("pending-upload")) return value;
+      if (!value.includes(item.token) && !value.includes(String(item.record.id))) {
+        return value;
+      }
       const trimmed = value.trimStart();
       if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
       try {
@@ -672,6 +736,24 @@ function rewritePendingPlaceholder(
         changed = true;
       }
     }
+    if (!Array.isArray(value)) {
+      for (const prefix of item.prefixes) {
+        const tokenKey = `${prefix}.upload_token`;
+        const matchesFlat =
+          value[tokenKey] === item.token ||
+          (value[`${prefix}.id`] === item.record.id &&
+            value[`${prefix}.sha256`] === item.sha256);
+        if (!matchesFlat) continue;
+        delete (output as Record<string, any>)[tokenKey];
+        for (const [field, fieldValue] of Object.entries(update)) {
+          (output as Record<string, any>)[`${prefix}.${field}`] = fieldValue;
+        }
+        if (update.state === "available") {
+          delete (output as Record<string, any>)[`${prefix}.safe_preview`];
+        }
+        changed = true;
+      }
+    }
     return changed ? output : value;
   };
 
@@ -679,13 +761,11 @@ function rewritePendingPlaceholder(
     attributes[key] = rewrite(value);
   }
   for (const prefix of item.prefixes) {
-    const stateKey = `${prefix}.state`;
     const tokenKey = `${prefix}.upload_token`;
     const matchesFlat =
-      attributes[stateKey] === "pending-upload" &&
-      (attributes[tokenKey] === item.token ||
+      attributes[tokenKey] === item.token ||
         (attributes[`${prefix}.id`] === item.record.id &&
-          attributes[`${prefix}.sha256`] === item.sha256));
+          attributes[`${prefix}.sha256`] === item.sha256);
     if (!matchesFlat) continue;
     delete attributes[tokenKey];
     for (const [field, fieldValue] of Object.entries(update)) {
@@ -695,12 +775,15 @@ function rewritePendingPlaceholder(
   }
 }
 
-function retainedPendingTokens(value: unknown): Set<string> {
+function mediaUploadTokens(value: unknown, requirePendingState: boolean): Set<string> {
   const tokens = new Set<string>();
   const seen = new WeakSet<object>();
   const visit = (node: any): void => {
     if (typeof node === "string") {
       if (!node.includes("nl_pending_media_")) return;
+      if (!requirePendingState && /^nl_pending_media_[0-9a-f]{24}$/.test(node)) {
+        tokens.add(node);
+      }
       const trimmed = node.trimStart();
       if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return;
       try {
@@ -714,7 +797,7 @@ function retainedPendingTokens(value: unknown): Set<string> {
     seen.add(node);
     if (
       !Array.isArray(node) &&
-      node.state === "pending-upload" &&
+      (!requirePendingState || node.state === "pending-upload") &&
       typeof node.upload_token === "string"
     ) {
       tokens.add(node.upload_token);
@@ -723,13 +806,44 @@ function retainedPendingTokens(value: unknown): Set<string> {
       for (const [key, token] of Object.entries(node)) {
         if (!key.endsWith(".upload_token") || typeof token !== "string") continue;
         const prefix = key.slice(0, -".upload_token".length);
-        if (node[`${prefix}.state`] === "pending-upload") tokens.add(token);
+        if (!requirePendingState || node[`${prefix}.state`] === "pending-upload") {
+          tokens.add(token);
+        }
       }
     }
     Object.values(node).forEach(visit);
   };
   visit(value);
   return tokens;
+}
+
+function scrubUploadTokens(value: unknown): unknown {
+  const seen = new WeakMap<object, unknown>();
+  const rewrite = (node: any): any => {
+    if (typeof node === "string") {
+      if (!node.includes("nl_pending_media_")) return node;
+      const trimmed = node.trimStart();
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        try {
+          return JSON.stringify(rewrite(JSON.parse(node)));
+        } catch {
+          // Fall through to remove any opaque token embedded in plain text.
+        }
+      }
+      return node.replace(/nl_pending_media_[0-9a-f]{24}/g, "[REDACTED_UPLOAD_TOKEN]");
+    }
+    if (!node || typeof node !== "object") return node;
+    const prior = seen.get(node);
+    if (prior) return prior;
+    const output: any = Array.isArray(node) ? [] : {};
+    seen.set(node, output);
+    for (const [key, child] of Object.entries(node)) {
+      if (key === "upload_token" || key.endsWith(".upload_token")) continue;
+      output[key] = rewrite(child);
+    }
+    return output;
+  };
+  return rewrite(value);
 }
 
 async function uploadWithinDeadline(
@@ -780,7 +894,8 @@ export async function resolvePendingMediaUploads(
   const deadlineUnixMs = Date.now() + DEFAULT_MEDIA_EXPORT_DEADLINE_MS;
   let failed = false;
   try {
-    const retainedTokens = retainedPendingTokens(attributes);
+    const retainedTokens = mediaUploadTokens(attributes, true);
+    const presentTokens = mediaUploadTokens(attributes, false);
     for (const item of pending) {
       const retained = item.prefixes.filter(
         (prefix) =>
@@ -792,9 +907,17 @@ export async function resolvePendingMediaUploads(
         retainedTokens.has(item.token) ? 1 : 0,
       );
       if (!retainedTokens.has(item.token)) {
+        const tokenWasRetainedInInvalidState = presentTokens.has(item.token);
+        if (tokenWasRetainedInInvalidState) {
+          failed = true;
+          diagnostics?.recordTypedMedia("failures", Math.max(retainedCount, 1));
+          diagnostics?.recordUploadFailure("validate", "masked_pending_state");
+        }
         rewritePendingPlaceholder(attributes, item, {
           state: "failed",
-          safe_preview: "upload skipped: media reference removed by mask",
+          safe_preview: tokenWasRetainedInInvalidState
+            ? "upload failed: validate/masked_pending_state"
+            : "upload skipped: media reference removed by mask",
         });
         continue;
       }
@@ -877,6 +1000,11 @@ export async function resolvePendingMediaUploads(
     }
   } finally {
     if (bucket) releasePendingAccount(bucket.account);
+    const scrubbed = scrubUploadTokens(attributes);
+    for (const key of Object.keys(attributes)) delete attributes[key];
+    if (scrubbed && typeof scrubbed === "object" && !Array.isArray(scrubbed)) {
+      Object.assign(attributes, scrubbed);
+    }
   }
   return !failed;
 }

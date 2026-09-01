@@ -505,6 +505,8 @@ async function _performInit(options: InitOptions): Promise<void> {
     mask: options.mask,
     emitCompletionMarkers: false,
     ownAllSpans: _ownsTracerProvider,
+    mediaUploadsAvailable: uploadAuthority.available,
+    mediaUploadsUnavailableReason: uploadAuthority.unavailableReason,
   });
   provider.addSpanProcessor(_spanProcessor);
 

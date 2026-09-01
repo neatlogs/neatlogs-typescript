@@ -2,7 +2,7 @@ import { ROOT_CONTEXT } from '@opentelemetry/api';
 import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ByteLimitedSpanExporter } from '../../src/core/byte-limited-exporter.js';
 import { DeliveryDiagnostics } from '../../src/core/delivery-diagnostics.js';
 import type {
@@ -198,6 +198,45 @@ describe('ByteLimitedSpanExporter', () => {
 
     expect((await runExport(exporter, spans)).code).toBe(ExportResultCode.FAILED);
     expect(sink.batches).toEqual([]);
+  });
+
+  it('shares one deadline across oversized spans and starts no later upload after expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      const spans = await finishedSpans(2, 16_384);
+      const startedAt = Date.now();
+      const deadlines: number[] = [];
+      const authority: UploadAuthority = {
+        available: true,
+        unavailableReason: '',
+        maxPayloadBytes: 1024 * 1024,
+        upload(_payload, options) {
+          deadlines.push(options?.deadlineUnixMs ?? 0);
+          return new Promise(() => undefined);
+        },
+      };
+      const diagnostics = new DeliveryDiagnostics();
+      const exporter = new ByteLimitedSpanExporter(
+        new RecordingExporter(),
+        128,
+        diagnostics,
+        authority,
+        25,
+      );
+
+      const result = runExport(exporter, spans);
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(result).resolves.toMatchObject({ code: ExportResultCode.FAILED });
+      expect(deadlines).toEqual([startedAt + 25]);
+      expect(diagnostics.snapshot()).toMatchObject({
+        spanOverflowFailures: 2,
+        spanExportFailures: 2,
+        lastUploadFailureReason: 'overflow_export_deadline_exceeded',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([

@@ -1,6 +1,6 @@
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
 import { createHash } from "node:crypto";
-import { sanitizeMediaPayload, setMediaAttributes } from "./media.js";
+import { captureMediaWithIndex, sanitizeMediaPayload } from "./media.js";
 
 interface ToolCallState {
   id: string;
@@ -15,7 +15,7 @@ interface ChoiceState {
   role: string;
   content: string[];
   reasoning: string[];
-  mediaValues: unknown[];
+  mediaCount: number;
   finishReason: string | null;
   toolCalls: Map<number, ToolCallState>;
 }
@@ -56,7 +56,7 @@ export class ChoiceAccumulator {
       | "unknown" = "native",
   ) {}
 
-  addResponse(response: any): void {
+  addResponse(response: any, span?: Span): void {
     this.captureEnvelope(response);
     for (
       let position = 0;
@@ -68,10 +68,21 @@ export class ChoiceAccumulator {
       const message = choice?.message ?? {};
       const state = this.choice(index);
       state.role = message.role || "assistant";
-      if (message.content != null)
-        state.content.push(stringify(sanitizeMediaPayload(message.content, "output")));
-      if (message.content != null && typeof message.content !== "string") {
-        state.mediaValues.push(message.content);
+      if (message.content != null) {
+        const captured = span
+          ? captureMediaWithIndex(
+              span,
+              `neatlogs.llm.output_messages.${index}`,
+              message.content,
+              "output",
+              state.mediaCount,
+            )
+          : {
+              value: sanitizeMediaPayload(message.content, "output"),
+              count: 0,
+            };
+        state.mediaCount += captured.count;
+        state.content.push(stringify(captured.value));
       }
       if (message.reasoning_content != null)
         state.reasoning.push(stringify(message.reasoning_content));
@@ -95,18 +106,23 @@ export class ChoiceAccumulator {
       const delta = choice?.delta ?? {};
       const state = this.choice(index);
       if (delta.role) state.role = String(delta.role);
-      const content =
+      const captured =
         delta.content == null
-          ? ""
-          : stringify(sanitizeMediaPayload(delta.content, "output"));
+          ? { value: "", count: 0 }
+          : captureMediaWithIndex(
+              span,
+              `neatlogs.llm.output_messages.${index}`,
+              delta.content,
+              "output",
+              state.mediaCount,
+            );
+      state.mediaCount += captured.count;
+      const content = delta.content == null ? "" : stringify(captured.value);
       const reasoning =
         delta.reasoning_content == null
           ? ""
           : stringify(delta.reasoning_content);
       if (content) state.content.push(content);
-      if (delta.content != null && typeof delta.content !== "string") {
-        state.mediaValues.push(delta.content);
-      }
       if (reasoning) state.reasoning.push(reasoning);
       this.addToolFragments(index, delta.tool_calls);
       if (choice?.finish_reason != null)
@@ -148,9 +164,6 @@ export class ChoiceAccumulator {
       if (content) span.setAttribute(`${prefix}.content`, content);
       const reasoning = choice.reasoning.join("");
       if (reasoning) span.setAttribute(`${prefix}.thinking`, reasoning);
-      if (choice.mediaValues.length > 0) {
-        setMediaAttributes(span, prefix, choice.mediaValues, "output");
-      }
       if (choice.finishReason !== null) {
         span.setAttribute(
           `neatlogs.llm.choices.${choiceIndex}.finish_reason`,
@@ -235,7 +248,7 @@ export class ChoiceAccumulator {
         role: "assistant",
         content: [],
         reasoning: [],
-        mediaValues: [],
+        mediaCount: 0,
         finishReason: null,
         toolCalls: new Map(),
       };

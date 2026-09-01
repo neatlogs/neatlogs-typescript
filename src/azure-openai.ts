@@ -20,6 +20,7 @@
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
 import { captureMedia } from './core/media.js';
+import { ChoiceAccumulator } from './core/choice-accumulator.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -248,12 +249,12 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
 // ---------------------------------------------------------------------------
 
 function wrapAsyncIterableStream(stream: any, span: Span): any {
-  const chunks: any[] = [];
+  const accumulator = new ChoiceAccumulator();
   const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
-    span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
+    accumulator.addResponse(stream, span);
+    accumulator.finish(span);
     return stream;
   }
 
@@ -267,89 +268,32 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamChunks(span, chunks);
+            accumulator.finish(span);
             return result;
           }
-          chunks.push(result.value);
+          accumulator.addChunk(span, result.value);
           return result;
         } catch (err) {
-          recordError(span, err);
+          accumulator.fail(span, err);
           throw err;
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
-        finalizeStreamChunks(span, chunks);
-        return iterator.return?.(value) ?? { done: true, value: undefined };
+        try {
+          return await (iterator.return?.(value) ?? { done: true, value: undefined });
+        } finally {
+          accumulator.finish(span, true);
+        }
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
-        recordError(span, err);
-        return iterator.throw?.(err) ?? { done: true, value: undefined };
+        accumulator.fail(span, err);
+        if (iterator.throw) return iterator.throw(err);
+        throw err;
       },
     };
   };
 
   return wrapped;
-}
-
-function finalizeStreamChunks(span: Span, chunks: any[]): void {
-  const textParts: string[] = [];
-  const toolCallsAcc: Record<number, { id: string; name: string; arguments: string }> = {};
-  let finishReason = '';
-  let model = '';
-  let usage: any = null;
-
-  for (const chunk of chunks) {
-    if (!chunk?.choices?.length) {
-      if (chunk?.usage) usage = chunk.usage;
-      continue;
-    }
-    const choice = chunk.choices[0];
-    const delta = choice?.delta;
-    if (delta?.content) textParts.push(delta.content);
-    if (delta?.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const idx = tc.index ?? 0;
-        if (!toolCallsAcc[idx]) toolCallsAcc[idx] = { id: '', name: '', arguments: '' };
-        if (tc.id) toolCallsAcc[idx].id = tc.id;
-        if (tc.function?.name) toolCallsAcc[idx].name = tc.function.name;
-        if (tc.function?.arguments) toolCallsAcc[idx].arguments += tc.function.arguments;
-      }
-    }
-    if (choice?.finish_reason) finishReason = choice.finish_reason;
-    if (chunk?.model) model = chunk.model;
-  }
-
-  const fullText = textParts.join('');
-  if (fullText) {
-    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', fullText);
-  }
-
-  let j = 0;
-  for (const tc of Object.values(toolCallsAcc)) {
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.id`, tc.id);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.name`, tc.name);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.arguments`, tc.arguments);
-    j++;
-  }
-
-  if (model) span.setAttribute('neatlogs.llm.model_name', model);
-  if (finishReason) span.setAttribute('neatlogs.llm.finish_reason', finishReason);
-
-  if (usage) {
-    if (usage.prompt_tokens != null) span.setAttribute('neatlogs.llm.token_count.prompt', usage.prompt_tokens);
-    if (usage.completion_tokens != null) span.setAttribute('neatlogs.llm.token_count.completion', usage.completion_tokens);
-    if (usage.total_tokens != null) span.setAttribute('neatlogs.llm.token_count.total', usage.total_tokens);
-    if (usage.prompt_tokens_details?.cached_tokens != null) {
-      span.setAttribute('neatlogs.llm.token_count.cache_read', usage.prompt_tokens_details.cached_tokens);
-    }
-    if (usage.completion_tokens_details?.reasoning_tokens != null) {
-      span.setAttribute('neatlogs.llm.token_count.reasoning', usage.completion_tokens_details.reasoning_tokens);
-    }
-  }
-
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
 }
 
 // ---------------------------------------------------------------------------

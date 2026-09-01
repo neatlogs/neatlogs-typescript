@@ -167,22 +167,6 @@ export class Client {
     addVerificationMarkerResourceAttribute(resourceAttributes);
     const resource = new Resource(resourceAttributes);
 
-    this.tracerProvider = new NodeTracerProvider({
-      resource,
-      spanLimits: { attributeCountLimit: 10_000 },
-      sampler: new ParentBasedSampler({
-        root: new TraceIdRatioBasedSampler(sampleRate),
-      }),
-    });
-    this.spanProcessor = new NeatlogsSpanProcessor({
-      debug: options.debug ?? false,
-      mask: options.mask,
-      emitCompletionMarkers: false,
-      ownAllSpans: true,
-    });
-    this.tracerProvider.addSpanProcessor(this.spanProcessor);
-    this.completionProcessor = null;
-
     const endpoint = options.endpoint ?? DEFAULT_INGEST_ENDPOINT;
     const baseUrl = new URL(endpoint).origin;
     const uploadAuthority = disableExport
@@ -197,6 +181,25 @@ export class Client {
       uploadAuthority.available,
       uploadAuthority.unavailableReason,
     );
+
+    this.tracerProvider = new NodeTracerProvider({
+      resource,
+      spanLimits: { attributeCountLimit: 10_000 },
+      sampler: new ParentBasedSampler({
+        root: new TraceIdRatioBasedSampler(sampleRate),
+      }),
+    });
+    this.spanProcessor = new NeatlogsSpanProcessor({
+      debug: options.debug ?? false,
+      mask: options.mask,
+      emitCompletionMarkers: false,
+      ownAllSpans: true,
+      mediaUploadsAvailable: uploadAuthority.available,
+      mediaUploadsUnavailableReason: uploadAuthority.unavailableReason,
+    });
+    this.tracerProvider.addSpanProcessor(this.spanProcessor);
+    this.completionProcessor = null;
+
     if (!disableExport) {
       const traceUrl = endpoint.endsWith("/v1/traces")
         ? endpoint

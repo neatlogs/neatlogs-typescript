@@ -22,7 +22,7 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
-import { captureMedia } from './core/media.js';
+import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -403,11 +403,16 @@ function setInputAttributes(span: Span, opts: any): void {
 // ---------------------------------------------------------------------------
 
 function wrapStream(stream: any, span: Span): any {
-  const chunks: any[] = [];
+  const accumulated: StreamAccumulator = {
+    textParts: [],
+    finishReason: '',
+    usage: null,
+    mediaCount: 0,
+  };
   const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
-    finalizeStreamChunks(span, chunks);
+    finalizeStreamChunks(span, accumulated);
     return stream;
   }
 
@@ -421,10 +426,10 @@ function wrapStream(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamChunks(span, chunks);
+            finalizeStreamChunks(span, accumulated);
             return result;
           }
-          chunks.push(result.value);
+          addStreamChunk(span, accumulated, result.value);
           return result;
         } catch (err) {
           recordError(span, err);
@@ -432,7 +437,7 @@ function wrapStream(stream: any, span: Span): any {
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
-        finalizeStreamChunks(span, chunks);
+        finalizeStreamChunks(span, accumulated);
         return iterator.return?.(value) ?? { done: true, value: undefined };
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
@@ -445,28 +450,43 @@ function wrapStream(stream: any, span: Span): any {
   return wrapped;
 }
 
-function finalizeStreamChunks(span: Span, chunks: any[]): void {
-  const textParts: string[] = [];
-  let finishReason = '';
-  let usage: any = null;
+interface StreamAccumulator {
+  textParts: string[];
+  finishReason: string;
+  usage: any;
+  mediaCount: number;
+}
 
-  for (const chunk of chunks) {
-    for (const candidate of chunk?.candidates ?? []) {
-      for (const part of candidate?.content?.parts ?? []) {
-        if (part?.text && !part?.thought) textParts.push(part.text);
-      }
-      if (candidate?.finishReason) finishReason = candidate.finishReason;
+function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any): void {
+  const captured = captureMediaWithIndex(
+    span,
+    'neatlogs.llm.output_messages.0',
+    chunk?.candidates,
+    'output',
+    accumulated.mediaCount,
+  );
+  accumulated.mediaCount += captured.count;
+  for (const candidate of chunk?.candidates ?? []) {
+    for (const part of candidate?.content?.parts ?? []) {
+      if (part?.text && !part?.thought) accumulated.textParts.push(part.text);
     }
-    if (chunk?.usageMetadata) usage = chunk.usageMetadata;
+    if (candidate?.finishReason) {
+      accumulated.finishReason = candidate.finishReason;
+    }
   }
+  if (chunk?.usageMetadata) accumulated.usage = chunk.usageMetadata;
+}
 
-  const fullText = textParts.join('');
+function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void {
+  const fullText = accumulated.textParts.join('');
   if (fullText) {
     span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
     span.setAttribute('neatlogs.llm.output_messages.0.content', fullText);
   }
-  if (finishReason) span.setAttribute('neatlogs.llm.finish_reason', String(finishReason));
-  setUsage(span, usage);
+  if (accumulated.finishReason) {
+    span.setAttribute('neatlogs.llm.finish_reason', String(accumulated.finishReason));
+  }
+  setUsage(span, accumulated.usage);
 
   span.setStatus({ code: SpanStatusCode.OK });
   span.end();
