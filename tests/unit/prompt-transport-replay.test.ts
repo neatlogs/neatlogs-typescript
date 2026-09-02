@@ -1,0 +1,291 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const otel = vi.hoisted(() => ({
+  active: vi.fn(),
+  suppressTracing: vi.fn(),
+  withContext: vi.fn(),
+}));
+
+vi.mock('@opentelemetry/api', () => ({
+  context: {
+    active: otel.active,
+    with: otel.withContext,
+  },
+}));
+
+vi.mock('@opentelemetry/core', () => ({
+  suppressTracing: otel.suppressTracing,
+}));
+
+import { PromptApiError, PromptClient } from '../../src/prompt/client.js';
+
+function response({
+  body = {},
+  ok = true,
+  status = 200,
+  text = '',
+}: {
+  body?: unknown;
+  ok?: boolean;
+  status?: number;
+  text?: string;
+} = {}): Response {
+  return {
+    ok,
+    status,
+    json: vi.fn().mockResolvedValue(body),
+    text: vi.fn().mockResolvedValue(text),
+  } as unknown as Response;
+}
+
+function createClient(): PromptClient {
+  return new PromptClient({
+    baseUrl: 'https://api.test.com',
+    apiKey: 'test-api-key',
+  });
+}
+
+describe('PromptClient transport replay boundary', () => {
+  beforeEach(() => {
+    otel.active.mockReset().mockReturnValue({});
+    otel.suppressTracing.mockReset().mockImplementation((value) => value);
+    otel.withContext
+      .mockReset()
+      .mockImplementation((_context, callback: () => Promise<Response>) => callback());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('falls back once when reading the active OTel context throws', async () => {
+    const setupError = new Error('active context unavailable');
+    otel.active.mockImplementation(() => {
+      throw setupError;
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'ok' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'ok' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(otel.withContext).not.toHaveBeenCalled();
+  });
+
+  it('falls back once when suppressing the OTel context throws', async () => {
+    const setupError = new Error('suppression unavailable');
+    otel.suppressTracing.mockImplementation(() => {
+      throw setupError;
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'ok' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'ok' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(otel.withContext).not.toHaveBeenCalled();
+  });
+
+  it('falls back once when context.with throws before invoking transport', async () => {
+    const setupError = new Error('context manager unavailable');
+    otel.withContext.mockImplementation(() => {
+      throw setupError;
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'ok' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'ok' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay when context.with throws after invoking transport', async () => {
+    const contextError = new Error('context manager failed after callback');
+    otel.withContext.mockImplementation((_context, callback: () => Promise<Response>) => {
+      callback();
+      throw contextError;
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response());
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toBe(contextError);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay when fetch throws synchronously', async () => {
+    const transportError = new Error('synchronous transport failure');
+    const fetchMock = vi.fn(() => {
+      throw transportError;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toBe(transportError);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay when the fetch promise rejects', async () => {
+    const transportError = new Error('asynchronous transport failure');
+    const fetchMock = vi.fn().mockRejectedValue(transportError);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toBe(transportError);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay when transport rejects with an abort error', async () => {
+    const abortError = new DOMException('The operation was aborted', 'AbortError');
+    const fetchMock = vi.fn().mockRejectedValue(abortError);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toBe(abortError);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('preserves an HTTP error body without replaying transport', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      response({
+        ok: false,
+        status: 503,
+        text: 'temporarily unavailable',
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toThrow(
+      'GET /api/test failed (503): temporarily unavailable',
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('uses the unavailable placeholder when an HTTP error body cannot be read', async () => {
+    const failedResponse = response({ ok: false, status: 500 });
+    vi.mocked(failedResponse.text).mockRejectedValue(new Error('body read failed'));
+    const fetchMock = vi.fn().mockResolvedValue(failedResponse);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toThrow(
+      'GET /api/test failed (500): <unavailable>',
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('preserves non-JSON response errors without replaying transport', async () => {
+    const invalidResponse = response();
+    vi.mocked(invalidResponse.json).mockRejectedValue(new Error('invalid JSON'));
+    const fetchMock = vi.fn().mockResolvedValue(invalidResponse);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const error = await createClient()
+      ._request('/api/test')
+      .catch((requestError: unknown) => requestError);
+
+    expect(error).toBeInstanceOf(PromptApiError);
+    expect(error).toHaveProperty('message', 'GET /api/test returned non-JSON response');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('preserves URL, method, authentication, custom headers, and body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'ok' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createClient()._request('/api/test?label=production', {
+      method: 'PATCH',
+      headers: { 'x-request-id': 'request-1' },
+      body: JSON.stringify({ value: 'payload' }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith('https://api.test.com/api/test?label=production', {
+      method: 'PATCH',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer test-api-key',
+        'x-api-key': 'test-api-key',
+        'x-request-id': 'request-1',
+      },
+      body: '{"value":"payload"}',
+    });
+  });
+
+  const rejectedMutations = [
+    {
+      name: 'createPrompt',
+      invoke: (client: PromptClient) => client.createPrompt({ name: 'created', content: 'hello' }),
+      path: '/api/managed-prompts',
+      method: 'POST',
+      body: { name: 'created', content: 'hello', type: 'text' },
+    },
+    {
+      name: 'updatePrompt',
+      invoke: (client: PromptClient) => client.updatePrompt('updated', { content: 'hello' }),
+      path: '/api/managed-prompts',
+      method: 'PUT',
+      body: { name: 'updated', content: 'hello' },
+    },
+    {
+      name: 'deletePrompt',
+      invoke: (client: PromptClient) => client.deletePrompt('deleted'),
+      path: '/api/managed-prompts/deleted',
+      method: 'DELETE',
+      body: undefined,
+    },
+    {
+      name: 'removeTag',
+      invoke: (client: PromptClient) => client.removeTag('tagged', 'production'),
+      path: '/api/managed-prompts/tagged/tags',
+      method: 'DELETE',
+      body: { tag: 'production' },
+    },
+    {
+      name: 'saveAsVersion',
+      invoke: (client: PromptClient) => client.saveAsVersion('versioned', { label: 'staging' }),
+      path: '/api/prompt-playground/save-as-version',
+      method: 'POST',
+      body: { promptName: 'versioned', labels: ['staging'] },
+    },
+  ];
+
+  it.each(rejectedMutations)(
+    'does not replay a rejected $name mutation',
+    async ({ invoke, path, method, body }) => {
+      const transportError = new Error(`${method} transport failure`);
+      const fetchMock = vi.fn().mockRejectedValue(transportError);
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(invoke(createClient())).rejects.toBe(transportError);
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [calledUrl, calledOptions] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(calledUrl).toBe(`https://api.test.com${path}`);
+      expect(calledOptions.method).toBe(method);
+      expect(calledOptions.body).toBe(body === undefined ? undefined : JSON.stringify(body));
+    },
+  );
+
+  it('does not amplify a concurrent burst of rejected writes', async () => {
+    const transportError = new Error('write rejected');
+    const fetchMock = vi.fn().mockRejectedValue(transportError);
+    vi.stubGlobal('fetch', fetchMock);
+    const client = createClient();
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 100 }, (_, index) =>
+        client.createPrompt({ name: `prompt-${index}`, content: 'hello' }),
+      ),
+    );
+
+    expect(results).toHaveLength(100);
+    expect(
+      results.every(
+        (result) => result.status === 'rejected' && result.reason === transportError,
+      ),
+    ).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(100);
+  });
+});
