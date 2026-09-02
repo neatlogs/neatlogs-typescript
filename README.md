@@ -380,14 +380,21 @@ const messages = handle.compileMessages({ role: 'helpful', company: 'Acme' });
 // List all prompts
 const all = await client.listPrompts();
 
-// Update prompt content
+// Backward-compatible alias: managed prompts are immutable, so this creates a version
 await client.updatePrompt('qa-system', { content: 'Updated: {{role}} for {{company}}.' });
 
-// Save a new version
-await client.saveAsVersion('qa-system', { label: 'v2' });
+// Save a new version. Content or messages is required by the backend contract.
+await client.saveAsVersion('qa-system', {
+  content: 'Version 2: {{role}} for {{company}}.',
+  labels: ['staging'],
+  commitMessage: 'Try the revised system prompt',
+});
 
-// Delete a prompt
-await client.deletePrompt('qa-system');
+// Mutations target immutable version UUIDs. Name + version/label is resolved first.
+await client.setLabel('qa-system', 'production', { version: 2 });
+await client.addTag('qa-system', 'release-candidate', { version: 2 });
+await client.removeTag('qa-system', 'release-candidate', { version: 2 });
+await client.deletePrompt('qa-system', { version: 1 });
 
 // Explicit PromptClient instances own their cache and prompt requests.
 client.close();
@@ -428,7 +435,7 @@ managed prompt payloads.
 Module-level convenience functions are also available after `init()`:
 
 ```typescript
-import { init, getPrompt, fetchPrompt, listPrompts, createPrompt, updatePrompt, saveAsVersion, deletePrompt, removeTag } from 'neatlogs';
+import { init, getPrompt, fetchPrompt, listPrompts, createPrompt, updatePrompt, saveAsVersion, deletePrompt, setLabel, addTag, removeTag } from 'neatlogs';
 
 await init({ apiKey: process.env.NEATLOGS_API_KEY });
 
@@ -490,15 +497,38 @@ import { registerCrewaiTask } from 'neatlogs';
 registerCrewaiTask('research-task', 'Research the latest AI developments');
 ```
 
-## Framework Integrations
+## Supported TypeScript Integrations
 
-Use the SDK's explicit wrappers and helpers. They use Neatlogs' private context
-and remain isolated from other tracing SDKs:
+For `neatlogs >=1.1.19 <2.0.0`, use only the explicit helper shown below. The
+SDK has no `instrumentations: [...]` loader. These helpers attach to the object,
+callback surface, processor, or plugin you pass and use Neatlogs' private
+context. The public support IDs are governed by the
+[skills support manifest](https://github.com/neatlogs/skills/blob/main/contracts/skills-support-v1.json).
+Versioned rows below name the dependencies installed by this repository's test
+matrix; API-shaped rows deliberately make no blanket semver claim.
 
-| Framework | Helper |
-|-----------|--------|
-| Mastra (`@mastra/core`) | `wrapMastra()` from `neatlogs/mastra` |
-| Vercel AI SDK (`ai`) | `wrapAISDK()` from `neatlogs/ai` |
+| Library | Repository test/API baseline | Explicit helper | Import path |
+|---|---|---|---|
+| OpenAI | `openai` 6.34.x | `wrapOpenAI(client)` | `neatlogs` or `neatlogs/openai` |
+| Anthropic | `@anthropic-ai/sdk` 0.68.x | `wrapAnthropic(client)` | `neatlogs` or `neatlogs/anthropic` |
+| Azure OpenAI | `openai` 6.34.x | `wrapAzureOpenAI(client)` | `neatlogs/azure-openai` |
+| AWS Bedrock Runtime | AWS SDK v3 command API | `wrapBedrock(client)` | `neatlogs/bedrock` |
+| Google GenAI | `@google/genai` 1.34.x | `wrapGoogleGenAI(client)` / `wrapGoogleGenAIChat(chat)` | `neatlogs/google-genai` |
+| Vertex AI through `@google/genai` | `@google/genai` 1.34.x | `wrapVertexAI(client)` / `wrapVertexAIChat(chat)` | `neatlogs/vertex-ai` |
+| OpenRouter Agent | `@openrouter/agent` 0.7.x | `wrapOpenRouterAgent(client)` / `wrapCallModel(fn)` | `neatlogs/openrouter-agent` |
+| Vercel AI SDK | `ai` 6.x | `wrapAISDK(ai)` | `neatlogs/ai` |
+| Mastra | `@mastra/core` 1.32.x | `wrapMastra(entity)` / `wrapMastraRerank(fn)` | `neatlogs/mastra` |
+| Claude Agent SDK | documented `query()` API | `wrapClaudeAgentSDK(sdk)` | `neatlogs/claude-agent-sdk` |
+| LangChain / LangGraph | `@langchain/core` 0.3.x | `langchainHandler()` callback | `neatlogs` or `neatlogs/langchain` |
+| OpenAI Agents SDK | documented `addTraceProcessor()` API | `openaiAgentsProcessor()` | `neatlogs` or `neatlogs/openai-agents` |
+| Pi Agent | `agent-core` 0.73.x and 0.83.x | `piAgentHooks(agent)` / `tracePiAgentEvents(...)` / `tracePiStream(...)` | `neatlogs` or `neatlogs/pi-agent` |
+| OpenCode | current plugin API | `NeatlogsOpencodePlugin` | `neatlogs/opencode` |
+| Browser client | browser SDK API in this release | `Neatlogs` | `neatlogs/browser` |
+
+Edge runtime packaging, the removed `instrumentations` init option, and Strands
+global-context hooks are not supported. `strandsHooks()` remains an explicit
+runtime rejection so an application cannot silently believe it is isolated or
+instrumented.
 
 ```typescript
 // Vercel AI SDK
