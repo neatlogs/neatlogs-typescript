@@ -343,7 +343,10 @@ import { PromptClient } from 'neatlogs';
 const client = new PromptClient({
   baseUrl: 'https://ingest.neatlogs.com',
   apiKey: process.env.NEATLOGS_API_KEY!,
-  cacheTtlMs: 60_000, // stale prompts refresh in the background after this TTL
+  cacheTtlMs: 60_000,              // fresh lifetime for latest/label lookups
+  staleWhileRevalidateMs: 300_000, // bounded stale fallback during refresh
+  requestTimeoutMs: 10_000,        // deadline for each prompt API request
+  maxCacheEntries: 100,             // LRU bound for process memory
 });
 
 // Create a prompt
@@ -356,14 +359,17 @@ const prompt = await client.createPrompt({
 // Fetch by name (returns latest version)
 const handle = await client.getPrompt('qa-system');
 
-// Override the cache TTL for an unpinned prompt. When stale, getPrompt returns
-// the last known value immediately and performs one deduplicated background
-// refresh. A pinned version stays stable in the process cache.
-const fastRefresh = await client.getPrompt('qa-system', { cacheTtlMs: 5_000 });
+// Per-key cache policy is retained across refreshes. During the stale window,
+// getPrompt returns the last known value and starts one coalesced refresh.
+const fastRefresh = await client.getPrompt('qa-system', {
+  cacheTtlMs: 5_000,
+  staleWhileRevalidateMs: 60_000,
+});
 
 // Fetch by label or version
 const prod = await client.getPrompt('qa-system', { label: 'production' });
 const v2 = await client.getPrompt('qa-system', { version: 2 });
+const v3 = await client.getPrompt('qa-system', { version: 3 });
 
 // Compile with variables
 const rendered = handle.compile({ role: 'helpful', company: 'Acme' });
@@ -382,7 +388,42 @@ await client.saveAsVersion('qa-system', { label: 'v2' });
 
 // Delete a prompt
 await client.deletePrompt('qa-system');
+
+// Explicit PromptClient instances own their cache and prompt requests.
+client.close();
 ```
+
+Each prompt version may have zero or one active label. Accordingly, `labels`
+accepts at most one value on create/save, and `setLabel()` replaces or moves
+that label rather than adding a second simultaneous label.
+
+Latest and label selectors are fresh for `cacheTtlMs`. After that, they may be
+served only for the bounded `staleWhileRevalidateMs` window while one shared
+same-key refresh runs. Refresh failure leaves the last known value available
+until that stale window ends; after it ends, the next lookup waits for the
+backend and reports a typed error. A version selector is immutable in-process:
+`{ version: 2 }` never changes into another version. Request a different
+version explicitly, call `clearCache()`, or create a new client.
+
+Every request has a finite `requestTimeoutMs`. `close()` aborts in-flight prompt
+requests and releases the cache; calls after close raise
+`PromptClientClosedError`. The shared prompt client created by `init()` is
+closed by `shutdown()`, without making prompt failures part of telemetry flush
+success. An explicitly constructed `PromptClient` must be closed by its owner.
+
+#### Prompt privacy and ownership
+
+Prompt CRUD is intentional product-data transfer, separate from trace
+telemetry. The API key selects the Neatlogs project and authenticates prompt
+requests to `baseUrl`; the in-memory cache retains prompt content only until
+eviction, `clearCache()`, or `close()`. Server retention follows the managed
+prompt service policy for that project.
+
+Telemetry `mask=`, `pii`, and `piiSpanTypes` settings do **not** transform prompt
+content sent to the prompt-management API. If prompt content must be redacted,
+transform it explicitly before calling prompt CRUD. The SDK does not currently
+provide a prompt transform and does not claim that telemetry masking protects
+managed prompt payloads.
 
 Module-level convenience functions are also available after `init()`:
 
