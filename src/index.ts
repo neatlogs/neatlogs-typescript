@@ -130,6 +130,21 @@ export type {
 } from "./types.js";
 export type { DeliveryDiagnosticsSnapshot } from "./core/delivery-diagnostics.js";
 export type { FlushAllResult, FlushOutcome } from "./init.js";
+export {
+  HttpUploadAuthority,
+  DisabledUploadAuthority,
+  TelemetryUploadError,
+  type HttpUploadAuthorityOptions,
+  type UploadAuthority,
+  type UploadAuthorityOption,
+  type UploadContentEncoding,
+  type UploadPayload,
+  type UploadPayloadSchema,
+  type UploadPurpose,
+  type UploadReceipt,
+  type UploadReference,
+  type UploadRequestOptions,
+} from "./core/upload-authority.js";
 
 // Version
 export { __version__ } from "./version.js";

@@ -7,6 +7,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { safeJsonDumps, serializeObj, decorateSpan } from '../../src/decorators/base.js';
 import { span, Span, retrieverPostprocessor } from '../../src/decorators/orchestration.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
+import {
+  discardPendingMedia,
+  setMediaCaptureAvailability,
+} from '../../src/core/media.js';
 
 // ─── Mock OpenTelemetry ────────────────────────────────────────────────────────
 
@@ -241,6 +245,44 @@ describe('span() with MCP_TOOL edge cases', () => {
     expect(result).toBe('processed: hello');
     expect(mockSpan.setAttribute).toHaveBeenCalledWith('mcp.tool.name', 'async_tool');
     expect(mockSpan.setAttribute).toHaveBeenCalledWith('mcp.tool.parameters', '{"input":"string"}');
+  });
+
+  it('sanitizes MCP tool input, output, parameters, and schema attributes', () => {
+    setMediaCaptureAvailability(mockSpan, false, 'test_uploads_disabled');
+    const raw = `data:image/png;base64,${'YWFh'.repeat(40_000)}`;
+    const media = { type: 'image_url', image_url: { url: raw } };
+    const wrapped = span(
+      {
+        kind: 'MCP_TOOL',
+        toolName: 'inspect_media',
+        parameters: { example: media },
+        toolJsonSchema: { example: media },
+      },
+      (input: unknown) => JSON.stringify({ media: input }),
+    );
+
+    wrapped(media);
+
+    for (const key of [
+      'input.value',
+      'output.value',
+      'mcp.tool.input',
+      'mcp.tool.parameters',
+      'tool.parameters',
+      'tool.json_schema',
+    ]) {
+      const calls = mockSpan.setAttribute.mock.calls.filter(([name]) => name === key);
+      expect(calls.length).toBeGreaterThan(0);
+      expect(String(calls.at(-1)?.[1])).not.toContain(raw);
+    }
+    expect(String(mockSpan.setAttribute.mock.calls.find(
+      ([name]) => name === 'mcp.tool.input',
+    )?.[1])).toContain('neatlogs_media');
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      'neatlogs.mcp_tool.output.media.0.state',
+      'failed',
+    );
+    discardPendingMedia(mockSpan);
   });
 });
 

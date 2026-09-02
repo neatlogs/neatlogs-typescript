@@ -16,12 +16,14 @@ import {
 
 import {
   trace,
+  setTraceOutput,
   _setSessionConfig,
   _setSpanAttributes,
 } from '../../src/core/context.js';
 import { PromptTemplate, UserPromptTemplate, PromptContext, UserPromptContext } from '../../src/prompt/template.js';
 import { _clearMaskRegistry } from '../../src/core/mask.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
+import { discardPendingMedia } from '../../src/core/media.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -51,6 +53,59 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 // Nested trace() calls
 // ---------------------------------------------------------------------------
+
+describe('trace() media capture', () => {
+  it('sanitizes typed media before recording input and output values', async () => {
+    const raw = `data:image/png;base64,${'YWFh'.repeat(40_000)}`;
+    const media = { type: 'image_url', image_url: { url: raw } };
+    let createdSpan: Span | undefined;
+
+    const result = await trace(
+      { name: 'media-trace', kind: 'WORKFLOW', input: media },
+      async (span) => {
+        createdSpan = span;
+        return media;
+      },
+    );
+
+    expect(result).toBe(media);
+    const finished = exporter.getFinishedSpans().find((item) => item.name === 'media-trace');
+    expect(finished).toBeDefined();
+    const input = String(finished?.attributes['input.value']);
+    const output = String(finished?.attributes['output.value']);
+    expect(input).not.toContain(raw);
+    expect(output).not.toContain(raw);
+    expect(input).toContain('neatlogs_media');
+    expect(output).toContain('neatlogs_media');
+    expect(Object.keys(finished?.attributes ?? {})).toContain(
+      'neatlogs.workflow.input.media.0.sha256',
+    );
+    if (createdSpan) discardPendingMedia(createdSpan);
+  });
+
+  it('sanitizes explicit trace output before setting the root attribute', async () => {
+    const raw = `data:image/png;base64,${'YWFh'.repeat(40_000)}`;
+    const media = { type: 'image_url', image_url: { url: raw } };
+    let createdSpan: Span | undefined;
+
+    await trace({ name: 'explicit-media-output' }, async (span) => {
+      createdSpan = span;
+      setTraceOutput(media);
+      return 'done';
+    });
+
+    const finished = exporter.getFinishedSpans().find(
+      (item) => item.name === 'explicit-media-output',
+    );
+    const output = String(finished?.attributes['neatlogs.trace.output']);
+    expect(output).not.toContain(raw);
+    expect(output).toContain('neatlogs_media');
+    expect(finished?.attributes['neatlogs.trace.output.media.0.sha256']).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+    if (createdSpan) discardPendingMedia(createdSpan);
+  });
+});
 
 describe('nested trace() calls', () => {
   it('should create proper parent-child relationships for nested traces', async () => {

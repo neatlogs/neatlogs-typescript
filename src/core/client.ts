@@ -25,6 +25,7 @@ import { registerClient, unregisterClient } from "./client-registry.js";
 import { FilteringExporter } from "./filtering-exporter.js";
 import { ByteLimitedSpanExporter } from "./byte-limited-exporter.js";
 import { MaskingLogExporter } from "./masking-log-exporter.js";
+import { discardPendingMediaOwner } from "./media.js";
 import {
   DeliveryDiagnostics,
   type DeliveryDiagnosticsSnapshot,
@@ -44,6 +45,11 @@ import type { MaskFunction } from "../types.js";
 import { __version__ } from "../version.js";
 import { DEFAULT_INGEST_ENDPOINT, exportQueueCapacity } from "../constants.js";
 import { runByDeadline } from "./deadline.js";
+import {
+  DisabledUploadAuthority,
+  resolveUploadAuthority,
+  type UploadAuthorityOption,
+} from "./upload-authority.js";
 
 const logger = getLogger();
 
@@ -61,6 +67,8 @@ export interface ClientOptions {
   debug?: boolean;
   /** Optional transport override, primarily for private collectors and tests. */
   spanExporter?: SpanExporter;
+  /** Explicitly gate or inject authenticated typed-media/overflow uploads. */
+  uploadAuthority?: UploadAuthorityOption;
 }
 
 type ClientState = "running" | "closing" | "closed";
@@ -159,6 +167,21 @@ export class Client {
     addVerificationMarkerResourceAttribute(resourceAttributes);
     const resource = new Resource(resourceAttributes);
 
+    const endpoint = options.endpoint ?? DEFAULT_INGEST_ENDPOINT;
+    const baseUrl = new URL(endpoint).origin;
+    const uploadAuthority = disableExport
+      ? new DisabledUploadAuthority("export_disabled")
+      : resolveUploadAuthority(
+          options.uploadAuthority,
+          process.env.NEATLOGS_UPLOADS_ENABLED,
+          baseUrl,
+          apiKey,
+        );
+    this.diagnostics.configureUploadAuthority(
+      uploadAuthority.available,
+      uploadAuthority.unavailableReason,
+    );
+
     this.tracerProvider = new NodeTracerProvider({
       resource,
       spanLimits: { attributeCountLimit: 10_000 },
@@ -171,12 +194,13 @@ export class Client {
       mask: options.mask,
       emitCompletionMarkers: false,
       ownAllSpans: true,
+      mediaUploadsAvailable: uploadAuthority.available,
+      mediaUploadsUnavailableReason: uploadAuthority.unavailableReason,
+      mediaOwner: this,
     });
     this.tracerProvider.addSpanProcessor(this.spanProcessor);
     this.completionProcessor = null;
 
-    const endpoint = options.endpoint ?? DEFAULT_INGEST_ENDPOINT;
-    const baseUrl = new URL(endpoint).origin;
     if (!disableExport) {
       const traceUrl = endpoint.endsWith("/v1/traces")
         ? endpoint
@@ -191,8 +215,10 @@ export class Client {
             }),
           undefined,
           this.diagnostics,
+          uploadAuthority,
         ),
         this.diagnostics,
+        uploadAuthority,
       );
       const batchSize = options.batchSize ?? 100;
       this.tracerProvider.addSpanProcessor(
@@ -375,6 +401,7 @@ export class Client {
     await attempt("Tracer provider shutdown", () =>
       this.tracerProvider.shutdown(),
     );
+    discardPendingMediaOwner(this);
     this.tracers.clear();
     this.state = "closed";
     unregisterClient(this);

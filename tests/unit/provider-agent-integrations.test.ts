@@ -8,10 +8,12 @@ import {
 
 import { wrapAzureOpenAI } from '../../src/azure-openai.js';
 import { wrapVertexAI } from '../../src/vertex-ai.js';
+import { wrapGoogleGenAI } from '../../src/google-genai.js';
 import { wrapBedrock, traceTool as traceToolBedrock } from '../../src/bedrock.js';
 import { wrapClaudeAgentSDK } from '../../src/claude-agent-sdk.js';
 import { wrapOpenRouterAgent } from '../../src/openrouter-agent.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
+import { discardPendingMedia } from '../../src/core/media.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
@@ -63,11 +65,21 @@ describe('wrapAzureOpenAI', () => {
     };
 
     const wrapped = wrapAzureOpenAI(fakeClient as any);
+    const imageBytes = Buffer.from('azure-image');
     const result = await wrapped.chat.completions.create({
       model: 'gpt-4o',
-      messages: [{ role: 'user', content: 'Hi' }],
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Hi' },
+          {
+            type: 'image_url',
+            image_url: { url: `data:image/png;base64,${imageBytes.toString('base64')}` },
+          },
+        ],
+      }],
       temperature: 0.5,
-    });
+    } as any);
     expect(result).toEqual(fakeResponse);
 
     const spans = getSpans();
@@ -75,6 +87,7 @@ describe('wrapAzureOpenAI', () => {
     expect(attr(spans[0], 'neatlogs.span.kind')).toBe('LLM');
     expect(attr(spans[0], 'neatlogs.llm.provider')).toBe('azure');
     expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hi from Azure!');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.media.0.mime_type')).toBe('image/png');
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(11);
     expect(attr(spans[0], 'neatlogs.llm.temperature')).toBe(0.5);
   });
@@ -100,9 +113,21 @@ describe('wrapVertexAI', () => {
     };
 
     const wrapped = wrapVertexAI(fakeClient as any);
+    const documentBytes = Buffer.from('vertex-document');
     const result = await (wrapped as any).models.generateContent({
       model: 'gemini-2.0-flash',
-      contents: 'Hi Vertex',
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: 'Hi Vertex' },
+          {
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: documentBytes.toString('base64'),
+            },
+          },
+        ],
+      }],
     });
     expect(result).toEqual(fakeResponse);
 
@@ -113,6 +138,7 @@ describe('wrapVertexAI', () => {
     expect(attr(spans[0], 'neatlogs.llm.system')).toBe('vertexai');
     expect(attr(spans[0], 'neatlogs.llm.model_name')).toBe('gemini-2.0-flash');
     expect(attr(spans[0], 'neatlogs.llm.input_messages.0.content')).toBe('Hi Vertex');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.media.0.mime_type')).toBe('application/pdf');
     expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello from Vertex');
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(14);
     expect(attr(spans[0], 'neatlogs.llm.token_count.total')).toBe(19);
@@ -136,6 +162,87 @@ describe('wrapVertexAI', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Google GenAI
+// ---------------------------------------------------------------------------
+
+describe('wrapGoogleGenAI', () => {
+  it('captures typed inline media without changing the provider response', async () => {
+    const response = {
+      candidates: [{ content: { parts: [{ text: 'Hello from Gemini' }] } }],
+    };
+    const wrapped = wrapGoogleGenAI({
+      models: { generateContent: async () => response },
+    } as any);
+    const imageBytes = Buffer.from('gemini-image');
+
+    await (wrapped as any).models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{
+        role: 'user',
+        parts: [{
+          inlineData: {
+            mimeType: 'image/png',
+            data: imageBytes.toString('base64'),
+          },
+        }],
+      }],
+    });
+
+    const spans = getSpans();
+    expect(spans).toHaveLength(1);
+    expect(attr(spans[0], 'neatlogs.llm.provider')).toBe('google');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.media.0.mime_type')).toBe('image/png');
+  });
+
+  it.each([
+    ['google', wrapGoogleGenAI],
+    ['vertex_ai', wrapVertexAI],
+  ] as const)(
+    'captures %s streamed typed media without retaining provider chunks',
+    async (expectedProvider, wrapProvider) => {
+      const raw = Buffer.alloc(120_000, expectedProvider === 'google' ? 31 : 32);
+      const stream = (async function* () {
+        yield {
+          candidates: [{
+            content: {
+              parts: [{
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: raw.toString('base64'),
+                },
+              }],
+            },
+          }],
+        };
+        yield {
+          candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }],
+        };
+      })();
+      const wrapped = wrapProvider({
+        models: { generateContentStream: async () => stream },
+      } as any);
+
+      const response = await (wrapped as any).models.generateContentStream({
+        model: 'gemini-test',
+        contents: 'hello',
+      });
+      for await (const _chunk of response) {
+        // Consume the provider stream to finalization.
+      }
+
+      const span = getSpans()[0];
+      expect(attr(span, 'neatlogs.llm.provider')).toBe(expectedProvider);
+      expect(attr(span, 'neatlogs.llm.output_messages.0.media.0.state')).toBe(
+        'pending-upload',
+      );
+      expect(attr(span, 'neatlogs.llm.output_messages.0.content')).toBe('done');
+      expect(JSON.stringify(span.attributes)).not.toContain(raw.toString('base64').slice(0, 100));
+      discardPendingMedia(span as object);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Bedrock
 // ---------------------------------------------------------------------------
 
@@ -152,7 +259,15 @@ describe('wrapBedrock', () => {
       }
     }
     const client = fakeBedrockClient(async () => ({
-      output: { message: { role: 'assistant', content: [{ text: 'Hello from Claude on Bedrock' }] } },
+      output: {
+        message: {
+          role: 'assistant',
+          content: [
+            { text: 'Hello from Claude on Bedrock' },
+            { image: { format: 'png', source: { bytes: Buffer.from('bedrock-image') } } },
+          ],
+        },
+      },
       stopReason: 'end_turn',
       usage: { inputTokens: 20, outputTokens: 8, totalTokens: 28 },
     }));
@@ -174,6 +289,7 @@ describe('wrapBedrock', () => {
     expect(attr(spans[0], 'neatlogs.llm.system')).toBe('anthropic');
     expect(attr(spans[0], 'neatlogs.llm.input_messages.0.content')).toBe('Hi');
     expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello from Claude on Bedrock');
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.media.0.mime_type')).toBe('image/png');
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(20);
     expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(8);
     expect(attr(spans[0], 'neatlogs.llm.finish_reason')).toBe('end_turn');

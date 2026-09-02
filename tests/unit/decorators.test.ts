@@ -12,6 +12,10 @@ import {
 } from "../../src/decorators/orchestration.js";
 import type { SpanOptions } from "../../src/types.js";
 import { _setNeatlogsProvider } from "../../src/core/provider.js";
+import {
+  discardPendingMedia,
+  setMediaCaptureAvailability,
+} from "../../src/core/media.js";
 
 // ─── Mock OpenTelemetry ────────────────────────────────────────────────────────
 
@@ -235,6 +239,62 @@ describe("decorateSpan", () => {
     expect(mockSpan.setAttribute).toHaveBeenCalledWith("output.value", "21");
     expect(mockSpan.setStatus).toHaveBeenCalledWith({ code: 1 });
     expect(mockSpan.end).toHaveBeenCalled();
+  });
+
+  it("sanitizes typed media in decorated inputs and outputs", () => {
+    setMediaCaptureAvailability(mockSpan, false, "test_uploads_disabled");
+    const raw = `data:image/png;base64,${"YWFh".repeat(40_000)}`;
+    const media = { type: "image_url", image_url: { url: raw } };
+    const wrapped = decorateSpan({ kind: "CHAIN" }, (value: unknown) => value);
+
+    expect(wrapped(media)).toBe(media);
+
+    const captured = mockSpan.setAttribute.mock.calls
+      .filter(([key]) => key === "input.value" || key === "output.value")
+      .map(([, value]) => String(value));
+    expect(captured).toHaveLength(2);
+    expect(captured.every((value) => !value.includes(raw))).toBe(true);
+    expect(captured.every((value) => value.includes("neatlogs_media"))).toBe(true);
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.chain.input.media.0.state",
+      "failed",
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.chain.output.media.0.state",
+      "failed",
+    );
+    discardPendingMedia(mockSpan);
+  });
+
+  it("bounds retained stream bytes without changing yielded chunks", async () => {
+    const chunk = "x".repeat(600_000);
+    const wrapped = decorateSpan({ kind: "CHAIN" }, async function* () {
+      yield chunk;
+      yield chunk;
+      yield chunk;
+    });
+
+    const received: string[] = [];
+    for await (const value of wrapped()) received.push(value);
+
+    expect(received).toEqual([chunk, chunk, chunk]);
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.stream.chunk_count",
+      3,
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.stream.output_truncated",
+      true,
+    );
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "neatlogs.stream.chunks_not_captured",
+      2,
+    );
+    const outputCall = mockSpan.setAttribute.mock.calls.find(
+      ([key]) => key === "output.value",
+    );
+    expect(String(outputCall?.[1])).toContain("TRUNCATED_STREAM_OUTPUT");
+    expect(String(outputCall?.[1]).length).toBeLessThan(700_000);
   });
 
   it("should handle sync function errors", () => {

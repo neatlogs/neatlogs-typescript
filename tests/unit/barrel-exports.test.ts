@@ -26,6 +26,13 @@ describe('barrel exports (src/index.ts)', () => {
     expect(error.option).toBe('typo');
   });
 
+  it('should export the gated telemetry upload authority', async () => {
+    const mod = await import('../../src/index.js');
+    expect(typeof mod.HttpUploadAuthority).toBe('function');
+    expect(typeof mod.DisabledUploadAuthority).toBe('function');
+    expect(new mod.TelemetryUploadError('prepare', 'test', false)).toBeInstanceOf(Error);
+  });
+
   it('should export instrumentation functions', async () => {
     const mod = await import('../../src/index.js');
     expect(typeof mod.span).toBe('function');

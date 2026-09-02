@@ -12,6 +12,32 @@ import { Resource } from '@opentelemetry/resources';
 import type { SpanExporter, ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { getScheduledMask } from './mask.js';
 import type { DeliveryDiagnostics } from './delivery-diagnostics.js';
+import {
+  captureMediaInSnapshot,
+  discardPendingMedia,
+  resolvePendingMediaUploads,
+} from './media.js';
+import { DisabledUploadAuthority, type UploadAuthority } from './upload-authority.js';
+
+const MEDIA_RESOLUTION_CONCURRENCY = 4;
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  worker: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(values[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 function toHrTime(nanos: unknown, fallback: HrTime): HrTime {
   if (typeof nanos !== 'number' || !Number.isFinite(nanos)) return fallback;
@@ -124,32 +150,85 @@ export class FilteringExporter implements SpanExporter {
   constructor(
     private readonly _delegate: SpanExporter,
     private readonly diagnostics?: DeliveryDiagnostics,
+    private readonly uploadAuthority: UploadAuthority = new DisabledUploadAuthority(),
   ) {}
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    void Promise.all(
-      spans.map(async (span) => {
-        if (span.instrumentationLibrary.name === 'next.js') {
-          this.diagnostics?.recordFrameworkSpanDrop();
-          return null;
-        }
-        const scheduled = getScheduledMask(span as object);
-        if (!scheduled) return span;
-        const masked = await scheduled;
-        if (masked === null) this.diagnostics?.recordMaskedDrop('span');
-        return masked === null ? null : maskedReadableSpan(span, masked);
-      }),
-    ).then(
+    void mapWithConcurrency(spans, MEDIA_RESOLUTION_CONCURRENCY, async (span) => {
+      if (span.instrumentationLibrary.name === 'next.js') {
+        discardPendingMedia(span as object);
+        this.diagnostics?.recordFrameworkSpanDrop();
+        return { span: null, mediaReady: true };
+      }
+      const scheduled = getScheduledMask(span as object);
+      if (!scheduled) {
+        discardPendingMedia(span as object);
+        return { span, mediaReady: true };
+      }
+      const masked = await scheduled;
+      if (masked === null) {
+        discardPendingMedia(span as object);
+        this.diagnostics?.recordMaskedDrop('span');
+        return { span: null, mediaReady: true };
+      }
+        const attributes = {
+        ...(masked.attributes && typeof masked.attributes === 'object' ? masked.attributes : {}),
+        };
+        const maskedData = { ...masked, attributes };
+        captureMediaInSnapshot(
+          span as object,
+          maskedData,
+          this.uploadAuthority.available,
+          this.uploadAuthority.unavailableReason,
+        );
+        const mediaReady = await resolvePendingMediaUploads(
+        span as object,
+        maskedData,
+        this.uploadAuthority,
+        this.diagnostics,
+      );
+      return {
+        span: maskedReadableSpan(span, maskedData),
+        mediaReady,
+      };
+    }).then(
       (prepared) => {
-        const filtered = prepared.filter((span): span is ReadableSpan => span !== null);
+        const filtered = prepared
+          .map((item) => item.span)
+          .filter((span): span is ReadableSpan => span !== null);
+        const mediaFailures = prepared.filter(
+          (item) => item.span !== null && !item.mediaReady,
+        ).length;
         if (filtered.length === 0) {
           resultCallback({ code: ExportResultCode.SUCCESS });
           return;
         }
-        this._delegate.export(filtered, resultCallback);
+        try {
+          this._delegate.export(filtered, (result) => {
+            if (result.code === ExportResultCode.SUCCESS && mediaFailures > 0) {
+              this.diagnostics?.recordExportFailure('span', mediaFailures);
+              resultCallback({
+                code: ExportResultCode.FAILED,
+                error: new Error('one or more typed media uploads failed'),
+              });
+              return;
+            }
+            resultCallback(result);
+          });
+        } catch {
+          this.diagnostics?.recordExportFailure('span', filtered.length);
+          resultCallback({
+            code: ExportResultCode.FAILED,
+            error: new Error('span exporter failed synchronously'),
+          });
+        }
       },
-      (error) => {
-        resultCallback({ code: ExportResultCode.FAILED, error });
+      () => {
+        this.diagnostics?.recordExportFailure('span', spans.length);
+        resultCallback({
+          code: ExportResultCode.FAILED,
+          error: new Error('span preparation failed'),
+        });
       },
     );
   }

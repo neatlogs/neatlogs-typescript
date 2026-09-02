@@ -95,12 +95,20 @@ vi.mock('../../src/core/log.js', () => ({
   _setOtelLogger: vi.fn(),
 }));
 
-import { init, flush, shutdown, isDebugEnabled, getSessionConfig } from '../../src/init.js';
+import {
+  init,
+  flush,
+  shutdown,
+  isDebugEnabled,
+  getSessionConfig,
+  getDeliveryDiagnostics,
+} from '../../src/init.js';
 
 describe('init() edge cases', () => {
   beforeEach(() => {
     delete process.env.NEATLOGS_API_KEY;
     delete process.env.NEATLOGS_DISABLE_EXPORT;
+    delete process.env.NEATLOGS_UPLOADS_ENABLED;
   });
 
   afterEach(async () => {
@@ -249,6 +257,25 @@ describe('init() edge cases', () => {
     await init({ apiKey: 'test-key' });
 
     expect(OTLPTraceExporter).not.toHaveBeenCalled();
+  });
+
+  it('keeps authenticated uploads disabled by default', async () => {
+    await init({ apiKey: 'test-key' });
+
+    expect(getDeliveryDiagnostics()).toMatchObject({
+      uploadAuthorityAvailable: false,
+      uploadAuthorityReason: 'telemetry_uploads_disabled',
+    });
+  });
+
+  it('enables authenticated uploads only through the typed option or environment gate', async () => {
+    process.env.NEATLOGS_UPLOADS_ENABLED = 'true';
+    await init({ apiKey: 'test-key' });
+
+    expect(getDeliveryDiagnostics()).toMatchObject({
+      uploadAuthorityAvailable: true,
+      uploadAuthorityReason: '',
+    });
   });
 
   it('with workflowName as empty string resolves to default', async () => {

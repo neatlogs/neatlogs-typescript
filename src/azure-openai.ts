@@ -19,6 +19,8 @@
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getProviderTracer } from './core/auto-root.js';
+import { captureMedia } from './core/media.js';
+import { ChoiceAccumulator } from './core/choice-accumulator.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -53,15 +55,21 @@ export function traceTool<TArgs = any, TResult = any>(
         attributes: {
           'neatlogs.span.kind': 'TOOL',
           'neatlogs.tool.name': name,
-          'input.value': safeStringify(args),
         },
       },
       getNeatlogsParentContext(),
     );
+    span.setAttribute(
+      'input.value',
+      safeStringify(captureMedia(span, 'neatlogs.tool.input', args, 'input')),
+    );
     return withNeatlogsSpan(span, async () => {
       try {
         const result = await fn(args);
-        span.setAttribute('output.value', safeStringify(result));
+        span.setAttribute(
+          'output.value',
+          safeStringify(captureMedia(span, 'neatlogs.tool.output', result, 'output')),
+        );
         span.setStatus({ code: SpanStatusCode.OK });
         return result;
       } catch (err) {
@@ -132,7 +140,13 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
       if (typeof msg.content === 'string') {
         span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, msg.content);
       } else if (msg.content) {
-        span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, safeStringify(msg.content));
+        const captured = captureMedia(
+          span,
+          `neatlogs.llm.input_messages.${i}`,
+          msg.content,
+          'input',
+        );
+        span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, safeStringify(captured));
       }
       if (msg.tool_call_id) {
         span.setAttribute(`neatlogs.llm.input_messages.${i}.tool_call_id`, msg.tool_call_id);
@@ -191,17 +205,33 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         'neatlogs.llm.provider': PROVIDER,
         'neatlogs.llm.system': SYSTEM,
         'neatlogs.llm.model_name': model,
-        'input.value': safeStringify(opts?.input ?? ''),
+        'input.value': '',
       },
     }, getNeatlogsParentContext());
+
+    const capturedInput = captureMedia(
+      span,
+      'neatlogs.llm.input_messages.0',
+      opts?.input,
+      'input',
+    );
+    span.setAttribute('input.value', safeStringify(capturedInput ?? ''));
 
     const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
       (response: any) => {
+        const capturedOutput = captureMedia(
+          span,
+          'neatlogs.llm.output_messages.0',
+          response?.output,
+          'output',
+        );
         if (response?.output_text) {
           span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
           span.setAttribute('neatlogs.llm.output_messages.0.content', response.output_text);
+        } else if (response?.output) {
+          span.setAttribute('output.value', safeStringify(capturedOutput));
         }
         if (response?.model) span.setAttribute('neatlogs.llm.model_name', response.model);
         if (response?.usage) {
@@ -225,12 +255,14 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
 // ---------------------------------------------------------------------------
 
 function wrapAsyncIterableStream(stream: any, span: Span): any {
-  const chunks: any[] = [];
+  const accumulator = new ChoiceAccumulator();
+  const safeSpan = mediaSafeAccumulatorSpan(span);
+  let cancellationRequested = false;
   const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
-    span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
+    accumulator.addResponse(stream, span);
+    accumulator.finish(safeSpan);
     return stream;
   }
 
@@ -244,89 +276,32 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamChunks(span, chunks);
+            accumulator.finish(safeSpan, cancellationRequested);
             return result;
           }
-          chunks.push(result.value);
+          accumulator.addChunk(span, result.value);
           return result;
         } catch (err) {
-          recordError(span, err);
+          accumulator.fail(safeSpan, err);
           throw err;
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
-        finalizeStreamChunks(span, chunks);
-        return iterator.return?.(value) ?? { done: true, value: undefined };
+        cancellationRequested = true;
+        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+        if (result.done) accumulator.finish(safeSpan, true);
+        else accumulator.addChunk(span, result.value);
+        return result;
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
-        recordError(span, err);
-        return iterator.throw?.(err) ?? { done: true, value: undefined };
+        accumulator.fail(safeSpan, err);
+        if (iterator.throw) return iterator.throw(err);
+        throw err;
       },
     };
   };
 
   return wrapped;
-}
-
-function finalizeStreamChunks(span: Span, chunks: any[]): void {
-  const textParts: string[] = [];
-  const toolCallsAcc: Record<number, { id: string; name: string; arguments: string }> = {};
-  let finishReason = '';
-  let model = '';
-  let usage: any = null;
-
-  for (const chunk of chunks) {
-    if (!chunk?.choices?.length) {
-      if (chunk?.usage) usage = chunk.usage;
-      continue;
-    }
-    const choice = chunk.choices[0];
-    const delta = choice?.delta;
-    if (delta?.content) textParts.push(delta.content);
-    if (delta?.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const idx = tc.index ?? 0;
-        if (!toolCallsAcc[idx]) toolCallsAcc[idx] = { id: '', name: '', arguments: '' };
-        if (tc.id) toolCallsAcc[idx].id = tc.id;
-        if (tc.function?.name) toolCallsAcc[idx].name = tc.function.name;
-        if (tc.function?.arguments) toolCallsAcc[idx].arguments += tc.function.arguments;
-      }
-    }
-    if (choice?.finish_reason) finishReason = choice.finish_reason;
-    if (chunk?.model) model = chunk.model;
-  }
-
-  const fullText = textParts.join('');
-  if (fullText) {
-    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', fullText);
-  }
-
-  let j = 0;
-  for (const tc of Object.values(toolCallsAcc)) {
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.id`, tc.id);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.name`, tc.name);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.arguments`, tc.arguments);
-    j++;
-  }
-
-  if (model) span.setAttribute('neatlogs.llm.model_name', model);
-  if (finishReason) span.setAttribute('neatlogs.llm.finish_reason', finishReason);
-
-  if (usage) {
-    if (usage.prompt_tokens != null) span.setAttribute('neatlogs.llm.token_count.prompt', usage.prompt_tokens);
-    if (usage.completion_tokens != null) span.setAttribute('neatlogs.llm.token_count.completion', usage.completion_tokens);
-    if (usage.total_tokens != null) span.setAttribute('neatlogs.llm.token_count.total', usage.total_tokens);
-    if (usage.prompt_tokens_details?.cached_tokens != null) {
-      span.setAttribute('neatlogs.llm.token_count.cache_read', usage.prompt_tokens_details.cached_tokens);
-    }
-    if (usage.completion_tokens_details?.reasoning_tokens != null) {
-      span.setAttribute('neatlogs.llm.token_count.reasoning', usage.completion_tokens_details.reasoning_tokens);
-    }
-  }
-
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -341,14 +316,30 @@ function finalizeChatResponse(span: Span, response: any): void {
 
     span.setAttribute(`neatlogs.llm.output_messages.${i}.role`, 'assistant');
     if (message.content) {
-      span.setAttribute(`neatlogs.llm.output_messages.${i}.content`, message.content);
+      const captured = captureMedia(
+        span,
+        `neatlogs.llm.output_messages.${i}`,
+        message.content,
+        'output',
+      );
+      span.setAttribute(
+        `neatlogs.llm.output_messages.${i}.content`,
+        typeof captured === 'string' ? captured : safeStringify(captured),
+      );
     }
     if (message.tool_calls) {
       for (let j = 0; j < message.tool_calls.length; j++) {
         const tc = message.tool_calls[j];
         span.setAttribute(`neatlogs.llm.tool_calls.${j}.id`, tc.id ?? '');
         span.setAttribute(`neatlogs.llm.tool_calls.${j}.name`, tc.function?.name ?? '');
-        span.setAttribute(`neatlogs.llm.tool_calls.${j}.arguments`, tc.function?.arguments ?? '');
+        span.setAttribute(
+          `neatlogs.llm.tool_calls.${j}.arguments`,
+          sanitizedJsonToolArguments(
+            span,
+            `neatlogs.llm.tool_calls.${j}.arguments`,
+            tc.function?.arguments ?? '{}',
+          ),
+        );
       }
     }
     if (choices[i].finish_reason) {
@@ -378,6 +369,45 @@ function finalizeChatResponse(span: Span, response: any): void {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+function sanitizedJsonToolArguments(
+  span: Span,
+  prefix: string,
+  value: unknown,
+): string {
+  if (typeof value !== 'string') {
+    return safeStringify(captureMedia(span, prefix, value, 'output'));
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    span.setAttribute('neatlogs.stream.incomplete', true);
+    span.setAttribute('neatlogs.stream.incomplete_reason', 'invalid_tool_arguments');
+    return '[incomplete: invalid tool arguments omitted]';
+  }
+  const original = safeStringify(parsed);
+  const sanitized = safeStringify(captureMedia(span, prefix, parsed, 'output'));
+  return original === sanitized ? value : sanitized;
+}
+
+function mediaSafeAccumulatorSpan(span: Span): Span {
+  return new Proxy(span, {
+    get(target, property) {
+      if (property === 'setAttribute') {
+        return (name: string, value: unknown) =>
+          target.setAttribute(
+            name,
+            /^neatlogs\.llm\.tool_calls\.\d+\.arguments$/.test(name)
+              ? sanitizedJsonToolArguments(target, name, value)
+              : (value as any),
+          );
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
 
 function setInvocationParams(span: Span, opts: any): void {
   if (opts?.temperature != null) span.setAttribute('neatlogs.llm.temperature', opts.temperature);

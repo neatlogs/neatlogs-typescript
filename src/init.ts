@@ -34,6 +34,7 @@ import { getRegisteredClients } from "./core/client-registry.js";
 import { FilteringExporter } from "./core/filtering-exporter.js";
 import { ByteLimitedSpanExporter } from "./core/byte-limited-exporter.js";
 import { MaskingLogExporter } from "./core/masking-log-exporter.js";
+import { discardPendingMediaOwner } from "./core/media.js";
 import {
   DeliveryDiagnostics,
   type DeliveryDiagnosticsSnapshot,
@@ -52,6 +53,13 @@ import { __version__ } from "./version.js";
 import { NeatlogsConfigurationError } from "./errors.js";
 import { DEFAULT_INGEST_ENDPOINT, exportQueueCapacity } from "./constants.js";
 import { runByDeadline } from "./core/deadline.js";
+import {
+  DisabledUploadAuthority,
+  isUploadAuthority,
+  resolveUploadAuthority,
+  uploadsEnabledFromEnv,
+  type UploadAuthorityOption,
+} from "./core/upload-authority.js";
 import type { InitOptions } from "./types.js";
 
 const logger = getLogger();
@@ -76,6 +84,7 @@ interface InitIdentity {
   serialized: string;
   mask: InitOptions["mask"];
   tracerProvider: InitOptions["tracerProvider"];
+  uploadAuthority: UploadAuthorityOption | undefined;
 }
 let _initIdentity: InitIdentity | null = null;
 
@@ -156,6 +165,7 @@ const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
   "flushInterval",
   "piiEnabled",
   "piiSpanTypes",
+  "uploadAuthority",
 ]);
 
 function validateInitOptions(options: InitOptions): void {
@@ -184,6 +194,15 @@ function validateInitOptions(options: InitOptions): void {
       options.sampleRate > 1)
   ) {
     throw new RangeError("sampleRate must be a finite number between 0 and 1.");
+  }
+  if (
+    options.uploadAuthority !== undefined &&
+    typeof options.uploadAuthority !== "boolean" &&
+    !isUploadAuthority(options.uploadAuthority)
+  ) {
+    throw new TypeError(
+      "uploadAuthority must be a boolean or an UploadAuthority implementation",
+    );
   }
 }
 
@@ -262,11 +281,20 @@ function initIdentity(options: InitOptions): InitIdentity {
     flushInterval: options.flushInterval ?? 5,
     piiEnabled: options.piiEnabled ?? null,
     piiSpanTypes: options.piiSpanTypes ?? [],
+    uploadsEnabled:
+      typeof options.uploadAuthority === "boolean"
+        ? options.uploadAuthority
+        : isUploadAuthority(options.uploadAuthority)
+          ? options.uploadAuthority.available
+          : uploadsEnabledFromEnv(process.env.NEATLOGS_UPLOADS_ENABLED),
   });
   return {
     serialized,
     mask: options.mask,
     tracerProvider: options.tracerProvider,
+    uploadAuthority: isUploadAuthority(options.uploadAuthority)
+      ? options.uploadAuthority
+      : undefined,
   };
 }
 
@@ -278,7 +306,8 @@ function sameInitIdentity(
     left !== null &&
     left.serialized === right.serialized &&
     left.mask === right.mask &&
-    left.tracerProvider === right.tracerProvider
+    left.tracerProvider === right.tracerProvider &&
+    left.uploadAuthority === right.uploadAuthority
   );
 }
 
@@ -397,6 +426,18 @@ async function _performInit(options: InitOptions): Promise<void> {
   // 6. Parse base URL from endpoint
   const endpoint = options.endpoint ?? DEFAULT_INGEST_ENDPOINT;
   const baseUrl = new URL(endpoint).origin;
+  const uploadAuthority = disableExportResolved
+    ? new DisabledUploadAuthority("export_disabled")
+    : resolveUploadAuthority(
+        options.uploadAuthority,
+        process.env.NEATLOGS_UPLOADS_ENABLED,
+        baseUrl,
+        resolvedKey,
+      );
+  _deliveryDiagnostics.configureUploadAuthority(
+    uploadAuthority.available,
+    uploadAuthority.unavailableReason,
+  );
 
   // 7. Set session config. Session & end-user identity are PER-REQUEST (set via
   // trace()/span() or identify()), never on init() — only the operator userId
@@ -464,6 +505,8 @@ async function _performInit(options: InitOptions): Promise<void> {
     mask: options.mask,
     emitCompletionMarkers: false,
     ownAllSpans: _ownsTracerProvider,
+    mediaUploadsAvailable: uploadAuthority.available,
+    mediaUploadsUnavailableReason: uploadAuthority.unavailableReason,
   });
   provider.addSpanProcessor(_spanProcessor);
 
@@ -482,8 +525,10 @@ async function _performInit(options: InitOptions): Promise<void> {
         }),
         undefined,
         _deliveryDiagnostics,
+        uploadAuthority,
       ),
       _deliveryDiagnostics,
+      uploadAuthority,
     );
 
     const batchSize = options.batchSize ?? 100;
@@ -894,6 +939,7 @@ async function _performShutdown(
   _tracerProvider = null;
   _ownsTracerProvider = false;
   _setNeatlogsProvider(null);
+  discardPendingMediaOwner();
   _logProvider = null;
   _spanProcessor = null;
   _transportSpanProcessors = [];

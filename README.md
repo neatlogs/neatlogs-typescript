@@ -115,6 +115,7 @@ await init({
 | `flushInterval` | `number` | `5` | Seconds between batch flushes. |
 | `piiEnabled` | `boolean` | — | Override team-level PII redaction toggle. |
 | `piiSpanTypes` | `string[]` | — | Override which span types have server-side PII redaction. |
+| `uploadAuthority` | `boolean \| UploadAuthority` | `false` | Enable the authenticated typed-media/oversized-OTLP upload contract, or inject an implementation. Keep disabled until the backend contract is deployed. |
 
 ---
 
@@ -484,6 +485,7 @@ await shutdown();
 |----------|-------------|
 | `NEATLOGS_API_KEY` | API key (fallback when `apiKey` option is not provided) |
 | `NEATLOGS_DISABLE_EXPORT` | Set to `true`, `1`, or `yes` to disable export |
+| `NEATLOGS_UPLOADS_ENABLED` | Set to `true`, `1`, or `yes` to enable authenticated typed-media and oversized-OTLP uploads |
 
 ### Programmatic Configuration
 

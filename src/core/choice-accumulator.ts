@@ -1,6 +1,12 @@
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
 import { createHash } from "node:crypto";
-import { setMediaAttributes } from "./media.js";
+import { captureMediaWithIndex, sanitizeMediaPayload } from "./media.js";
+import {
+  DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
+  DEFAULT_MAX_STREAM_CAPTURE_BYTES,
+  DEFAULT_MAX_STREAM_CAPTURE_ITEMS,
+  utf8ByteLength,
+} from "../constants.js";
 
 interface ToolCallState {
   id: string;
@@ -9,18 +15,17 @@ interface ToolCallState {
   type: string;
   details: string;
   synthetic: boolean;
+  incomplete: boolean;
 }
 
 interface ChoiceState {
   role: string;
   content: string[];
   reasoning: string[];
-  mediaValues: unknown[];
+  mediaCount: number;
   finishReason: string | null;
   toolCalls: Map<number, ToolCallState>;
 }
-
-const MAX_SEMANTIC_STREAM_EVENTS = 128;
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -35,10 +40,6 @@ function stringify(value: unknown): string {
   }
 }
 
-function byteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
 /** Incremental OpenAI-compatible choice/tool-fragment accumulator. */
 export class ChoiceAccumulator {
   private readonly choices = new Map<number, ChoiceState>();
@@ -47,6 +48,12 @@ export class ChoiceAccumulator {
   private responseId = "";
   private chunkCount = 0;
   private finalized = false;
+  private capturedBytes = 0;
+  private capturedItems = 0;
+  private droppedBytes = 0;
+  private droppedItems = 0;
+  private toolCallCount = 0;
+  private readonly incompleteReasons = new Set<string>();
 
   constructor(
     private readonly captureFidelity:
@@ -56,7 +63,7 @@ export class ChoiceAccumulator {
       | "unknown" = "native",
   ) {}
 
-  addResponse(response: any): void {
+  addResponse(response: any, span?: Span): void {
     this.captureEnvelope(response);
     for (
       let position = 0;
@@ -65,19 +72,37 @@ export class ChoiceAccumulator {
     ) {
       const choice = response.choices[position];
       const index = Number.isInteger(choice?.index) ? choice.index : position;
+      if (!this.canRetainChoice(index)) continue;
       const message = choice?.message ?? {};
       const state = this.choice(index);
-      state.role = message.role || "assistant";
-      if (message.content != null)
-        state.content.push(stringify(message.content));
-      if (message.content != null && typeof message.content !== "string") {
-        state.mediaValues.push(message.content);
+      if (message.role && String(message.role) !== state.role) {
+        this.retainString(String(message.role), (value) => (state.role = value));
       }
-      if (message.reasoning_content != null)
-        state.reasoning.push(stringify(message.reasoning_content));
+      if (message.content != null) {
+        const captured = span
+          ? captureMediaWithIndex(
+              span,
+              `neatlogs.llm.output_messages.${index}`,
+              message.content,
+              "output",
+              state.mediaCount,
+            )
+          : {
+              value: sanitizeMediaPayload(message.content, "output"),
+              count: 0,
+            };
+        state.mediaCount += captured.count;
+        this.retainString(stringify(captured.value), (value) => state.content.push(value));
+      }
+      if (message.reasoning_content != null) {
+        this.retainString(stringify(message.reasoning_content), (value) =>
+          state.reasoning.push(value),
+        );
+      }
       this.addToolFragments(index, message.tool_calls);
-      if (choice?.finish_reason != null)
-        state.finishReason = String(choice.finish_reason);
+      if (choice?.finish_reason != null) {
+        this.retainString(String(choice.finish_reason), (value) => (state.finishReason = value));
+      }
     }
   }
 
@@ -92,26 +117,42 @@ export class ChoiceAccumulator {
     ) {
       const choice = chunk.choices[position];
       const index = Number.isInteger(choice?.index) ? choice.index : position;
+      if (!this.canRetainChoice(index)) continue;
       const delta = choice?.delta ?? {};
       const state = this.choice(index);
-      if (delta.role) state.role = String(delta.role);
-      const content = delta.content == null ? "" : stringify(delta.content);
+      if (delta.role && String(delta.role) !== state.role) {
+        this.retainString(String(delta.role), (value) => (state.role = value));
+      }
+      const captured =
+        delta.content == null
+          ? { value: "", count: 0 }
+          : captureMediaWithIndex(
+              span,
+              `neatlogs.llm.output_messages.${index}`,
+              delta.content,
+              "output",
+              state.mediaCount,
+            );
+      state.mediaCount += captured.count;
+      const content = delta.content == null ? "" : stringify(captured.value);
       const reasoning =
         delta.reasoning_content == null
           ? ""
           : stringify(delta.reasoning_content);
-      if (content) state.content.push(content);
-      if (delta.content != null && typeof delta.content !== "string") {
-        state.mediaValues.push(delta.content);
-      }
-      if (reasoning) state.reasoning.push(reasoning);
+      const contentBytes = content
+        ? this.retainString(content, (value) => state.content.push(value))
+        : 0;
+      const reasoningBytes = reasoning
+        ? this.retainString(reasoning, (value) => state.reasoning.push(value))
+        : 0;
       this.addToolFragments(index, delta.tool_calls);
-      if (choice?.finish_reason != null)
-        state.finishReason = String(choice.finish_reason);
+      if (choice?.finish_reason != null) {
+        this.retainString(String(choice.finish_reason), (value) => (state.finishReason = value));
+      }
       summary.push({
         choice_index: index,
-        content_bytes: byteLength(content),
-        reasoning_bytes: byteLength(reasoning),
+        content_bytes: contentBytes,
+        reasoning_bytes: reasoningBytes,
         tool_fragments: Array.isArray(delta.tool_calls)
           ? delta.tool_calls.length
           : 0,
@@ -119,7 +160,7 @@ export class ChoiceAccumulator {
       });
     }
     if (
-      chunkIndex < MAX_SEMANTIC_STREAM_EVENTS &&
+      chunkIndex < DEFAULT_MAX_SEMANTIC_STREAM_EVENTS &&
       (summary.length > 0 || chunk?.usage)
     ) {
       span.addEvent("neatlogs.stream.chunk", {
@@ -145,9 +186,6 @@ export class ChoiceAccumulator {
       if (content) span.setAttribute(`${prefix}.content`, content);
       const reasoning = choice.reasoning.join("");
       if (reasoning) span.setAttribute(`${prefix}.thinking`, reasoning);
-      if (choice.mediaValues.length > 0) {
-        setMediaAttributes(span, prefix, choice.mediaValues, "output");
-      }
       if (choice.finishReason !== null) {
         span.setAttribute(
           `neatlogs.llm.choices.${choiceIndex}.finish_reason`,
@@ -172,7 +210,12 @@ export class ChoiceAccumulator {
         span.setAttribute(`${toolPrefix}.id`, tool.id);
         if (tool.type) span.setAttribute(`${toolPrefix}.type`, tool.type);
         span.setAttribute(`${toolPrefix}.name`, tool.name);
-        span.setAttribute(`${toolPrefix}.arguments`, tool.arguments);
+        span.setAttribute(
+          `${toolPrefix}.arguments`,
+          tool.incomplete
+            ? "[incomplete: stream capture limit reached]"
+            : tool.arguments,
+        );
         if (tool.details)
           span.setAttribute(`${toolPrefix}.details`, tool.details);
         span.setAttribute(`${toolPrefix}.choice_index`, choiceIndex);
@@ -186,13 +229,30 @@ export class ChoiceAccumulator {
     if (this.responseId)
       span.setAttribute("neatlogs.llm.response_id", this.responseId);
     this.applyUsage(span);
-    span.setAttribute("neatlogs.capture_fidelity", this.captureFidelity);
+    span.setAttribute(
+      "neatlogs.capture_fidelity",
+      this.incompleteReasons.size > 0 ? "truncated" : this.captureFidelity,
+    );
+    if (this.chunkCount > 0 || this.incompleteReasons.size > 0) {
+      span.setAttribute("neatlogs.stream.capture_bytes", this.capturedBytes);
+      span.setAttribute("neatlogs.stream.capture_items", this.capturedItems);
+    }
+    if (this.incompleteReasons.size > 0) {
+      span.setAttribute("neatlogs.stream.incomplete", true);
+      span.setAttribute(
+        "neatlogs.stream.incomplete_reason",
+        [...this.incompleteReasons].sort().join(","),
+      );
+      span.setAttribute("neatlogs.stream.dropped_bytes", this.droppedBytes);
+      span.setAttribute("neatlogs.stream.dropped_bytes_is_lower_bound", true);
+      span.setAttribute("neatlogs.stream.dropped_items", this.droppedItems);
+    }
     if (this.chunkCount > 0) {
       span.setAttribute("neatlogs.stream.chunk_count", this.chunkCount);
-      if (this.chunkCount > MAX_SEMANTIC_STREAM_EVENTS) {
+      if (this.chunkCount > DEFAULT_MAX_SEMANTIC_STREAM_EVENTS) {
         span.setAttribute(
           "neatlogs.stream.events_dropped",
-          this.chunkCount - MAX_SEMANTIC_STREAM_EVENTS,
+          this.chunkCount - DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
         );
       }
     }
@@ -225,6 +285,36 @@ export class ChoiceAccumulator {
     span.end();
   }
 
+  private canRetainChoice(index: number): boolean {
+    if (this.choices.has(index)) return true;
+    if (this.choices.size < DEFAULT_MAX_STREAM_CAPTURE_ITEMS) return true;
+    this.markDropped("item_limit_exceeded", 0);
+    return false;
+  }
+
+  private retainString(value: string, retain: (value: string) => void): number {
+    const remaining = Math.max(0, DEFAULT_MAX_STREAM_CAPTURE_BYTES - this.capturedBytes);
+    const bytes = utf8ByteLength(value, remaining);
+    if (this.capturedItems >= DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
+      this.markDropped("item_limit_exceeded", bytes);
+      return 0;
+    }
+    if (bytes > remaining) {
+      this.markDropped("byte_limit_exceeded", bytes);
+      return 0;
+    }
+    retain(value);
+    this.capturedItems += 1;
+    this.capturedBytes += bytes;
+    return bytes;
+  }
+
+  private markDropped(reason: string, bytes: number): void {
+    this.droppedItems += 1;
+    this.droppedBytes += bytes;
+    this.incompleteReasons.add(reason);
+  }
+
   private choice(index: number): ChoiceState {
     let choice = this.choices.get(index);
     if (!choice) {
@@ -232,7 +322,7 @@ export class ChoiceAccumulator {
         role: "assistant",
         content: [],
         reasoning: [],
-        mediaValues: [],
+        mediaCount: 0,
         finishReason: null,
         toolCalls: new Map(),
       };
@@ -251,6 +341,10 @@ export class ChoiceAccumulator {
       const tools = this.choice(choiceIndex).toolCalls;
       let tool = tools.get(index);
       if (!tool) {
+        if (this.toolCallCount >= DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
+          this.markDropped("item_limit_exceeded", 0);
+          continue;
+        }
         tool = {
           id: "",
           name: "",
@@ -258,23 +352,48 @@ export class ChoiceAccumulator {
           type: "",
           details: "",
           synthetic: false,
+          incomplete: false,
         };
         tools.set(index, tool);
+        this.toolCallCount += 1;
       }
-      if (fragment?.id) tool.id = String(fragment.id);
-      if (fragment?.type) tool.type = String(fragment.type);
-      if (fragment?.function?.name) tool.name = String(fragment.function.name);
+      if (fragment?.id && String(fragment.id) !== tool.id) {
+        this.retainString(String(fragment.id), (value) => (tool!.id = value));
+      }
+      if (fragment?.type && String(fragment.type) !== tool.type) {
+        this.retainString(String(fragment.type), (value) => (tool!.type = value));
+      }
+      if (fragment?.function?.name && String(fragment.function.name) !== tool.name) {
+        this.retainString(String(fragment.function.name), (value) => (tool!.name = value));
+      }
       if (fragment?.function?.arguments != null) {
-        tool.arguments += stringify(fragment.function.arguments);
+        const retained = this.retainString(
+          stringify(fragment.function.arguments),
+          (value) => (tool!.arguments += value),
+        );
+        if (retained === 0) tool.incomplete = true;
       }
-      if (fragment && !fragment.function) tool.details = stringify(fragment);
+      if (fragment && !fragment.function) {
+        const retained = this.retainString(
+          stringify(fragment),
+          (value) => (tool!.details = value),
+        );
+        if (retained === 0) tool.incomplete = true;
+      }
     }
   }
 
   private captureEnvelope(value: any): void {
-    if (value?.usage) this.usage = value.usage;
-    if (value?.model) this.model = String(value.model);
-    if (value?.id) this.responseId = String(value.id);
+    if (value?.usage) {
+      const safeUsage = sanitizeMediaPayload(value.usage, "output");
+      this.retainString(stringify(safeUsage), () => (this.usage = safeUsage));
+    }
+    if (value?.model && String(value.model) !== this.model) {
+      this.retainString(String(value.model), (model) => (this.model = model));
+    }
+    if (value?.id && String(value.id) !== this.responseId) {
+      this.retainString(String(value.id), (id) => (this.responseId = id));
+    }
   }
 
   private applyUsage(span: Span): void {

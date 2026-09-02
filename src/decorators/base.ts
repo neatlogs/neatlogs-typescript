@@ -13,15 +13,25 @@ import { registerMask } from "../core/mask.js";
 import { applyEndUserAttributes, isRootSpan } from "../core/end-user.js";
 import { applySessionAttributes } from "../core/session.js";
 import {
+  captureMedia,
+  captureMediaWithIndex,
+  sanitizeMediaPayload,
+} from "../core/media.js";
+import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
   withNeatlogsSpan,
 } from "../core/provider.js";
 import type { SpanOptions, MaskFunction } from "../types.js";
+import {
+  DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
+  DEFAULT_MAX_STREAM_CAPTURE_BYTES,
+  utf8ByteLength,
+} from "../constants.js";
 
 const logger = getLogger();
 const TRACER_NAME = "neatlogs";
-const MAX_SEMANTIC_STREAM_EVENTS = 128;
+const STREAM_CAPTURE_TRUNCATED = "[TRUNCATED_STREAM_OUTPUT]";
 
 /** Safely serialize any value to JSON string. */
 export function safeJsonDumps(value: any): string {
@@ -42,6 +52,10 @@ export function safeJsonDumps(value: any): string {
 /** Serialize an object for span attributes. Handles toJSON(), plain objects, primitives. */
 export function serializeObj(obj: any): any {
   if (obj === null || obj === undefined) return obj;
+  // Preserve binary views until media capture can classify and sanitize them.
+  // JSON.stringify retains the previous numeric-object representation for
+  // ordinary, non-media Uint8Array values.
+  if (obj instanceof Uint8Array) return obj;
   if (
     typeof obj === "string" ||
     typeof obj === "number" ||
@@ -141,6 +155,10 @@ export function decorateSpan<TArgs extends any[], TReturn>(
   const spanName = opts.spanName ?? opts.name ?? (fn.name || "anonymous");
   const captureInput = opts.captureInput !== false;
   const captureOutput = opts.captureOutput !== false;
+  const mediaPrefix = (direction: "input" | "output"): string => {
+    const kind = String(opts.kind ?? "span").trim().toLowerCase() || "span";
+    return `neatlogs.${kind}.${direction}`;
+  };
 
   const wrapped = (...args: TArgs): any => {
     // Resolve the tracer at CALL time, not definition time: a decorator applied
@@ -158,13 +176,24 @@ export function decorateSpan<TArgs extends any[], TReturn>(
       let finished = false;
       let streamInterrupted = false;
       const streamChunks: any[] = [];
+      let totalStreamChunks = 0;
+      let retainedStreamBytes = 0;
+      let droppedStreamChunks = 0;
+      let streamMediaCount = 0;
 
       const captureResult = (result: any): void => {
         if (captureOutput) {
           try {
+            const serialized = serializeObj(result);
+            const captured = captureMedia(
+              span,
+              mediaPrefix("output"),
+              serialized,
+              "output",
+            );
             span.setAttribute(
               "output.value",
-              safeJsonDumps(serializeObj(result)),
+              safeJsonDumps(captured),
             );
           } catch (err) {
             logger.debug(`Failed to capture output: ${err}`);
@@ -190,23 +219,45 @@ export function decorateSpan<TArgs extends any[], TReturn>(
       };
 
       const setStreamCounts = (): void => {
-        span.setAttribute("neatlogs.stream.chunk_count", streamChunks.length);
-        if (streamChunks.length > MAX_SEMANTIC_STREAM_EVENTS) {
+        span.setAttribute("neatlogs.stream.chunk_count", totalStreamChunks);
+        if (totalStreamChunks > DEFAULT_MAX_SEMANTIC_STREAM_EVENTS) {
           span.setAttribute(
             "neatlogs.stream.events_dropped",
-            streamChunks.length - MAX_SEMANTIC_STREAM_EVENTS,
+            totalStreamChunks - DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
+          );
+        }
+        if (droppedStreamChunks > 0) {
+          span.setAttribute("neatlogs.stream.output_truncated", true);
+          span.setAttribute(
+            "neatlogs.stream.chunks_not_captured",
+            droppedStreamChunks,
+          );
+          span.setAttribute(
+            "neatlogs.stream.retained_bytes",
+            retainedStreamBytes,
           );
         }
       };
+
+      const streamCaptureValue = (): any[] =>
+        droppedStreamChunks > 0
+          ? [
+              ...streamChunks,
+              {
+                neatlogs_stream_capture: STREAM_CAPTURE_TRUNCATED,
+                chunks_not_captured: droppedStreamChunks,
+              },
+            ]
+          : streamChunks;
 
       const finishError = (error: any): void => {
         if (finished) return;
         finished = true;
         if (error?.name === "AbortError") {
           span.setAttribute("neatlogs.stream.cancelled", true);
-          if (streamChunks.length > 0) {
+          if (totalStreamChunks > 0) {
             setStreamCounts();
-            captureResult(streamChunks);
+            captureResult(streamCaptureValue());
           }
           span.setStatus({ code: SpanStatusCode.UNSET });
           span.end();
@@ -223,13 +274,48 @@ export function decorateSpan<TArgs extends any[], TReturn>(
       };
 
       const recordChunk = (chunk: any): void => {
-        const index = streamChunks.length;
-        streamChunks.push(chunk);
-        if (index >= MAX_SEMANTIC_STREAM_EVENTS) return;
-        const serialized = safeJsonDumps(serializeObj(chunk));
+        const index = totalStreamChunks++;
+        if (index >= DEFAULT_MAX_SEMANTIC_STREAM_EVENTS) {
+          droppedStreamChunks += 1;
+          return;
+        }
+
+        let serializedValue: unknown;
+        let serialized: string;
+        try {
+          serializedValue = serializeObj(chunk);
+          serialized = safeJsonDumps(
+            sanitizeMediaPayload(serializedValue, "output"),
+          );
+        } catch {
+          droppedStreamChunks += 1;
+          return;
+        }
+        const encodedBytes = utf8ByteLength(
+          serialized,
+          DEFAULT_MAX_STREAM_CAPTURE_BYTES - retainedStreamBytes,
+        );
+        if (
+          retainedStreamBytes + encodedBytes >
+          DEFAULT_MAX_STREAM_CAPTURE_BYTES
+        ) {
+          droppedStreamChunks += 1;
+          return;
+        }
+
+        const captured = captureMediaWithIndex(
+          span,
+          mediaPrefix("output"),
+          serializedValue,
+          "output",
+          streamMediaCount,
+        );
+        streamMediaCount += captured.count;
+        streamChunks.push(captured.value);
+        retainedStreamBytes += encodedBytes;
         const summary: Record<string, unknown> = {
           value_type: Array.isArray(chunk) ? "array" : typeof chunk,
-          encoded_bytes: new TextEncoder().encode(serialized).byteLength,
+          encoded_bytes: encodedBytes,
         };
         if (Array.isArray(chunk)) summary.items = chunk.length;
         else if (chunk && typeof chunk === "object")
@@ -243,13 +329,13 @@ export function decorateSpan<TArgs extends any[], TReturn>(
       const finishStream = (cancelled = false): void => {
         setStreamCounts();
         if (!cancelled) {
-          finishSuccess(streamChunks);
+          finishSuccess(streamCaptureValue());
           return;
         }
         if (finished) return;
         finished = true;
         span.setAttribute("neatlogs.stream.cancelled", true);
-        captureResult(streamChunks);
+        captureResult(streamCaptureValue());
         span.setStatus({ code: SpanStatusCode.UNSET });
         span.end();
       };
@@ -514,7 +600,17 @@ export function decorateSpan<TArgs extends any[], TReturn>(
               args.length === 1
                 ? serializeObj(args[0])
                 : args.map(serializeObj);
-            span.setAttribute("input.value", safeJsonDumps(inputValue));
+            span.setAttribute(
+              "input.value",
+              safeJsonDumps(
+                captureMedia(
+                  span,
+                  mediaPrefix("input"),
+                  inputValue,
+                  "input",
+                ),
+              ),
+            );
           } catch (err) {
             logger.debug(`Failed to capture input: ${err}`);
           }

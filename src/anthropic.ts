@@ -15,7 +15,13 @@
  */
 
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
+import {
+  DEFAULT_MAX_STREAM_CAPTURE_BYTES,
+  DEFAULT_MAX_STREAM_CAPTURE_ITEMS,
+  utf8ByteLength,
+} from './constants.js';
 import { getProviderTracer } from './core/auto-root.js';
+import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -52,15 +58,21 @@ export function traceTool<TInput = any, TResult = any>(
         attributes: {
           'neatlogs.span.kind': 'TOOL',
           'neatlogs.tool.name': name,
-          'input.value': safeStringify(input),
         },
       },
       getNeatlogsParentContext(),
     );
+    span.setAttribute(
+      'input.value',
+      safeStringify(captureMedia(span, 'neatlogs.tool.input', input, 'input')),
+    );
     return withNeatlogsSpan(span, async () => {
       try {
         const result = await fn(input);
-        span.setAttribute('output.value', safeStringify(result));
+        span.setAttribute(
+          'output.value',
+          safeStringify(captureMedia(span, 'neatlogs.tool.output', result, 'output')),
+        );
         span.setStatus({ code: SpanStatusCode.OK });
         return result;
       } catch (err) {
@@ -186,7 +198,7 @@ function tracedMessagesStream(original: (...args: any[]) => any) {
 // ---------------------------------------------------------------------------
 
 function wrapStreamIterable(stream: any, span: Span): any {
-  const events: any[] = [];
+  const accumulated = newAnthropicStreamAccumulator();
   const originalAsyncIterator = stream[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
@@ -205,10 +217,10 @@ function wrapStreamIterable(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamEvents(span, events);
+            finalizeStreamEvents(span, accumulated);
             return result;
           }
-          events.push(result.value);
+          addStreamEvent(span, accumulated, result.value);
           return result;
         } catch (err) {
           recordError(span, err);
@@ -216,8 +228,12 @@ function wrapStreamIterable(stream: any, span: Span): any {
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
-        finalizeStreamEvents(span, events);
-        return iterator.return?.(value) ?? { done: true, value: undefined };
+        markStreamIncomplete(accumulated, 'consumer_cancelled');
+        span.setAttribute('neatlogs.stream.cancelled', true);
+        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+        if (result.done) finalizeStreamEvents(span, accumulated);
+        else addStreamEvent(span, accumulated, result.value);
+        return result;
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
         recordError(span, err);
@@ -275,70 +291,168 @@ function wrapMessageStream(messageStream: any, span: Span): any {
 // Stream event finalization
 // ---------------------------------------------------------------------------
 
-function finalizeStreamEvents(span: Span, events: any[]): void {
-  const textParts: string[] = [];
-  const thinkingParts: string[] = [];
-  const toolCalls: Array<{ id: string; name: string; input: string }> = [];
-  let currentToolInput = '';
-  let currentToolId = '';
-  let currentToolName = '';
-  let usage: any = null;
-  let model = '';
-  let stopReason = '';
+interface AnthropicStreamAccumulator {
+  textParts: string[];
+  thinkingParts: string[];
+  toolCalls: Array<{ id: string; name: string; input: string; incomplete: boolean }>;
+  currentToolInput: string[];
+  currentToolId: string;
+  currentToolName: string;
+  currentToolIncomplete: boolean;
+  usage: any;
+  model: string;
+  stopReason: string;
+  mediaCount: number;
+  capturedBytes: number;
+  capturedItems: number;
+  droppedBytes: number;
+  droppedItems: number;
+  incompleteReasons: Set<string>;
+}
 
-  for (const event of events) {
-    const type = event?.type ?? '';
+function newAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
+  return {
+    textParts: [],
+    thinkingParts: [],
+    toolCalls: [],
+    currentToolInput: [],
+    currentToolId: '',
+    currentToolName: '',
+    currentToolIncomplete: false,
+    usage: null,
+    model: '',
+    stopReason: '',
+    mediaCount: 0,
+    capturedBytes: 0,
+    capturedItems: 0,
+    droppedBytes: 0,
+    droppedItems: 0,
+    incompleteReasons: new Set(),
+  };
+}
 
-    if (type === 'content_block_delta') {
-      const delta = event?.delta;
-      if (delta?.type === 'text_delta' && delta.text) textParts.push(delta.text);
-      else if (delta?.type === 'thinking_delta' && delta.thinking) thinkingParts.push(delta.thinking);
-      else if (delta?.type === 'input_json_delta' && delta.partial_json) currentToolInput += delta.partial_json;
-    } else if (type === 'content_block_start') {
-      const block = event?.content_block;
-      if (block?.type === 'tool_use') {
-        currentToolId = block.id ?? '';
-        currentToolName = block.name ?? '';
-        currentToolInput = '';
+function addStreamEvent(
+  span: Span,
+  accumulated: AnthropicStreamAccumulator,
+  event: any,
+): void {
+  const type = event?.type ?? '';
+  if (type === 'content_block_delta') {
+    const delta = event?.delta;
+    if (delta?.type === 'text_delta' && delta.text) {
+      retainStreamString(accumulated, String(delta.text), (value) => {
+        accumulated.textParts.push(value);
+      });
+    }
+    else if (delta?.type === 'thinking_delta' && delta.thinking) {
+      retainStreamString(accumulated, String(delta.thinking), (value) => {
+        accumulated.thinkingParts.push(value);
+      });
+    } else if (delta?.type === 'input_json_delta' && delta.partial_json) {
+      const retained = retainStreamString(accumulated, String(delta.partial_json), (value) => {
+        accumulated.currentToolInput.push(value);
+      });
+      if (!retained) accumulated.currentToolIncomplete = true;
+    }
+  } else if (type === 'content_block_start') {
+    const captured = captureMediaWithIndex(
+      span,
+      'neatlogs.llm.output_messages.0',
+      event?.content_block,
+      'output',
+      accumulated.mediaCount,
+    );
+    accumulated.mediaCount += captured.count;
+    const block = captured.value as any;
+    if (block?.type === 'tool_use') {
+      accumulated.currentToolId = block.id ?? '';
+      accumulated.currentToolName = block.name ?? '';
+      accumulated.currentToolInput = [];
+      accumulated.currentToolIncomplete = false;
+      if (block.input != null && safeStringify(block.input) !== '{}') {
+        const retained = retainStreamString(accumulated, safeStringify(block.input), (value) => {
+          accumulated.currentToolInput.push(value);
+        });
+        if (!retained) accumulated.currentToolIncomplete = true;
       }
-    } else if (type === 'content_block_stop') {
-      if (currentToolName) {
-        toolCalls.push({ id: currentToolId, name: currentToolName, input: currentToolInput });
-        currentToolId = '';
-        currentToolName = '';
-        currentToolInput = '';
+    }
+  } else if (type === 'content_block_stop') {
+    if (accumulated.currentToolName) {
+      if (accumulated.toolCalls.length < DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
+        accumulated.toolCalls.push({
+          id: accumulated.currentToolId,
+          name: accumulated.currentToolName,
+          input: accumulated.currentToolInput.join(''),
+          incomplete: accumulated.currentToolIncomplete,
+        });
+      } else {
+        markStreamIncomplete(accumulated, 'item_limit_exceeded');
+        accumulated.droppedItems += 1;
       }
-    } else if (type === 'message_start') {
-      const msg = event?.message;
-      if (msg?.model) model = msg.model;
-      if (msg?.usage) usage = msg.usage;
-    } else if (type === 'message_delta') {
-      const delta = event?.delta;
-      if (delta?.stop_reason) stopReason = delta.stop_reason;
-      if (event?.usage) usage = { ...(usage ?? {}), ...event.usage };
+      accumulated.currentToolId = '';
+      accumulated.currentToolName = '';
+      accumulated.currentToolInput = [];
+      accumulated.currentToolIncomplete = false;
+    }
+  } else if (type === 'message_start') {
+    const msg = event?.message;
+    if (msg?.model) accumulated.model = msg.model;
+    if (msg?.usage) accumulated.usage = msg.usage;
+  } else if (type === 'message_delta') {
+    const delta = event?.delta;
+    if (delta?.stop_reason) accumulated.stopReason = delta.stop_reason;
+    if (event?.usage) {
+      accumulated.usage = { ...(accumulated.usage ?? {}), ...event.usage };
     }
   }
+}
 
-  const fullText = textParts.join('');
+function finalizeStreamEvents(span: Span, accumulated: AnthropicStreamAccumulator): void {
+  if (accumulated.currentToolName) {
+    markStreamIncomplete(accumulated, 'unterminated_tool_call');
+    if (accumulated.toolCalls.length < DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
+      accumulated.toolCalls.push({
+        id: accumulated.currentToolId,
+        name: accumulated.currentToolName,
+        input: accumulated.currentToolInput.join(''),
+        incomplete: true,
+      });
+    } else {
+      accumulated.droppedItems += 1;
+    }
+    accumulated.currentToolName = '';
+  }
+  const fullText = accumulated.textParts.join('');
   if (fullText) {
     span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
     span.setAttribute('neatlogs.llm.output_messages.0.content', fullText);
   }
 
-  const thinking = thinkingParts.join('');
+  const thinking = accumulated.thinkingParts.join('');
   if (thinking) {
     span.setAttribute('neatlogs.llm.output_messages.0.thinking', thinking);
   }
 
-  for (let j = 0; j < toolCalls.length; j++) {
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.id`, toolCalls[j].id);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.name`, toolCalls[j].name);
-    span.setAttribute(`neatlogs.llm.tool_calls.${j}.arguments`, toolCalls[j].input);
+  for (let j = 0; j < accumulated.toolCalls.length; j++) {
+    span.setAttribute(`neatlogs.llm.tool_calls.${j}.id`, accumulated.toolCalls[j].id);
+    span.setAttribute(`neatlogs.llm.tool_calls.${j}.name`, accumulated.toolCalls[j].name);
+    span.setAttribute(
+      `neatlogs.llm.tool_calls.${j}.arguments`,
+      accumulated.toolCalls[j].incomplete
+        ? '[incomplete: stream capture limit reached]'
+        : sanitizeJsonToolArguments(
+            span,
+            `neatlogs.llm.tool_calls.${j}.arguments`,
+            accumulated.toolCalls[j].input || '{}',
+            accumulated,
+          ),
+    );
   }
 
-  if (model) span.setAttribute('neatlogs.llm.model_name', model);
-  if (stopReason) span.setAttribute('neatlogs.llm.stop_reason', stopReason);
-  setUsageAttrs(span, usage);
+  if (accumulated.model) span.setAttribute('neatlogs.llm.model_name', accumulated.model);
+  if (accumulated.stopReason) span.setAttribute('neatlogs.llm.stop_reason', accumulated.stopReason);
+  setUsageAttrs(span, accumulated.usage);
+  applyStreamDiagnostics(span, accumulated);
 
   span.setStatus({ code: SpanStatusCode.OK });
   span.end();
@@ -350,11 +464,18 @@ function finalizeStreamEvents(span: Span, events: any[]): void {
 
 function finalizeMessageResponse(span: Span, response: any): void {
   const content: any[] = response?.content ?? [];
+  const captured = captureMedia(
+    span,
+    'neatlogs.llm.output_messages.0',
+    content,
+    'output',
+  );
+  const capturedContent = Array.isArray(captured) ? captured : [];
   const textParts: string[] = [];
   const thinkingParts: string[] = [];
   const toolCalls: Array<{ id: string; name: string; input: string }> = [];
 
-  for (const block of content) {
+  for (const block of capturedContent) {
     if (block.type === 'text' && block.text) textParts.push(block.text);
     else if (block.type === 'thinking' && block.thinking) thinkingParts.push(block.thinking);
     else if (block.type === 'tool_use') {
@@ -392,10 +513,89 @@ function finalizeMessageResponse(span: Span, response: any): void {
 // Utilities
 // ---------------------------------------------------------------------------
 
+function markStreamIncomplete(
+  accumulated: AnthropicStreamAccumulator,
+  reason: string,
+): void {
+  accumulated.incompleteReasons.add(reason);
+}
+
+function retainStreamString(
+  accumulated: AnthropicStreamAccumulator,
+  value: string,
+  retain: (value: string) => void,
+): boolean {
+  const remaining = Math.max(
+    0,
+    DEFAULT_MAX_STREAM_CAPTURE_BYTES - accumulated.capturedBytes,
+  );
+  const bytes = utf8ByteLength(value, remaining);
+  if (accumulated.capturedItems >= DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
+    accumulated.droppedItems += 1;
+    accumulated.droppedBytes += bytes;
+    markStreamIncomplete(accumulated, 'item_limit_exceeded');
+    return false;
+  }
+  if (accumulated.capturedBytes + bytes > DEFAULT_MAX_STREAM_CAPTURE_BYTES) {
+    accumulated.droppedItems += 1;
+    accumulated.droppedBytes += bytes;
+    markStreamIncomplete(accumulated, 'byte_limit_exceeded');
+    return false;
+  }
+  retain(value);
+  accumulated.capturedItems += 1;
+  accumulated.capturedBytes += bytes;
+  return true;
+}
+
+function sanitizeJsonToolArguments(
+  span: Span,
+  prefix: string,
+  value: string,
+  accumulated: AnthropicStreamAccumulator,
+): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    markStreamIncomplete(accumulated, 'invalid_tool_arguments');
+    return '[incomplete: invalid tool arguments omitted]';
+  }
+  const original = safeStringify(parsed);
+  const sanitized = safeStringify(captureMedia(span, prefix, parsed, 'output'));
+  return original === sanitized ? value : sanitized;
+}
+
+function applyStreamDiagnostics(
+  span: Span,
+  accumulated: AnthropicStreamAccumulator,
+): void {
+  span.setAttribute('neatlogs.stream.capture_bytes', accumulated.capturedBytes);
+  span.setAttribute('neatlogs.stream.capture_items', accumulated.capturedItems);
+  if (accumulated.incompleteReasons.size === 0) return;
+  span.setAttribute('neatlogs.stream.incomplete', true);
+  span.setAttribute(
+    'neatlogs.stream.incomplete_reason',
+    [...accumulated.incompleteReasons].sort().join(','),
+  );
+  if (accumulated.droppedBytes > 0) {
+    span.setAttribute('neatlogs.stream.dropped_bytes', accumulated.droppedBytes);
+    span.setAttribute('neatlogs.stream.dropped_bytes_is_lower_bound', true);
+  }
+  span.setAttribute('neatlogs.stream.dropped_items', accumulated.droppedItems);
+  span.setAttribute('neatlogs.capture_fidelity', 'truncated');
+}
+
 function setInputMessages(span: Span, system: any, messages: any[]): void {
   let idx = 0;
   if (system) {
-    const content = typeof system === 'string' ? system : safeStringify(system);
+    const captured = captureMedia(
+      span,
+      `neatlogs.llm.input_messages.${idx}`,
+      system,
+      'input',
+    );
+    const content = typeof captured === 'string' ? captured : safeStringify(captured);
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'system');
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, content);
     idx++;
@@ -405,7 +605,13 @@ function setInputMessages(span: Span, system: any, messages: any[]): void {
     if (typeof msg.content === 'string') {
       span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, msg.content);
     } else if (msg.content) {
-      span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, safeStringify(msg.content));
+      const captured = captureMedia(
+        span,
+        `neatlogs.llm.input_messages.${idx}`,
+        msg.content,
+        'input',
+      );
+      span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, safeStringify(captured));
     }
     idx++;
   }

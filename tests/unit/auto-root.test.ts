@@ -12,6 +12,7 @@ import {
   _setNeatlogsProvider,
   withNeatlogsSpan,
 } from '../../src/core/provider.js';
+import { captureMedia, resolvePendingMediaUploads } from '../../src/core/media.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
@@ -103,5 +104,53 @@ describe('auto-root', () => {
     expect(spans.some((s) => s.attributes['neatlogs.auto_root'])).toBe(false);
     const llm = spans.find((s) => s.attributes['neatlogs.span.kind'] === 'LLM');
     expect(llm!.parentSpanId).toBe(parent.spanContext().spanId);
+  });
+
+  it('resolves media staged through the transparent auto-root span', async () => {
+    const span = getProviderTracer('neatlogs').startSpan('openai.images.generate', {
+      attributes: { 'neatlogs.span.kind': 'LLM' },
+    });
+    const safe = captureMedia(
+      span,
+      'neatlogs.llm.output_messages.0',
+      {
+        type: 'image_url',
+        image_url: {
+          url: `data:image/png;base64,${Buffer.alloc(120_000, 31).toString('base64')}`,
+        },
+      },
+      'output',
+    );
+    span.setAttribute('neatlogs.llm.output_messages.0.content', JSON.stringify(safe));
+    span.end();
+
+    const child = getSpans().find((item) => item.attributes['neatlogs.span.kind'] === 'LLM')!;
+    const attributes = { ...child.attributes };
+    let uploads = 0;
+    const resolved = await resolvePendingMediaUploads(child as object, attributes, {
+      available: true,
+      unavailableReason: '',
+      maxPayloadBytes: 1024 * 1024,
+      async upload(payload) {
+        uploads += 1;
+        return {
+          uploadId: '018f47a6-7f32-7d67-8a1b-42d3f974c012',
+          state: 'ready',
+          reference: {
+            id: '018f47a6-7f32-7d67-8a1b-42d3f974c012',
+            purpose: payload.purpose,
+            sha256: payload.sha256,
+            byteLength: payload.byteLength,
+            mimeType: payload.mimeType,
+            contentEncoding: payload.contentEncoding,
+            state: 'ready',
+          },
+        };
+      },
+    });
+
+    expect(resolved).toBe(true);
+    expect(uploads).toBe(1);
+    expect(attributes['neatlogs.llm.output_messages.0.media.0.state']).toBe('available');
   });
 });

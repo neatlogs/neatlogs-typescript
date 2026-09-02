@@ -301,7 +301,17 @@ describe('wrapAnthropic', () => {
     const fakeResponse = {
       id: 'msg_123',
       model: 'claude-sonnet-4-20250514',
-      content: [{ type: 'text', text: 'Hello there!' }],
+      content: [
+        { type: 'text', text: 'Hello there!' },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: Buffer.from('anthropic-image').toString('base64'),
+          },
+        },
+      ],
       usage: { input_tokens: 12, output_tokens: 4 },
       stop_reason: 'end_turn',
     };
@@ -327,6 +337,7 @@ describe('wrapAnthropic', () => {
     expect(attr(spans[0], 'neatlogs.llm.provider')).toBe('anthropic');
     expect(attr(spans[0], 'neatlogs.llm.model_name')).toBe('claude-sonnet-4-20250514');
     expect(attr(spans[0], 'neatlogs.llm.output_messages.0.content')).toBe('Hello there!');
+    expect(attr(spans[0], 'neatlogs.llm.output_messages.0.media.0.mime_type')).toBe('image/png');
     expect(attr(spans[0], 'neatlogs.llm.token_count.prompt')).toBe(12);
     expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(4);
   });

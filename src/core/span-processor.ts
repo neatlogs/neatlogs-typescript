@@ -36,6 +36,7 @@ import type { MaskFunction } from '../types.js';
 import { AttributeMapper } from '../config/attribute-mapper.js';
 import { getNeatlogsTracer } from './provider.js';
 import { verificationMarkerFromEnv } from './resource.js';
+import { setMediaCaptureAvailability } from './media.js';
 
 const logger = getLogger();
 
@@ -200,6 +201,10 @@ export interface NeatlogsSpanProcessorOptions {
   emitCompletionMarkers?: boolean;
   /** Treat every span on this processor's private provider as SDK-owned. */
   ownAllSpans?: boolean;
+  /** Gate raw typed-media staging for this processor's export pipeline. */
+  mediaUploadsAvailable?: boolean;
+  mediaUploadsUnavailableReason?: string;
+  mediaOwner?: object;
 }
 
 // ────────────────────────────────────────────────────────
@@ -212,6 +217,9 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
   private readonly unifiedProcessor: UnifiedAttributeProcessor;
   private readonly emitCompletionMarkers: boolean;
   private readonly ownAllSpans: boolean;
+  private readonly mediaUploadsAvailable: boolean;
+  private readonly mediaUploadsUnavailableReason: string;
+  private readonly mediaOwner: object | undefined;
 
   private perfStats: PerfStats;
   private _retrieversToSuppress: Set<string>;
@@ -232,6 +240,10 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this.mask = opts.mask;
     this.emitCompletionMarkers = opts.emitCompletionMarkers ?? true;
     this.ownAllSpans = opts.ownAllSpans ?? false;
+    this.mediaUploadsAvailable = opts.mediaUploadsAvailable ?? false;
+    this.mediaUploadsUnavailableReason =
+      opts.mediaUploadsUnavailableReason ?? 'telemetry_uploads_disabled';
+    this.mediaOwner = opts.mediaOwner;
 
     this.unifiedProcessor = new UnifiedAttributeProcessor(
       opts.mapper ?? new AttributeMapper(),
@@ -313,6 +325,12 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         scopeName.startsWith('neatlogs') ||
         (span.parentSpanId !== undefined && this._activeSpans.has(span.parentSpanId));
       if (sdkOwned && !isCompletionMarker) {
+        setMediaCaptureAvailability(
+          span as object,
+          this.mediaUploadsAvailable,
+          this.mediaUploadsUnavailableReason,
+          this.mediaOwner,
+        );
         this._activeSpans.set(span.spanContext().spanId, span);
         const verificationMarker = verificationMarkerFromEnv();
         if (verificationMarker) {

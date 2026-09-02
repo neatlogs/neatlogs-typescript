@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { DeliveryDiagnostics } from '../../src/core/delivery-diagnostics.js';
 import { FilteringExporter } from '../../src/core/filtering-exporter.js';
 import { scheduleMask } from '../../src/core/mask.js';
+import { captureMedia, resolvePendingMediaUploads } from '../../src/core/media.js';
 import {
   ObservableBatchLogRecordProcessor,
   ObservableBatchSpanProcessor,
@@ -47,6 +48,27 @@ describe('delivery diagnostics', () => {
   it('counts span and log queue saturation before OTel silently drops', async () => {
     const diagnostics = new DeliveryDiagnostics();
     const span = await finishedSpan();
+    const mediaAttributes: Record<string, string | number> = {};
+    Object.defineProperty(span, 'setAttribute', {
+      configurable: true,
+      value(name: string, value: string | number) {
+        mediaAttributes[name] = value;
+      },
+    });
+    const raw = Buffer.alloc(120_000, 13);
+    captureMedia(
+      span as ReadableSpan & {
+        setAttribute(name: string, value: string | number): void;
+      },
+      'media',
+      [
+        {
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${raw.toString('base64')}` },
+        },
+      ],
+      'input',
+    );
     const spans = new ObservableBatchSpanProcessor(
       new Sink(),
       { maxQueueSize: 1, maxExportBatchSize: 1, scheduledDelayMillis: 60_000 },
@@ -54,6 +76,16 @@ describe('delivery diagnostics', () => {
     );
     (spans as any)._finishedSpans.push(span);
     spans.onEnd(span);
+    let mediaUploads = 0;
+    const mediaReady = await resolvePendingMediaUploads(span as object, mediaAttributes, {
+      available: true,
+      unavailableReason: '',
+      maxPayloadBytes: 1024 * 1024,
+      async upload() {
+        mediaUploads += 1;
+        throw new Error('queue-dropped media must not upload');
+      },
+    });
 
     const logs = new ObservableBatchLogRecordProcessor(
       new LogSink(),
@@ -63,7 +95,12 @@ describe('delivery diagnostics', () => {
     (logs as any)._finishedLogRecords.push({});
     logs.onEmit({} as any);
 
-    expect(diagnostics.snapshot()).toMatchObject({ spanQueueDrops: 1, logQueueDrops: 1 });
+    expect(diagnostics.snapshot()).toMatchObject({
+      spanQueueDrops: 1,
+      logQueueDrops: 1,
+    });
+    expect(mediaReady).toBe(true);
+    expect(mediaUploads).toBe(0);
     await spans.shutdown();
     // Clear the deliberately synthetic item before shutdown tries to serialize it.
     (logs as any)._finishedLogRecords = [];
@@ -89,5 +126,83 @@ describe('delivery diagnostics', () => {
       frameworkSpanDrops: 1,
       maskedSpanDrops: 1,
     });
+  });
+
+  it('reports a synchronous delegate failure through the export callback', async () => {
+    const diagnostics = new DeliveryDiagnostics();
+    const span = await finishedSpan();
+    scheduleMask(span as object, { attributes: {} }, null);
+    const exporter = new FilteringExporter(
+      {
+        export() {
+          throw new Error('delegate failed synchronously');
+        },
+        async shutdown() {},
+      },
+      diagnostics,
+    );
+
+    const result = await new Promise<ExportResult>((resolve) => exporter.export([span], resolve));
+
+    expect(result.code).toBe(ExportResultCode.FAILED);
+    expect(result.error?.message).toBe('span exporter failed synchronously');
+    expect(diagnostics.snapshot().spanExportFailures).toBe(1);
+  });
+
+  it('sanitizes and uploads typed media left by a generic integration', async () => {
+    const span = await finishedSpan();
+    const secret = Buffer.alloc(120_000, 37).toString('base64');
+    scheduleMask(
+      span as object,
+      {
+        attributes: {
+          'output.value': JSON.stringify({
+            type: 'image_url',
+            image_url: { url: `data:image/png;base64,${secret}` },
+          }),
+        },
+      },
+      null,
+    );
+    let exported: ReadableSpan | undefined;
+    let uploads = 0;
+    const exporter = new FilteringExporter(
+      {
+        export(spans, callback) {
+          exported = spans[0];
+          callback({ code: ExportResultCode.SUCCESS });
+        },
+        async shutdown() {},
+      },
+      undefined,
+      {
+        available: true,
+        unavailableReason: '',
+        maxPayloadBytes: 1024 * 1024,
+        async upload(payload) {
+          uploads += 1;
+          return {
+            uploadId: '018f47a6-7f32-7d67-8a1b-42d3f974c012',
+            state: 'ready',
+            reference: {
+              id: '018f47a6-7f32-7d67-8a1b-42d3f974c012',
+              purpose: payload.purpose,
+              sha256: payload.sha256,
+              byteLength: payload.byteLength,
+              mimeType: payload.mimeType,
+              contentEncoding: payload.contentEncoding,
+              state: 'ready',
+            },
+          };
+        },
+      },
+    );
+
+    const result = await new Promise<ExportResult>((resolve) => exporter.export([span], resolve));
+    const serialized = JSON.stringify(exported?.attributes);
+    expect(result.code).toBe(ExportResultCode.SUCCESS);
+    expect(uploads).toBe(1);
+    expect(serialized).toContain('018f47a6-7f32-7d67-8a1b-42d3f974c012');
+    expect(serialized).not.toContain(secret.slice(0, 200));
   });
 });

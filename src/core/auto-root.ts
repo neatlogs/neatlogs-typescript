@@ -38,6 +38,7 @@ import {
   getActiveNeatlogsSpan,
 } from './provider.js';
 import { getActiveClient } from './active-client.js';
+import { aliasMediaCaptureSpan } from './media.js';
 
 // A parentless span of one of these kinds already satisfies the backend's
 // root requirement, so it must NOT be wrapped in another root.
@@ -78,7 +79,7 @@ function stampAutoRootIdentity(root: Span): void {
  */
 function wrapSpanWithRoot(child: Span, root: Span): Span {
   let ended = false;
-  return new Proxy(child, {
+  const proxy = new Proxy(child, {
     get(target, prop, _receiver) {
       if (prop === 'end') {
         return (...args: any[]): void => {
@@ -99,6 +100,8 @@ function wrapSpanWithRoot(child: Span, root: Span): Span {
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+  aliasMediaCaptureSpan(proxy, child);
+  return proxy;
 }
 
 /**
