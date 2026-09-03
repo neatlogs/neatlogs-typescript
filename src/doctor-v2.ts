@@ -117,34 +117,40 @@ function canonicalize(value: unknown): unknown {
 
 export function doctorSemanticDigest(envelope: DiagnosticEnvelope): string {
   const namesById = new Map(envelope.spans.map((span) => [span.span_id, span.name]));
+  const stableFields = [
+    'name',
+    'kind',
+    'status',
+    'input',
+    'output',
+    'choices',
+    'expected_choice_count',
+    'tool_calls',
+    'tool_call',
+    'streaming',
+    'oversized',
+    'payload_references',
+    'sampled',
+    'ended',
+  ] as const;
   const projection = {
-    root_name: namesById.get(envelope.root_span_id) ?? null,
-    spans: envelope.spans.map((span) => ({
-      name: span.name,
-      parent_name: span.parent_span_id === null
-        ? null
-        : namesById.get(span.parent_span_id) ?? null,
-      kind: span.kind,
-      status: span.status,
-      input: span.input,
-      output: span.output,
-      choices: span.choices,
-      expected_choice_count: span.expected_choice_count,
-      tool_calls: span.tool_calls,
-      tool_call: span.tool_call,
-      streaming: span.streaming,
-      stream_fragments: span.stream_fragments,
-      oversized: span.oversized,
-      payload_references: span.payload_references,
-      sampled: span.sampled,
-      ended: span.ended,
-      token_counts: {
-        prompt: span.attributes?.['neatlogs.llm.token_count.prompt'],
-        completion: span.attributes?.['neatlogs.llm.token_count.completion'],
-        total: span.attributes?.['neatlogs.llm.token_count.total'],
-      },
-    })).sort((left, right) =>
-      left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind)),
+    spans: envelope.spans
+      .filter((span) => span.name !== 'neatlogs.trace.complete')
+      .map((span) => {
+        const item: Record<string, unknown> = {};
+        for (const field of stableFields) {
+          if (span[field] !== undefined) item[field] = span[field];
+        }
+        item.parent = span.parent_span_id === null
+          ? null
+          : namesById.get(span.parent_span_id) ?? null;
+        return item;
+      })
+      .sort((left, right) => {
+        const leftKey = `${String(left.name)}\u0000${String(left.kind)}`;
+        const rightKey = `${String(right.name)}\u0000${String(right.kind)}`;
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      }),
   };
   const bytes = JSON.stringify(canonicalize(projection));
   return `sha256:${createHash('sha256').update(bytes, 'utf8').digest('hex')}`;

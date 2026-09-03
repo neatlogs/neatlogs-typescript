@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { doctorLocalV2, doctorSemanticDigest, type DiagnosticEnvelope } from '../../src/doctor-v2.js';
 
+const CROSS_LANGUAGE_GOLDEN_DIGEST = 'sha256:824650f5fbc6d9f8d92381356411609263417219eaf7fdafbd2ba94795b6c4f7';
+
+function crossLanguageGoldenEnvelope(): DiagnosticEnvelope {
+  return JSON.parse(`{"trace_id":"11111111111111111111111111111111","root_span_id":"2222222222222222","spans":[{"span_id":"2222222222222222","parent_span_id":null,"name":"doctor.workflow","kind":"WORKFLOW","status":"OK","input":{"prompt":"generated diagnostic input"},"output":{"result":"generated diagnostic output"},"sampled":true,"ended":true},{"span_id":"3333333333333333","parent_span_id":"2222222222222222","name":"doctor.llm","kind":"LLM","status":"OK","input":{"messages":[{"role":"user","content":"generated diagnostic input"}]},"output":{"text":"generated diagnostic output"},"choices":[{"index":0,"message":{"role":"assistant","content":"choice zero","tool_calls":[{"id":"doctor_call_1","name":"diagnostic_tool","arguments":{"value":1}}]}},{"index":1,"message":{"role":"assistant","content":"choice one","tool_calls":[]}}],"stream_fragments":["generated ","diagnostic ","output"],"sampled":true,"ended":true},{"span_id":"4444444444444444","parent_span_id":"3333333333333333","name":"doctor.tool","kind":"TOOL","status":"OK","tool_call":{"id":"doctor_call_1","name":"diagnostic_tool","arguments":{"value":1},"result":{"value":2}},"sampled":true,"ended":true},{"span_id":"5555555555555555","parent_span_id":"2222222222222222","name":"doctor.payload","kind":"CHAIN","status":"OK","payload_references":[{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":1024,"mime_type":"application/json"}],"sampled":true,"ended":true}]}`) as DiagnosticEnvelope;
+}
+
 function envelope(): DiagnosticEnvelope {
   return {
     trace_id: '11111111111111111111111111111111',
@@ -15,6 +21,35 @@ function envelope(): DiagnosticEnvelope {
 }
 
 describe('doctor v2 local envelope', () => {
+  it('matches the shared Python and Go canonical digest fixture', () => {
+    expect(doctorSemanticDigest(crossLanguageGoldenEnvelope())).toBe(CROSS_LANGUAGE_GOLDEN_DIGEST);
+  });
+
+  it('keeps stream and token diagnostics outside the cross-language digest', () => {
+    const value = envelope();
+    const changed = {
+      ...value,
+      spans: value.spans.map((span) => span.kind === 'LLM' ? {
+        ...span,
+        stream_fragments: ['different runtime chunks'],
+        attributes: {
+          'neatlogs.llm.token_count.prompt': 999,
+          'neatlogs.llm.token_count.completion': 998,
+          'neatlogs.llm.token_count.total': 1997,
+        },
+      } : span),
+    } satisfies DiagnosticEnvelope;
+    expect(doctorSemanticDigest(changed)).toBe(doctorSemanticDigest(value));
+    expect(doctorLocalV2({
+      ...value,
+      spans: value.spans.map((span) => span.kind === 'LLM'
+        ? { ...span, stream_fragments: [] }
+        : span),
+    }).checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason_code: 'STREAM_FRAGMENT_MISSING' }),
+    ]));
+  });
+
   it('returns a versioned, deterministic, successful local result', () => {
     const value = envelope();
     const result = doctorLocalV2(value);
