@@ -146,11 +146,24 @@ describe('Doctor capture through the real provider/export boundary', () => {
       expect(envelope?.spans).toHaveLength(1);
       const llm = envelope?.spans[0];
       expect(llm?.choices).toEqual([
-        { role: 'assistant', content: 'primary answer' },
-        { role: 'assistant', content: 'alternate' },
+        {
+          index: 0,
+          message: { role: 'assistant', content: 'primary answer' },
+          finish_reason: 'tool_calls',
+        },
+        {
+          index: 1,
+          message: { role: 'assistant', content: 'alternate' },
+        },
       ]);
       expect(llm?.expected_choice_count).toBe(2);
-      expect(llm?.tool_calls).toEqual([{ id: 'doctor_call_1', name: 'doctor_lookup' }]);
+      expect(llm?.tool_calls).toEqual([{
+        id: 'doctor_call_1',
+        name: 'doctor_lookup',
+        arguments: { safe: true },
+        choice_index: 0,
+        tool_call_index: 0,
+      }]);
       expect(llm?.streaming).toBe(true);
       expect(llm?.stream_fragments).toHaveLength(3);
       expect(llm?.payload_references).toEqual([{

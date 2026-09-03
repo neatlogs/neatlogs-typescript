@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { doctorLocalV2, doctorSemanticDigest, type DiagnosticEnvelope } from '../../src/doctor-v2.js';
 
 const CROSS_LANGUAGE_GOLDEN_DIGEST = 'sha256:824650f5fbc6d9f8d92381356411609263417219eaf7fdafbd2ba94795b6c4f7';
+const CROSS_LANGUAGE_RICH_DIGEST = 'sha256:45b1ebe029b272ceb45edb210978f6600d29ac50ca4d9cd0f4ef5abb3eff063e';
 
 function crossLanguageGoldenEnvelope(): DiagnosticEnvelope {
   return JSON.parse(`{"trace_id":"11111111111111111111111111111111","root_span_id":"2222222222222222","spans":[{"span_id":"2222222222222222","parent_span_id":null,"name":"doctor.workflow","kind":"WORKFLOW","status":"OK","input":{"prompt":"generated diagnostic input"},"output":{"result":"generated diagnostic output"},"sampled":true,"ended":true},{"span_id":"3333333333333333","parent_span_id":"2222222222222222","name":"doctor.llm","kind":"LLM","status":"OK","input":{"messages":[{"role":"user","content":"generated diagnostic input"}]},"output":{"text":"generated diagnostic output"},"choices":[{"index":0,"message":{"role":"assistant","content":"choice zero","tool_calls":[{"id":"doctor_call_1","name":"diagnostic_tool","arguments":{"value":1}}]}},{"index":1,"message":{"role":"assistant","content":"choice one","tool_calls":[]}}],"stream_fragments":["generated ","diagnostic ","output"],"sampled":true,"ended":true},{"span_id":"4444444444444444","parent_span_id":"3333333333333333","name":"doctor.tool","kind":"TOOL","status":"OK","tool_call":{"id":"doctor_call_1","name":"diagnostic_tool","arguments":{"value":1},"result":{"value":2}},"sampled":true,"ended":true},{"span_id":"5555555555555555","parent_span_id":"2222222222222222","name":"doctor.payload","kind":"CHAIN","status":"OK","payload_references":[{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":1024,"mime_type":"application/json"}],"sampled":true,"ended":true}]}`) as DiagnosticEnvelope;
+}
+
+function crossLanguageRichEnvelope(): DiagnosticEnvelope {
+  return JSON.parse(readFileSync(
+    new URL('../fixtures/doctor-v2/rich-envelope.json', import.meta.url),
+    'utf8',
+  )) as DiagnosticEnvelope;
 }
 
 function envelope(): DiagnosticEnvelope {
@@ -23,6 +32,16 @@ function envelope(): DiagnosticEnvelope {
 describe('doctor v2 local envelope', () => {
   it('matches the shared Python and Go canonical digest fixture', () => {
     expect(doctorSemanticDigest(crossLanguageGoldenEnvelope())).toBe(CROSS_LANGUAGE_GOLDEN_DIGEST);
+  });
+
+  it('matches the shared rich digest with one top-level tool request representation', () => {
+    const value = crossLanguageRichEnvelope();
+    expect(doctorSemanticDigest(value)).toBe(CROSS_LANGUAGE_RICH_DIGEST);
+    const llm = value.spans.find((span) => span.kind === 'LLM');
+    expect(llm?.tool_calls).toHaveLength(1);
+    expect(llm?.choices).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: expect.objectContaining({ tool_calls: expect.anything() }) }),
+    ]));
   });
 
   it('keeps stream and token diagnostics outside the cross-language digest', () => {

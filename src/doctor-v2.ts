@@ -19,7 +19,13 @@ export type DiagnosticSpan = Readonly<{
   output?: unknown;
   choices?: readonly unknown[];
   expected_choice_count?: number;
-  tool_calls?: readonly Readonly<{ id: string; name?: string }>[];
+  tool_calls?: readonly Readonly<{
+    id: string;
+    name?: string;
+    arguments?: unknown;
+    choice_index?: number;
+    tool_call_index?: number;
+  }>[];
   tool_call?: Readonly<{ id: string; name?: string; result?: unknown }>;
   streaming?: boolean;
   stream_fragments?: readonly unknown[];

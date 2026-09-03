@@ -154,22 +154,63 @@ function normalizeKind(value: unknown): string {
 
 function indexedToolCalls(
   attributes: Readonly<Record<string, AttributeValue | undefined>>,
-): readonly Readonly<{ id: string; name?: string }>[] | undefined {
-  const calls = new Map<number, { id?: string; name?: string }>();
+): readonly Readonly<{
+  id: string;
+  name?: string;
+  arguments?: unknown;
+  choice_index?: number;
+  tool_call_index?: number;
+}>[] | undefined {
+  const calls = new Map<number, Record<string, unknown>>();
   for (const [key, value] of Object.entries(attributes)) {
-    const match = /^neatlogs\.llm\.tool_calls\.(\d+)\.(id|name)$/.exec(key);
-    if (!match || typeof value !== 'string') continue;
+    const match = /^neatlogs\.llm\.tool_calls\.(\d+)\.(id|name|arguments|choice_index|tool_call_index)$/.exec(key);
+    if (!match) continue;
     const index = Number(match[1]);
     const call = calls.get(index) ?? {};
-    call[match[2] as 'id' | 'name'] = value;
+    call[match[2] as string] = jsonValue(value);
     calls.set(index, call);
   }
   const normalized = [...calls.entries()]
     .sort(([left], [right]) => left - right)
-    .flatMap(([, call]) => call.id
-      ? [{ id: call.id, ...(call.name ? { name: call.name } : {}) }]
+    .flatMap(([, call]) => typeof call.id === 'string'
+      ? [{
+          id: call.id,
+          ...(typeof call.name === 'string' ? { name: call.name } : {}),
+          ...(call.arguments !== undefined ? { arguments: call.arguments } : {}),
+          ...(typeof call.choice_index === 'number' ? { choice_index: call.choice_index } : {}),
+          ...(typeof call.tool_call_index === 'number' ? { tool_call_index: call.tool_call_index } : {}),
+        }]
       : []);
   return normalized.length ? normalized : undefined;
+}
+
+function normalizedChoices(
+  value: unknown,
+  attributes: Readonly<Record<string, AttributeValue | undefined>>,
+): readonly Readonly<Record<string, unknown>>[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const choices = value.map((raw, index) => {
+    const record: Record<string, unknown> =
+      raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? raw as Record<string, unknown>
+        : { content: raw };
+    const explicitIndex = typeof record.index === 'number' ? record.index : index;
+    const message = record.message && typeof record.message === 'object' && !Array.isArray(record.message)
+      ? record.message
+      : Object.fromEntries(
+        ['role', 'content', 'name', 'tool_call_id']
+          .filter((key) => record[key] !== undefined)
+          .map((key) => [key, record[key]]),
+      );
+    const finish = attributes[`neatlogs.llm.choices.${explicitIndex}.finish_reason`] ??
+      record.finish_reason;
+    return Object.freeze({
+      index: explicitIndex,
+      message: Object.freeze({ ...(message as Record<string, unknown>) }),
+      ...(finish !== undefined ? { finish_reason: jsonValue(finish as AttributeValue) } : {}),
+    });
+  });
+  return choices.length ? Object.freeze(choices) : undefined;
 }
 
 function streamFragments(span: ReadableSpan): readonly unknown[] | undefined {
@@ -215,7 +256,7 @@ function toDiagnosticSpan(span: ReadableSpan): DiagnosticSpan {
   const choicesValue = jsonValue(attributes['neatlogs.llm.generation_choices']);
   const inputMessages = kind === 'LLM' ? indexedMessages(attributes, 'input') : undefined;
   const outputMessages = kind === 'LLM' ? indexedMessages(attributes, 'output') : undefined;
-  const choices = arrayValue(choicesValue) ?? outputMessages;
+  const choices = normalizedChoices(arrayValue(choicesValue) ?? outputMessages, attributes);
   const expectedChoiceCount = typeof choicesValue === 'number' && Number.isInteger(choicesValue)
     ? choicesValue
     : choices?.length;
