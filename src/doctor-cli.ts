@@ -14,6 +14,7 @@ const DOCTOR_MARKER_VERSION = 'v1';
 const PROBE_TIMEOUT_MS = 48_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 1_000;
+const MAX_READBACK_BYTES = 1 << 20;
 const EXPECTED_TOKENS = [11, 7, 18] as const;
 
 const EXPECTED_TYPES = new Map([
@@ -118,7 +119,16 @@ type PersistedTrace = Readonly<{
   totalTokensUsed?: unknown;
   workflowName?: unknown;
   spans?: unknown;
+  ingestionDiagnostics?: unknown;
 }>;
+
+const INGESTION_STAGES = new Set([
+  'kafka_published', 'pii_dispatch', 'pii_redaction', 'storage_consumer',
+  'raw_durable', 'root_resolution', 'simplification', 'finalized',
+]);
+const INGESTION_STATES = new Set(['processing', 'failed', 'succeeded']);
+const SAFE_FAILURE_CODE = /^[A-Z0-9_]{1,64}$/;
+type CheckDetails = Readonly<Record<string, string | number | boolean | null>>;
 
 type ProbeCheck = Readonly<{
   name: string;
@@ -126,12 +136,55 @@ type ProbeCheck = Readonly<{
   reason_code: string;
   remediation_code: string;
   message: string;
+  details?: CheckDetails;
 }>;
 
 class ProbeReadError extends Error {
-  constructor(readonly reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE', message: string) {
+  constructor(
+    readonly reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+    message: string,
+    readonly details?: CheckDetails,
+  ) {
     super(message);
   }
+}
+
+function ingestionDiagnosticDetails(value: unknown): CheckDetails | undefined {
+  const diagnostics = objectValue(objectValue(value).ingestionDiagnostics);
+  if (diagnostics.protocolVersion !== 'v1' ||
+      typeof diagnostics.currentStage !== 'string' ||
+      !INGESTION_STAGES.has(diagnostics.currentStage) ||
+      typeof diagnostics.state !== 'string' ||
+      !INGESTION_STATES.has(diagnostics.state) ||
+      typeof diagnostics.retryable !== 'boolean') {
+    return undefined;
+  }
+  const validOptionalStage = (key: 'lastSuccessfulStage' | 'failedStage') => {
+    const item = diagnostics[key];
+    return item === undefined ||
+      (typeof item === 'string' && INGESTION_STAGES.has(item));
+  };
+  if (!validOptionalStage('lastSuccessfulStage') ||
+      !validOptionalStage('failedStage') ||
+      (diagnostics.failureCode !== undefined &&
+        (typeof diagnostics.failureCode !== 'string' ||
+          !SAFE_FAILURE_CODE.test(diagnostics.failureCode)))) {
+    return undefined;
+  }
+  return Object.freeze({
+    ingestion_state: diagnostics.state,
+    current_stage: diagnostics.currentStage,
+    ...(typeof diagnostics.lastSuccessfulStage === 'string'
+      ? { last_successful_stage: diagnostics.lastSuccessfulStage }
+      : {}),
+    ...(typeof diagnostics.failedStage === 'string'
+      ? { failed_stage: diagnostics.failedStage }
+      : {}),
+    ...(typeof diagnostics.failureCode === 'string'
+      ? { failure_code: diagnostics.failureCode }
+      : {}),
+    retryable: diagnostics.retryable,
+  });
 }
 
 function markDoctorSpan(spanType: 'WORKFLOW' | 'AGENT' | 'LLM' | 'TOOL'): void {
@@ -184,6 +237,7 @@ function check(
   failureCode: string,
   remediationCode: string,
   message: string,
+  details?: CheckDetails,
 ): ProbeCheck {
   return {
     name,
@@ -191,6 +245,7 @@ function check(
     reason_code: passed ? passCode : failureCode,
     remediation_code: passed ? 'NONE' : remediationCode,
     message,
+    ...(details ? { details } : {}),
   };
 }
 
@@ -378,6 +433,7 @@ async function localResult(
 function persistedProbeResult(
   local: Awaited<ReturnType<typeof localResult>>,
   traceValue: PersistedTrace,
+  diagnosticDetails?: CheckDetails,
 ) {
   const spans = Array.isArray(traceValue.spans)
     ? traceValue.spans.filter((value): value is PersistedSpan =>
@@ -442,7 +498,7 @@ function persistedProbeResult(
 
   const probeChecks = [
     check('probe_visibility', visible, 'TRACE_VISIBLE', 'TRACE_ID_MISMATCH', 'WAIT_FOR_TRACE', 'The read-back trace ID exactly matches the exported Doctor trace ID'),
-    check('probe_finalization', finalized, 'TRACE_FINALIZED', 'TRACE_NOT_FINALIZED', 'WAIT_FOR_TRACE', 'The Doctor trace reached a successful finalized state'),
+    check('probe_finalization', finalized, 'TRACE_FINALIZED', 'TRACE_NOT_FINALIZED', 'WAIT_FOR_TRACE', 'The Doctor trace reached a successful finalized state', diagnosticDetails),
     check('probe_root_count', meaningfulRootCount === 1, 'ROOT_COUNT_VALID', 'ROOT_COUNT_INVALID', 'CHECK_TRACE_FINALIZER', 'The persisted Doctor trace has exactly one meaningful root'),
     check('probe_duplicates', duplicateSpanCount === 0, 'NO_DUPLICATE_SPANS', 'DUPLICATE_SPANS', 'CHECK_TRACE_FINALIZER', 'The persisted Doctor trace contains no duplicate span IDs'),
     check('probe_span_set', exactSet, 'SPAN_SET_VALID', 'TRACE_INCOMPLETE', 'WAIT_FOR_TRACE', 'The exact four-span Doctor trace is visible through the authenticated trace API'),
@@ -483,6 +539,7 @@ function persistedProbeResult(
 function failedProbeResult(
   local: Awaited<ReturnType<typeof localResult>>,
   reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+  details?: CheckDetails,
 ) {
   return {
     ...local,
@@ -499,6 +556,7 @@ function failedProbeResult(
       message: reasonCode === 'AUTH_FAILED'
         ? 'The project key was rejected by the existing trace API'
         : 'The existing trace ingestion or read path is unavailable',
+      ...(details ? { details } : {}),
     }],
   } as const;
 }
@@ -510,12 +568,20 @@ function human(result: {
     status: string;
     reason_code: string;
     message: string;
+    details?: CheckDetails;
   }>[];
   note?: string;
 }): string {
   const lines = [`Neatlogs Doctor: ${result.status.toUpperCase()}`];
   for (const item of result.checks ?? []) {
     lines.push(`${item.status === 'pass' ? 'PASS' : item.status === 'fail' ? 'FAIL' : 'INFO'} ${item.reason_code}: ${item.message}`);
+  }
+  const diagnostics = result.checks?.find((item) => item.details?.current_stage)?.details;
+  if (diagnostics) {
+    const failed = diagnostics.failed_stage
+      ? `; failed: ${String(diagnostics.failed_stage)}`
+      : '';
+    lines.push(`Ingestion: ${String(diagnostics.ingestion_state)} at ${String(diagnostics.current_stage)}${failed}`);
   }
   if (result.first_failure) lines.push(`First failure: ${String(result.first_failure)}`);
   if (result.note) lines.push(result.note);
@@ -540,6 +606,27 @@ async function boundedFetch(
   );
 }
 
+async function discardResponseBody(
+  response: Response,
+  reader?: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<void> {
+  if (reader) {
+    try {
+      await reader.cancel();
+    } catch {
+      // Response cleanup is best effort and must not replace the probe result.
+    }
+    return;
+  }
+  const body = response.body;
+  if (!body || body.locked) return;
+  try {
+    await body.cancel();
+  } catch {
+    // Response cleanup is best effort and must not replace the probe result.
+  }
+}
+
 async function boundedJson(
   response: Response,
   io: DoctorCliIO,
@@ -547,12 +634,46 @@ async function boundedJson(
 ): Promise<unknown> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
+    await discardResponseBody(response);
     throw new ProbeReadError('BACKEND_PROBE_UNAVAILABLE', 'Doctor probe deadline expired');
   }
-  return withTimeout(
-    () => response.json(),
-    Math.min(io.requestTimeoutMs, remaining),
-  ).catch(() => null);
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > MAX_READBACK_BYTES) {
+    await discardResponseBody(response);
+    return null;
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  return withTimeout(async () => {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_READBACK_BYTES) {
+        await discardResponseBody(response, reader);
+        return null;
+      }
+      chunks.push(value);
+    }
+    const body = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return JSON.parse(new TextDecoder().decode(body));
+    } catch {
+      return null;
+    }
+  }, Math.min(io.requestTimeoutMs, remaining), () => {
+    void discardResponseBody(response, reader);
+  }).catch(async () => {
+    await discardResponseBody(response, reader);
+    return null;
+  });
 }
 
 function usage(): string {
@@ -664,11 +785,25 @@ export async function runDoctorCli(
     );
     const deadline = Date.now() + Math.max(1, io.probeTimeoutMs);
     let persisted: PersistedTrace | null = null;
+    let lastDiagnostics: CheckDetails | undefined;
     while (Date.now() < deadline) {
-      const response = await boundedFetch(io, readbackUrl, {
-        method: 'GET',
-        headers: { 'x-api-key': apiKey },
-      }, deadline);
+      let response: Response;
+      try {
+        response = await boundedFetch(io, readbackUrl, {
+          method: 'GET',
+          redirect: 'error',
+          headers: {
+            'x-api-key': apiKey,
+            'x-neatlogs-doctor': DOCTOR_MARKER_VERSION,
+          },
+        }, deadline);
+      } catch {
+        throw new ProbeReadError(
+          'BACKEND_PROBE_UNAVAILABLE',
+          'The existing trace read path is unavailable',
+          lastDiagnostics,
+        );
+      }
       if (response.ok && response.status !== 202) {
         const value = await boundedJson(response, io, deadline);
         if (!value || typeof value !== 'object') {
@@ -678,15 +813,30 @@ export async function runDoctorCli(
           );
         }
         persisted = value as PersistedTrace;
+        lastDiagnostics = ingestionDiagnosticDetails(value);
         break;
       }
       if (response.status === 401 || response.status === 403) {
+        await discardResponseBody(response);
         throw new ProbeReadError('AUTH_FAILED', 'Trace read-back rejected the project key');
       }
-      if (![202, 404].includes(response.status)) {
+      if ([202, 404, 409].includes(response.status)) {
+        const value = await boundedJson(response, io, deadline).catch(() => null);
+        const currentDiagnostics = ingestionDiagnosticDetails(value);
+        if (currentDiagnostics) lastDiagnostics = currentDiagnostics;
+        if (response.status === 409) {
+          throw new ProbeReadError(
+            'BACKEND_PROBE_UNAVAILABLE',
+            'Trace ingestion reported a terminal failure',
+            currentDiagnostics,
+          );
+        }
+      } else {
+        await discardResponseBody(response);
         throw new ProbeReadError(
           'BACKEND_PROBE_UNAVAILABLE',
           `Trace read-back failed with HTTP ${response.status}`,
+          response.status >= 500 ? lastDiagnostics : undefined,
         );
       }
       const delay = Math.min(io.pollIntervalMs, Math.max(0, deadline - Date.now()));
@@ -696,10 +846,11 @@ export async function runDoctorCli(
       throw new ProbeReadError(
         'BACKEND_PROBE_UNAVAILABLE',
         'Timed out waiting for the exact Doctor trace',
+        lastDiagnostics,
       );
     }
 
-    const result = persistedProbeResult(local, persisted);
+    const result = persistedProbeResult(local, persisted, lastDiagnostics);
     io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
     return result.status === 'pass' ? 0 : 3;
   } catch (error) {
@@ -707,7 +858,11 @@ export async function runDoctorCli(
       ? 'AUTH_FAILED'
       : 'BACKEND_PROBE_UNAVAILABLE';
     const result = local
-      ? failedProbeResult(local, reason)
+      ? failedProbeResult(
+          local,
+          reason,
+          error instanceof ProbeReadError ? error.details : undefined,
+        )
       : {
           format_version: DOCTOR_V2_FORMAT_VERSION,
           mode: 'probe',
