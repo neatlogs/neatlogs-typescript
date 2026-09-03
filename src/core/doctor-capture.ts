@@ -222,6 +222,7 @@ function toDiagnosticSpan(span: ReadableSpan): DiagnosticSpan {
   const toolCalls = indexedToolCalls(attributes);
   const fragments = streamFragments(span);
   const references = payloadReferences(attributes);
+  const oversized = attributes['neatlogs.capture.truncated'] === true;
   const toolCallId = first(attributes, ['neatlogs.tool_call.id']);
   const streaming = attributes['neatlogs.llm.is_streaming'] === true ||
     attributes['neatlogs.tool.is_streaming'] === true ||
@@ -257,6 +258,7 @@ function toDiagnosticSpan(span: ReadableSpan): DiagnosticSpan {
       ...(fragments ? { stream_fragments: fragments } : {}),
     } : {}),
     ...(references ? { payload_references: references } : {}),
+    ...(oversized ? { oversized: true } : {}),
     sampled: (context.traceFlags & 1) === 1,
     ended: true,
     start_time_ns: startNs(span),

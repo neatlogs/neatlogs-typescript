@@ -8,6 +8,7 @@ import { FilteringExporter } from '../../src/core/filtering-exporter.js';
 import { NeatlogsSpanProcessor } from '../../src/core/span-processor.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
 import { wrapOpenAI } from '../../src/openai.js';
+import { doctorLocalV2 } from '../../src/doctor-v2.js';
 
 describe('Doctor capture through the real provider/export boundary', () => {
   beforeEach(clearDoctorCapture);
@@ -46,6 +47,29 @@ describe('Doctor capture through the real provider/export boundary', () => {
 
     expect(transport.getFinishedSpans()).toHaveLength(1);
     expect(getCapturedEnvelope(root.spanContext().traceId)).toBeNull();
+    await provider.shutdown();
+  });
+
+  it('fails closed when a real captured truncated span has no payload reference', async () => {
+    const transport = new InMemorySpanExporter();
+    const provider = new NodeTracerProvider();
+    provider.addSpanProcessor(new SimpleSpanProcessor(
+      new FilteringExporter(transport, undefined, undefined, capturePreparedSpans),
+    ));
+    const root = provider.getTracer('doctor-truncation').startSpan('doctor.payload', {
+      attributes: {
+        'neatlogs.span.kind': 'CHAIN',
+        'neatlogs.capture.truncated': true,
+      },
+    });
+    root.end();
+    await provider.forceFlush();
+
+    const envelope = getCapturedEnvelope(root.spanContext().traceId);
+    expect(envelope?.spans[0]).toMatchObject({ oversized: true });
+    expect(doctorLocalV2(envelope!).checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason_code: 'PAYLOAD_ATTACHMENT_REQUIRED' }),
+    ]));
     await provider.shutdown();
   });
 
