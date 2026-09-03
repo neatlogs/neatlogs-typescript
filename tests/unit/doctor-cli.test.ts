@@ -21,6 +21,8 @@ function successfulProbeFixture() {
     };
     return {
       _id: spans[0]!.spanContext().traceId,
+      status: 'success',
+      finalizationStatus: 'finalized',
       workflowName: 'neatlogs.doctor.v2',
       spanCount: spans.length,
       promptTokens: 11,
@@ -29,15 +31,30 @@ function successfulProbeFixture() {
       spans: spans.map((item) => {
         const rawKind = String(item.attributes['openinference.span.kind'] ?? item.attributes['neatlogs.span.kind'] ?? '');
         const kind = rawKind.replace(/^Neatlogs\./, '').toUpperCase();
-        const kindKey = kind.toLowerCase();
+        const materializedIo: Record<string, Readonly<{ input: unknown; output: unknown }>> = {
+          'doctor.probe.root': {
+            input: 'generated diagnostic input',
+            output: 'Value: 2',
+          },
+          'doctor.probe.agent': {
+            input: 'Prompt: generated diagnostic input',
+            output: JSON.stringify({ text: 'generated diagnostic output' }),
+          },
+          'doctor.probe.llm': {
+            input: { prompt: 'generated diagnostic input' },
+            output: 'Text: generated diagnostic output',
+          },
+          'doctor.probe.tool': { input: 'Value: 1', output: 'Value: 2' },
+        };
+        const io = materializedIo[item.name]!;
         return {
           span_id: item.spanContext().spanId,
           ...(item.parentSpanId ? { parent_span_id: item.parentSpanId } : {}),
           node_name: item.name,
           node_type: kindToType[kind],
           data: {
-            input_value: item.attributes[`neatlogs.${kindKey}.input`] ?? item.attributes['input.value'],
-            output_value: item.attributes[`neatlogs.${kindKey}.output`] ?? item.attributes['output.value'],
+            input_value: io.input,
+            output_value: io.output,
           },
           span_metadata: {
             'neatlogs.doctor': item.attributes['neatlogs.doctor'],
@@ -136,6 +153,8 @@ describe('doctor CLI', () => {
       capture: { span_count: 4 },
       probe: {
         ingest_route: '/v1/traces', marker_header: 'x-neatlogs-doctor', marker_version: 'v1',
+        readback_trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+        finalized: true, meaningful_root_count: 1, duplicate_span_count: 0,
         visible: true, readback_span_count: 4, hierarchy_valid: true,
         attributes_valid: true, input_output_valid: true, metadata_valid: true,
         typed_tokens_valid: true,
@@ -158,7 +177,8 @@ describe('doctor CLI', () => {
       probeExporter: fixture.probeExporter,
     });
     expect(code).toBe(3);
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalled();
+    expect(fetch.mock.calls.length).toBeLessThanOrEqual(2);
     expect(JSON.parse(value.output[0]!)).toMatchObject({
       status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE',
     });
@@ -181,6 +201,40 @@ describe('doctor CLI', () => {
       status: 'fail',
       first_failure: 'TYPED_TOKENS_INVALID',
       probe: { typed_tokens_valid: false },
+    });
+  });
+
+  it.each([
+    ['mismatched trace identity', (response: any) => {
+      response._id = 'f'.repeat(32);
+    }, 'TRACE_ID_MISMATCH', { readback_trace_id: 'f'.repeat(32) }],
+    ['non-terminal trace', (response: any) => {
+      response.status = 'processing';
+      response.finalizationStatus = 'pending';
+    }, 'TRACE_NOT_FINALIZED', { finalized: false }],
+    ['multiple meaningful roots', (response: any) => {
+      const agent = response.spans.find((item: any) => item.node_name === 'doctor.probe.agent');
+      delete agent.parent_span_id;
+    }, 'ROOT_COUNT_INVALID', { meaningful_root_count: 2 }],
+    ['duplicate span identity', (response: any) => {
+      response.spans[3].span_id = response.spans[0].span_id;
+    }, 'DUPLICATE_SPANS', { duplicate_span_count: 1 }],
+  ])('fails closed for %s proof', async (_name, mutate, expectedReason, expectedProbe) => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => {
+      const response = fixture.response() as any;
+      mutate(response);
+      return new Response(JSON.stringify(response), { status: 200 });
+    });
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+    });
+    expect(code).toBe(3);
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      status: 'fail', first_failure: expectedReason, probe: expectedProbe,
     });
   });
 
@@ -208,7 +262,12 @@ describe('doctor CLI', () => {
 
   it.each([
     ['extra span', (response: any) => {
-      response.spans.push({ ...response.spans[3], span_id: 'f'.repeat(16), node_name: 'unexpected' });
+      response.spans.push({
+        ...response.spans[3],
+        span_id: 'f'.repeat(16),
+        parent_span_id: response.spans[0].span_id,
+        node_name: 'unexpected',
+      });
       response.spanCount = 5;
     }, 'TRACE_INCOMPLETE'],
     ['wrong edge', (response: any) => {

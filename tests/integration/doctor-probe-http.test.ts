@@ -15,19 +15,36 @@ function persistedTrace(traceId: string, envelope: DiagnosticEnvelope | null) {
   };
   return {
     _id: traceId,
+    status: 'success',
+    finalizationStatus: 'finalized',
     workflowName: 'neatlogs.doctor.v2',
     spanCount: envelope.spans.length,
     promptTokens: 11,
     completionTokens: 7,
     totalTokensUsed: 18,
-    spans: envelope.spans.map((span) => ({
-      span_id: span.span_id,
-      ...(span.parent_span_id ? { parent_span_id: span.parent_span_id } : {}),
-      node_name: span.name,
-      node_type: kinds[span.kind],
-      data: { input_value: span.input, output_value: span.output },
-      span_metadata: span.attributes,
-    })),
+    spans: envelope.spans.map((span) => {
+      const materializedIo: Record<string, Readonly<{ input: unknown; output: unknown }>> = {
+        'doctor.probe.root': { input: 'generated diagnostic input', output: 'Value: 2' },
+        'doctor.probe.agent': {
+          input: 'Prompt: generated diagnostic input',
+          output: JSON.stringify({ text: 'generated diagnostic output' }),
+        },
+        'doctor.probe.llm': {
+          input: { prompt: 'generated diagnostic input' },
+          output: 'Text: generated diagnostic output',
+        },
+        'doctor.probe.tool': { input: 'Value: 1', output: 'Value: 2' },
+      };
+      const io = materializedIo[span.name]!;
+      return {
+        span_id: span.span_id,
+        ...(span.parent_span_id ? { parent_span_id: span.parent_span_id } : {}),
+        node_name: span.name,
+        node_type: kinds[span.kind],
+        data: { input_value: io.input, output_value: io.output },
+        span_metadata: span.attributes,
+      };
+    }),
   };
 }
 
@@ -94,7 +111,14 @@ describe('Doctor probe over the actual OTLP HTTP exporter', () => {
         mode: 'probe',
         status: 'pass',
         capture: { span_count: 4 },
-        probe: { visible: true, readback_span_count: 4 },
+        probe: {
+          visible: true,
+          readback_trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+          finalized: true,
+          meaningful_root_count: 1,
+          duplicate_span_count: 0,
+          readback_span_count: 4,
+        },
       });
       const post = requests.find((request) => request.method === 'POST');
       const read = requests.find((request) => request.method === 'GET');

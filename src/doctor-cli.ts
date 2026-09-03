@@ -46,6 +46,34 @@ const EXPECTED_IO = new Map<string, Readonly<{ input: unknown; output: unknown }
   ['doctor.probe.tool', { input: { value: 1 }, output: { value: 2 } }],
 ]);
 
+// The v3 read path intentionally returns the UI-facing simplified view. It may
+// preserve normalized JSON or render the same deterministic semantic value for
+// display. Keep this allowlist identical across SDKs.
+const EXPECTED_PERSISTED_IO = new Map<string, Readonly<{
+  inputs: readonly unknown[];
+  outputs: readonly unknown[];
+}>>([
+  ['doctor.probe.root', {
+    inputs: [{ prompt: 'generated diagnostic input' }, 'generated diagnostic input'],
+    outputs: [{ result: { value: 2 } }, 'Value: 2'],
+  }],
+  ['doctor.probe.agent', {
+    inputs: [{ prompt: 'generated diagnostic input' }, 'Prompt: generated diagnostic input'],
+    outputs: [{ text: 'generated diagnostic output' }],
+  }],
+  ['doctor.probe.llm', {
+    inputs: [
+      { messages: [{ role: 'user', content: 'generated diagnostic input' }] },
+      { prompt: 'generated diagnostic input' },
+    ],
+    outputs: [{ text: 'generated diagnostic output' }, 'Text: generated diagnostic output'],
+  }],
+  ['doctor.probe.tool', {
+    inputs: [{ value: 1 }, 'Value: 1'],
+    outputs: [{ value: 2 }, 'Value: 2'],
+  }],
+]);
+
 export type DoctorCliIO = Readonly<{
   stdout: (line: string) => void;
   stderr: (line: string) => void;
@@ -82,6 +110,8 @@ type PersistedSpan = Readonly<{
 
 type PersistedTrace = Readonly<{
   _id?: unknown;
+  status?: unknown;
+  finalizationStatus?: unknown;
   spanCount?: unknown;
   promptTokens?: unknown;
   completionTokens?: unknown;
@@ -134,6 +164,11 @@ function canonicalize(value: unknown): unknown {
 
 function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+}
+
+function matchesMaterializedValue(value: unknown, expected: readonly unknown[]): boolean {
+  return value !== null && value !== undefined &&
+    expected.some((candidate) => sameValue(value, candidate));
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -356,28 +391,32 @@ function persistedProbeResult(
   const llm = byName.get('doctor.probe.llm');
   const tool = byName.get('doctor.probe.tool');
   const ids = normalized.map((item) => item.id);
+  const duplicateSpanCount = ids.length - new Set(ids).size;
+  const meaningfulRootCount = normalized.filter((item) =>
+    item.name !== 'neatlogs.trace.complete' && item.parentId === null).length;
   const readbackSpanCount = typeof traceValue.spanCount === 'number'
     ? traceValue.spanCount
     : spans.length;
 
-  const visible = traceValue._id === local.capture?.trace_id;
+  const readbackTraceId = typeof traceValue._id === 'string' ? traceValue._id : null;
+  const visible = readbackTraceId === local.capture?.trace_id;
+  const finalized = (traceValue.status === 'success' || traceValue.status === 'error') &&
+    (traceValue.finalizationStatus === undefined || traceValue.finalizationStatus === 'finalized');
   const exactSet = spans.length === EXPECTED_TYPES.size &&
     readbackSpanCount === EXPECTED_TYPES.size &&
     byName.size === EXPECTED_TYPES.size &&
     ids.every((id) => /^[0-9a-f]{16}$/.test(id)) &&
-    new Set(ids).size === EXPECTED_TYPES.size &&
+    duplicateSpanCount === 0 &&
     [...EXPECTED_TYPES].every(([name, type]) => byName.get(name)?.type === type);
   const exactEdges = !!root && !!agent && !!llm && !!tool &&
     root.parentId === null &&
     agent.parentId === root.id &&
     llm.parentId === agent.id &&
     tool.parentId === root.id;
-  const exactIo = [...EXPECTED_IO].every(([name, expected]) => {
+  const exactIo = [...EXPECTED_PERSISTED_IO].every(([name, expected]) => {
     const data = byName.get(name)?.data ?? {};
-    return data.input_value !== null && data.input_value !== undefined &&
-      data.output_value !== null && data.output_value !== undefined &&
-      sameValue(data.input_value, expected.input) &&
-      sameValue(data.output_value, expected.output);
+    return matchesMaterializedValue(data.input_value, expected.inputs) &&
+      matchesMaterializedValue(data.output_value, expected.outputs);
   });
   const exactMetadata = [...EXPECTED_SPAN_TYPES].every(([name, spanType]) => {
     const metadata = byName.get(name)?.metadata ?? {};
@@ -396,7 +435,11 @@ function persistedProbeResult(
     typeof value === 'number' && Number.isFinite(value) && value === EXPECTED_TOKENS[index]);
 
   const probeChecks = [
-    check('probe_visibility', visible && exactSet, 'TRACE_VISIBLE', 'TRACE_INCOMPLETE', 'WAIT_FOR_TRACE', 'The exact four-span Doctor trace is visible through the authenticated trace API'),
+    check('probe_visibility', visible, 'TRACE_VISIBLE', 'TRACE_ID_MISMATCH', 'WAIT_FOR_TRACE', 'The read-back trace ID exactly matches the exported Doctor trace ID'),
+    check('probe_finalization', finalized, 'TRACE_FINALIZED', 'TRACE_NOT_FINALIZED', 'WAIT_FOR_TRACE', 'The Doctor trace reached a terminal finalized state'),
+    check('probe_root_count', meaningfulRootCount === 1, 'ROOT_COUNT_VALID', 'ROOT_COUNT_INVALID', 'CHECK_TRACE_FINALIZER', 'The persisted Doctor trace has exactly one meaningful root'),
+    check('probe_duplicates', duplicateSpanCount === 0, 'NO_DUPLICATE_SPANS', 'DUPLICATE_SPANS', 'CHECK_TRACE_FINALIZER', 'The persisted Doctor trace contains no duplicate span IDs'),
+    check('probe_span_set', exactSet, 'SPAN_SET_VALID', 'TRACE_INCOMPLETE', 'WAIT_FOR_TRACE', 'The exact four-span Doctor trace is visible through the authenticated trace API'),
     check('probe_hierarchy', exactEdges, 'HIERARCHY_VALID', 'HIERARCHY_INVALID', 'CHECK_TRACE_FINALIZER', 'The persisted Doctor trace retains the exact semantic parent edges'),
     check('probe_attributes', exactSet, 'ATTRIBUTES_VALID', 'ATTRIBUTES_INVALID', 'CHECK_ATTRIBUTE_MAPPING', 'The persisted Doctor span names and semantic types are exact'),
     check('probe_input_output', exactIo, 'INPUT_OUTPUT_VALID', 'INPUT_OUTPUT_INVALID', 'CHECK_PAYLOAD_MAPPING', 'The persisted Doctor spans retain the exact non-null deterministic input and output'),
@@ -416,6 +459,10 @@ function persistedProbeResult(
       marker_header: 'x-neatlogs-doctor',
       marker_version: DOCTOR_MARKER_VERSION,
       visible,
+      readback_trace_id: readbackTraceId,
+      finalized,
+      meaningful_root_count: meaningfulRootCount,
+      duplicate_span_count: duplicateSpanCount,
       readback_span_count: readbackSpanCount,
       hierarchy_valid: exactEdges,
       attributes_valid: exactSet,
