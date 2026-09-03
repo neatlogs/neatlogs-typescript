@@ -212,6 +212,10 @@ describe('doctor CLI', () => {
       response.status = 'processing';
       response.finalizationStatus = 'pending';
     }, 'TRACE_NOT_FINALIZED', { finalized: false }],
+    ['terminal error trace', (response: any) => {
+      response.status = 'error';
+      response.finalizationStatus = 'finalized';
+    }, 'TRACE_NOT_FINALIZED', { finalized: false }],
     ['multiple meaningful roots', (response: any) => {
       const agent = response.spans.find((item: any) => item.node_name === 'doctor.probe.agent');
       delete agent.parent_span_id;

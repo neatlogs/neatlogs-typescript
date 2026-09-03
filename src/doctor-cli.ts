@@ -400,7 +400,7 @@ function persistedProbeResult(
 
   const readbackTraceId = typeof traceValue._id === 'string' ? traceValue._id : null;
   const visible = readbackTraceId === local.capture?.trace_id;
-  const finalized = (traceValue.status === 'success' || traceValue.status === 'error') &&
+  const finalized = traceValue.status === 'success' &&
     (traceValue.finalizationStatus === undefined || traceValue.finalizationStatus === 'finalized');
   const exactSet = spans.length === EXPECTED_TYPES.size &&
     readbackSpanCount === EXPECTED_TYPES.size &&
@@ -436,7 +436,7 @@ function persistedProbeResult(
 
   const probeChecks = [
     check('probe_visibility', visible, 'TRACE_VISIBLE', 'TRACE_ID_MISMATCH', 'WAIT_FOR_TRACE', 'The read-back trace ID exactly matches the exported Doctor trace ID'),
-    check('probe_finalization', finalized, 'TRACE_FINALIZED', 'TRACE_NOT_FINALIZED', 'WAIT_FOR_TRACE', 'The Doctor trace reached a terminal finalized state'),
+    check('probe_finalization', finalized, 'TRACE_FINALIZED', 'TRACE_NOT_FINALIZED', 'WAIT_FOR_TRACE', 'The Doctor trace reached a successful finalized state'),
     check('probe_root_count', meaningfulRootCount === 1, 'ROOT_COUNT_VALID', 'ROOT_COUNT_INVALID', 'CHECK_TRACE_FINALIZER', 'The persisted Doctor trace has exactly one meaningful root'),
     check('probe_duplicates', duplicateSpanCount === 0, 'NO_DUPLICATE_SPANS', 'DUPLICATE_SPANS', 'CHECK_TRACE_FINALIZER', 'The persisted Doctor trace contains no duplicate span IDs'),
     check('probe_span_set', exactSet, 'SPAN_SET_VALID', 'TRACE_INCOMPLETE', 'WAIT_FOR_TRACE', 'The exact four-span Doctor trace is visible through the authenticated trace API'),
