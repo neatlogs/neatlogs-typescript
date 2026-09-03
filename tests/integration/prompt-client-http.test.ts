@@ -26,10 +26,7 @@ interface CapturedRequest {
   body: unknown;
 }
 
-type AsyncRequestHandler = (
-  request: IncomingMessage,
-  response: ServerResponse,
-) => Promise<void>;
+type AsyncRequestHandler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
 
 const servers = new Set<Server>();
 
@@ -93,9 +90,13 @@ function sendJson(response: ServerResponse, value: unknown, status = 200): void 
   response.end(JSON.stringify(value));
 }
 
+function promptId(version: number): string {
+  return `00000000-0000-4000-8000-${String(version).padStart(12, '0')}`;
+}
+
 function prompt(name: string, version: number, content: string, labels: string[] = []) {
   return {
-    id: `${name}-${version}`,
+    id: promptId(version),
     name,
     version,
     content,
@@ -111,25 +112,23 @@ describe('PromptClient real HTTP transport', () => {
   it('runs the public prompt workflow over an actual HTTP connection', async () => {
     const requests: CapturedRequest[] = [];
     const name = 'release check/東京';
-    const label = 'production ready';
+    const label = 'production-ready';
     const { baseUrl } = await startServer(async (request, response) => {
       const captured = await captureRequest(request);
       requests.push(captured);
       const url = new URL(captured.path, baseUrl);
 
       if (captured.method === 'POST' && url.pathname === '/api/managed-prompts') {
-        sendJson(response, { prompt: prompt(name, 1, 'Hello {{name}}', ['draft']) });
-        return;
-      }
-      if (captured.method === 'PUT' && url.pathname === '/api/managed-prompts') {
-        sendJson(response, { prompt: prompt(name, 2, 'Welcome {{name}}', [label]) });
+        sendJson(response, {
+          prompt: prompt(name, 1, 'Hello {{name}}', ['draft']),
+        });
         return;
       }
       if (captured.method === 'GET' && url.pathname === '/api/managed-prompts') {
         sendJson(response, {
           items: [
-            prompt(name, 1, 'Hello {{name}}', ['draft']),
             prompt(name, 2, 'Welcome {{name}}', [label]),
+            prompt(name, 1, 'Hello {{name}}', ['draft']),
           ],
         });
         return;
@@ -142,11 +141,12 @@ describe('PromptClient real HTTP transport', () => {
         sendJson(response, {});
         return;
       }
-      if (
-        captured.method === 'POST' &&
-        url.pathname === '/api/prompt-playground/save-as-version'
-      ) {
-        sendJson(response, { prompt: prompt(name, 3, 'Welcome {{name}}', ['staging']) });
+      if (captured.method === 'POST' && url.pathname === '/api/prompt-playground/save-as-version') {
+        const body = captured.body as { content?: string; labels?: string[] };
+        const version = body.content === 'Welcome {{name}}' ? 2 : 3;
+        sendJson(response, {
+          prompt: prompt(name, version, body.content ?? '', body.labels ?? []),
+        });
         return;
       }
       if (captured.method === 'DELETE' && url.pathname.startsWith('/api/managed-prompts/')) {
@@ -156,7 +156,10 @@ describe('PromptClient real HTTP transport', () => {
 
       sendJson(response, { error: 'unexpected request' }, 404);
     });
-    const client = new PromptClient({ baseUrl: `${baseUrl}/`, apiKey: 'integration-key' });
+    const client = new PromptClient({
+      baseUrl: `${baseUrl}/`,
+      apiKey: 'integration-key',
+    });
 
     const created = await client.createPrompt({
       name,
@@ -171,13 +174,16 @@ describe('PromptClient real HTTP transport', () => {
     const latest = await client.getPrompt(name);
     const cached = await client.getPrompt(name);
     const labeled = await client.fetchPrompt(name, { label });
-    await client.removeTag(name, label);
-    const versioned = await client.saveAsVersion(name, { label: 'staging' });
-    await client.deletePrompt(name);
+    await client.removeTag(name, label, { promptId: promptId(2) });
+    const versioned = await client.saveAsVersion(name, {
+      content: 'Final {{name}}',
+      label: 'staging',
+    });
+    await client.deletePrompt(name, { promptId: promptId(3) });
 
     expect(created.compile({ name: 'Harsh' })).toBe('Hello Harsh');
     expect(updated.compile({ name: 'Harsh' })).toBe('Welcome Harsh');
-    expect(listed.map((item) => item.version)).toEqual([1, 2]);
+    expect(listed.map((item) => item.version)).toEqual([2, 1]);
     expect(latest.version).toBe(2);
     expect(cached.version).toBe(2);
     expect(labeled.labels).toEqual([label]);
@@ -185,13 +191,13 @@ describe('PromptClient real HTTP transport', () => {
 
     expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
       'POST /api/managed-prompts',
-      'PUT /api/managed-prompts',
-      'GET /api/managed-prompts?limit=100&offset=0',
-      'GET /api/managed-prompts?name=release%20check%2F%E6%9D%B1%E4%BA%AC&limit=100&offset=0',
-      'GET /api/v1/prompts/release%20check%2F%E6%9D%B1%E4%BA%AC/fetch?label=production%20ready',
-      'DELETE /api/managed-prompts/release%20check%2F%E6%9D%B1%E4%BA%AC/tags',
       'POST /api/prompt-playground/save-as-version',
-      'DELETE /api/managed-prompts/release%20check%2F%E6%9D%B1%E4%BA%AC',
+      'GET /api/managed-prompts?limit=500&offset=0',
+      'GET /api/managed-prompts?name=release%20check%2F%E6%9D%B1%E4%BA%AC&limit=500&offset=0',
+      'GET /api/v1/prompts/release%20check%2F%E6%9D%B1%E4%BA%AC/fetch?label=production-ready',
+      `DELETE /api/managed-prompts/${promptId(2)}/tags`,
+      'POST /api/prompt-playground/save-as-version',
+      `DELETE /api/managed-prompts/${promptId(3)}`,
     ]);
     expect(
       requests.every(({ headers }) => headers.authorization === 'Bearer integration-key'),
@@ -204,16 +210,19 @@ describe('PromptClient real HTTP transport', () => {
     expect(requests[0].body).toEqual({
       name,
       content: 'Hello {{name}}',
-      type: 'text',
       labels: ['draft'],
     });
     expect(requests[1].body).toEqual({
-      name,
+      promptName: name,
       content: 'Welcome {{name}}',
       labels: [label],
     });
     expect(requests[5].body).toEqual({ tag: label });
-    expect(requests[6].body).toEqual({ promptName: name, labels: ['staging'] });
+    expect(requests[6].body).toEqual({
+      promptName: name,
+      content: 'Final {{name}}',
+      labels: ['staging'],
+    });
   });
 
   it('preserves real HTTP and JSON errors without another request', async () => {
@@ -235,11 +244,9 @@ describe('PromptClient real HTTP transport', () => {
     });
     const client = new PromptClient({ baseUrl, apiKey: 'integration-key' });
 
-    await expect(client._request('/unavailable')).rejects.toThrow(
-      'GET /unavailable failed (503): temporarily unavailable',
-    );
+    await expect(client._request('/unavailable')).rejects.toThrow('GET /unavailable failed (503)');
     await expect(client._request('/invalid-json')).rejects.toThrow(
-      'GET /invalid-json returned non-JSON response',
+      'GET /invalid-json returned non-JSON response (200)',
     );
 
     expect(requests.map(({ path }) => path)).toEqual(['/unavailable', '/invalid-json']);
@@ -255,39 +262,59 @@ describe('PromptClient real HTTP transport', () => {
     },
     {
       name: 'createPrompt',
-      invoke: (client: PromptClient) =>
-        client.createPrompt({ name: 'created', content: 'hello' }),
+      invoke: (client: PromptClient) => client.createPrompt({ name: 'created', content: 'hello' }),
       path: '/api/managed-prompts',
       method: 'POST',
-      body: { name: 'created', content: 'hello', type: 'text' },
+      body: { name: 'created', content: 'hello' },
     },
     {
       name: 'updatePrompt',
       invoke: (client: PromptClient) => client.updatePrompt('updated', { content: 'hello' }),
-      path: '/api/managed-prompts',
-      method: 'PUT',
-      body: { name: 'updated', content: 'hello' },
+      path: '/api/prompt-playground/save-as-version',
+      method: 'POST',
+      body: { promptName: 'updated', content: 'hello' },
     },
     {
       name: 'deletePrompt',
-      invoke: (client: PromptClient) => client.deletePrompt('deleted'),
-      path: '/api/managed-prompts/deleted',
+      invoke: (client: PromptClient) => client.deletePrompt('deleted', { promptId: promptId(1) }),
+      path: `/api/managed-prompts/${promptId(1)}`,
       method: 'DELETE',
       body: undefined,
     },
     {
+      name: 'setLabel',
+      invoke: (client: PromptClient) =>
+        client.setLabel('labeled', 'production', { promptId: promptId(1) }),
+      path: `/api/managed-prompts/${promptId(1)}/labels`,
+      method: 'POST',
+      body: { label: 'production' },
+    },
+    {
+      name: 'addTag',
+      invoke: (client: PromptClient) =>
+        client.addTag('tagged', 'production', { promptId: promptId(1) }),
+      path: `/api/managed-prompts/${promptId(1)}/tags`,
+      method: 'POST',
+      body: { tag: 'production' },
+    },
+    {
       name: 'removeTag',
-      invoke: (client: PromptClient) => client.removeTag('tagged', 'production'),
-      path: '/api/managed-prompts/tagged/tags',
+      invoke: (client: PromptClient) =>
+        client.removeTag('tagged', 'production', { promptId: promptId(1) }),
+      path: `/api/managed-prompts/${promptId(1)}/tags`,
       method: 'DELETE',
       body: { tag: 'production' },
     },
     {
       name: 'saveAsVersion',
-      invoke: (client: PromptClient) => client.saveAsVersion('versioned', { label: 'staging' }),
+      invoke: (client: PromptClient) =>
+        client.saveAsVersion('versioned', {
+          content: 'hello',
+          label: 'staging',
+        }),
       path: '/api/prompt-playground/save-as-version',
       method: 'POST',
-      body: { promptName: 'versioned', labels: ['staging'] },
+      body: { promptName: 'versioned', content: 'hello', labels: ['staging'] },
     },
   ];
 
@@ -305,7 +332,7 @@ describe('PromptClient real HTTP transport', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       expect(error).toBeInstanceOf(Error);
-      expect(error).not.toBeInstanceOf(PromptApiError);
+      expect(error).toBeInstanceOf(PromptApiError);
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({ method, path, body });
     },
@@ -343,7 +370,7 @@ describe('PromptClient real HTTP transport', () => {
       .catch((requestError: unknown) => requestError);
 
     expect(error).toBeInstanceOf(Error);
-    expect(error).not.toBeInstanceOf(PromptApiError);
+    expect(error).toBeInstanceOf(PromptApiError);
   });
 
   it('keeps prompt product data outside telemetry masking', async () => {
@@ -354,12 +381,14 @@ describe('PromptClient real HTTP transport', () => {
       const captured = await captureRequest(request);
       requests.push(captured);
       const url = new URL(captured.path, baseUrl);
-      const body = captured.body as {
-        name: string;
-        content: string;
-        config: Record<string, unknown>;
-        labels: string[];
-      } | undefined;
+      const body = captured.body as
+        | {
+            name: string;
+            content: string;
+            config: Record<string, unknown>;
+            labels: string[];
+          }
+        | undefined;
       if (body?.name === `${marker}-failure`) {
         response.destroy();
         return;
@@ -372,11 +401,15 @@ describe('PromptClient real HTTP transport', () => {
         sendJson(response, {});
         return;
       }
-      if (
-        captured.method === 'POST' &&
-        url.pathname === '/api/prompt-playground/save-as-version'
-      ) {
-        sendJson(response, { prompt: prompt(marker, 3, `updated:${marker}`, [marker]) });
+      if (captured.method === 'POST' && url.pathname === '/api/prompt-playground/save-as-version') {
+        const saveBody = captured.body as {
+          content?: string;
+          labels?: string[];
+        };
+        const version = saveBody.content === `updated:${marker}` ? 2 : 3;
+        sendJson(response, {
+          prompt: prompt(marker, version, saveBody.content ?? '', saveBody.labels ?? []),
+        });
         return;
       }
       if (!body) {
@@ -426,9 +459,12 @@ describe('PromptClient real HTTP transport', () => {
         labels: [marker],
       });
       const fetched = await fetchPrompt(marker, { label: marker });
-      await removeTag(marker, marker);
-      const versioned = await saveAsVersion(marker, { label: marker });
-      await deletePrompt(marker);
+      await removeTag(marker, marker, { promptId: promptId(2) });
+      const versioned = await saveAsVersion(marker, {
+        content: `versioned:${marker}`,
+        label: marker,
+      });
+      await deletePrompt(marker, { promptId: promptId(3) });
 
       expect(created.content).toBe(`created:${marker}`);
       expect(updated.content).toBe(`updated:${marker}`);
@@ -438,36 +474,38 @@ describe('PromptClient real HTTP transport', () => {
         {
           name: marker,
           content: `created:${marker}`,
-          type: 'text',
           config: { marker },
           labels: [marker],
         },
         {
           name: `${marker}-failure`,
           content: marker,
-          type: 'text',
           config: { marker },
           labels: [marker],
         },
         {
-          name: marker,
+          promptName: marker,
           content: `updated:${marker}`,
           config: { marker },
           labels: [marker],
         },
         undefined,
         { tag: marker },
-        { promptName: marker, labels: [marker] },
+        {
+          promptName: marker,
+          content: `versioned:${marker}`,
+          labels: [marker],
+        },
         undefined,
       ]);
       expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
         'POST /api/managed-prompts',
         'POST /api/managed-prompts',
-        'PUT /api/managed-prompts',
-        'GET /api/v1/prompts/prompt-product-data-marker/fetch?label=prompt-product-data-marker',
-        'DELETE /api/managed-prompts/prompt-product-data-marker/tags',
         'POST /api/prompt-playground/save-as-version',
-        'DELETE /api/managed-prompts/prompt-product-data-marker',
+        'GET /api/v1/prompts/prompt-product-data-marker/fetch?label=prompt-product-data-marker',
+        `DELETE /api/managed-prompts/${promptId(2)}/tags`,
+        'POST /api/prompt-playground/save-as-version',
+        `DELETE /api/managed-prompts/${promptId(3)}`,
       ]);
       expect(destructiveMask).not.toHaveBeenCalled();
     } finally {

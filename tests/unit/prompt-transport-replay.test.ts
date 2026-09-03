@@ -33,6 +33,7 @@ function response({
   return {
     ok,
     status,
+    body: { cancel: vi.fn().mockResolvedValue(undefined) },
     json: vi.fn().mockResolvedValue(body),
     text: vi.fn().mockResolvedValue(text),
   } as unknown as Response;
@@ -66,7 +67,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'ok' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'ok' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'ok',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(otel.withContext).not.toHaveBeenCalled();
@@ -80,7 +83,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'ok' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'ok' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'ok',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(otel.withContext).not.toHaveBeenCalled();
@@ -94,7 +99,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'ok' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'ok' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'ok',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -108,7 +115,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'transport' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'transport' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'transport',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -122,7 +131,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'transport' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'transport' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'transport',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -137,7 +148,12 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockRejectedValue(transportError);
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).rejects.toBe(transportError);
+    await expect(createClient()._request('/api/test')).rejects.toMatchObject({
+      name: 'PromptApiError',
+      message: 'GET /api/test request failed',
+      method: 'GET',
+      path: '/api/test',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -147,7 +163,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'fallback' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'fallback' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'fallback',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -157,7 +175,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'fallback' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'fallback' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'fallback',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -170,7 +190,9 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'transport' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'transport' });
+    await expect(createClient()._request('/api/test')).resolves.toEqual({
+      value: 'transport',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -182,7 +204,10 @@ describe('PromptClient transport replay boundary', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).rejects.toBe(transportError);
+    await expect(createClient()._request('/api/test')).rejects.toMatchObject({
+      name: 'PromptApiError',
+      message: 'GET /api/test request failed',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -192,7 +217,10 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockRejectedValue(transportError);
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).rejects.toBe(transportError);
+    await expect(createClient()._request('/api/test')).rejects.toMatchObject({
+      name: 'PromptApiError',
+      message: 'GET /api/test request failed',
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -202,38 +230,46 @@ describe('PromptClient transport replay boundary', () => {
     const fetchMock = vi.fn().mockRejectedValue(abortError);
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).rejects.toBe(abortError);
+    await expect(createClient()._request('/api/test')).rejects.toMatchObject({
+      name: 'PromptApiError',
+      message: 'GET /api/test request failed',
+    });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('preserves an HTTP error body without replaying transport', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      response({
-        ok: false,
-        status: 503,
-        text: 'temporarily unavailable',
-      }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(createClient()._request('/api/test')).rejects.toThrow(
-      'GET /api/test failed (503): temporarily unavailable',
-    );
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it('uses the unavailable placeholder when an HTTP error body cannot be read', async () => {
-    const failedResponse = response({ ok: false, status: 500 });
-    vi.mocked(failedResponse.text).mockRejectedValue(new Error('body read failed'));
+  it('does not expose an HTTP error body or replay transport', async () => {
+    const failedResponse = response({
+      ok: false,
+      status: 503,
+      text: 'temporarily unavailable',
+    });
     const fetchMock = vi.fn().mockResolvedValue(failedResponse);
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(createClient()._request('/api/test')).rejects.toThrow(
-      'GET /api/test failed (500): <unavailable>',
+      'GET /api/test failed (503)',
     );
 
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(failedResponse.body?.cancel).toHaveBeenCalledOnce();
+    expect(failedResponse.text).not.toHaveBeenCalled();
+    expect(failedResponse.json).not.toHaveBeenCalled();
+  });
+
+  it('ignores error-body cancellation failures without replaying transport', async () => {
+    const failedResponse = response({ ok: false, status: 500 });
+    vi.mocked(failedResponse.body!.cancel).mockRejectedValue(new Error('body cancel failed'));
+    const fetchMock = vi.fn().mockResolvedValue(failedResponse);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toThrow(
+      'GET /api/test failed (500)',
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(failedResponse.body?.cancel).toHaveBeenCalledOnce();
+    expect(failedResponse.text).not.toHaveBeenCalled();
+    expect(failedResponse.json).not.toHaveBeenCalled();
   });
 
   it('preserves non-JSON response errors without replaying transport', async () => {
@@ -247,7 +283,7 @@ describe('PromptClient transport replay boundary', () => {
       .catch((requestError: unknown) => requestError);
 
     expect(error).toBeInstanceOf(PromptApiError);
-    expect(error).toHaveProperty('message', 'GET /api/test returned non-JSON response');
+    expect(error).toHaveProperty('message', 'GET /api/test returned non-JSON response (200)');
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
@@ -262,54 +298,77 @@ describe('PromptClient transport replay boundary', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock).toHaveBeenCalledWith('https://api.test.com/api/test?label=production', {
-      method: 'PATCH',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer test-api-key',
-        'x-api-key': 'test-api-key',
-        'x-request-id': 'request-1',
-      },
-      body: '{"value":"payload"}',
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.test.com/api/test?label=production',
+      expect.objectContaining({
+        method: 'PATCH',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer test-api-key',
+          'x-api-key': 'test-api-key',
+          'x-request-id': 'request-1',
+        },
+        body: '{"value":"payload"}',
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 
+  const promptId = '00000000-0000-4000-8000-000000000001';
   const rejectedMutations = [
     {
       name: 'createPrompt',
       invoke: (client: PromptClient) => client.createPrompt({ name: 'created', content: 'hello' }),
       path: '/api/managed-prompts',
       method: 'POST',
-      body: { name: 'created', content: 'hello', type: 'text' },
+      body: { name: 'created', content: 'hello' },
     },
     {
       name: 'updatePrompt',
       invoke: (client: PromptClient) => client.updatePrompt('updated', { content: 'hello' }),
-      path: '/api/managed-prompts',
-      method: 'PUT',
-      body: { name: 'updated', content: 'hello' },
+      path: '/api/prompt-playground/save-as-version',
+      method: 'POST',
+      body: { promptName: 'updated', content: 'hello' },
     },
     {
       name: 'deletePrompt',
-      invoke: (client: PromptClient) => client.deletePrompt('deleted'),
-      path: '/api/managed-prompts/deleted',
+      invoke: (client: PromptClient) => client.deletePrompt('deleted', { promptId }),
+      path: `/api/managed-prompts/${promptId}`,
       method: 'DELETE',
       body: undefined,
     },
     {
+      name: 'setLabel',
+      invoke: (client: PromptClient) => client.setLabel('labeled', 'production', { promptId }),
+      path: `/api/managed-prompts/${promptId}/labels`,
+      method: 'POST',
+      body: { label: 'production' },
+    },
+    {
+      name: 'addTag',
+      invoke: (client: PromptClient) => client.addTag('tagged', 'production', { promptId }),
+      path: `/api/managed-prompts/${promptId}/tags`,
+      method: 'POST',
+      body: { tag: 'production' },
+    },
+    {
       name: 'removeTag',
-      invoke: (client: PromptClient) => client.removeTag('tagged', 'production'),
-      path: '/api/managed-prompts/tagged/tags',
+      invoke: (client: PromptClient) => client.removeTag('tagged', 'production', { promptId }),
+      path: `/api/managed-prompts/${promptId}/tags`,
       method: 'DELETE',
       body: { tag: 'production' },
     },
     {
       name: 'saveAsVersion',
-      invoke: (client: PromptClient) => client.saveAsVersion('versioned', { label: 'staging' }),
+      invoke: (client: PromptClient) =>
+        client.saveAsVersion('versioned', {
+          content: 'hello',
+          label: 'staging',
+        }),
       path: '/api/prompt-playground/save-as-version',
       method: 'POST',
-      body: { promptName: 'versioned', labels: ['staging'] },
+      body: { promptName: 'versioned', content: 'hello', labels: ['staging'] },
     },
   ];
 
@@ -320,7 +379,10 @@ describe('PromptClient transport replay boundary', () => {
       const fetchMock = vi.fn().mockRejectedValue(transportError);
       vi.stubGlobal('fetch', fetchMock);
 
-      await expect(invoke(createClient())).rejects.toBe(transportError);
+      await expect(invoke(createClient())).rejects.toMatchObject({
+        name: 'PromptApiError',
+        message: `${method} ${path.replace(promptId, ':promptId')} request failed`,
+      });
 
       expect(fetchMock).toHaveBeenCalledOnce();
       const [calledUrl, calledOptions] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -345,7 +407,10 @@ describe('PromptClient transport replay boundary', () => {
     expect(results).toHaveLength(100);
     expect(
       results.every(
-        (result) => result.status === 'rejected' && result.reason === transportError,
+        (result) =>
+          result.status === 'rejected' &&
+          result.reason instanceof PromptApiError &&
+          result.reason.message === 'POST /api/managed-prompts request failed',
       ),
     ).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(100);
