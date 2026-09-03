@@ -40,6 +40,39 @@ describe('doctor v2 local envelope', () => {
     expect(doctorSemanticDigest({ ...value, spans: [...value.spans].reverse() })).toBe(doctorSemanticDigest(value));
   });
 
+  it('excludes volatile IDs, timing, and language metadata from the semantic digest', () => {
+    const value = envelope();
+    const remappedIds = new Map(value.spans.map((item, index) => [
+      item.span_id,
+      `${index + 10}`.repeat(16).slice(0, 16),
+    ]));
+    const changed: DiagnosticEnvelope = {
+      trace_id: 'f'.repeat(32),
+      root_span_id: remappedIds.get(value.root_span_id)!,
+      spans: value.spans.map((item) => ({
+        ...item,
+        span_id: remappedIds.get(item.span_id)!,
+        parent_span_id: item.parent_span_id === null
+          ? null
+          : remappedIds.get(item.parent_span_id)!,
+        start_time_ns: (item.start_time_ns ?? 0) + 999,
+        duration_ns: (item.duration_ns ?? 0) + 999,
+        attributes: {
+          ...item.attributes,
+          'telemetry.sdk.language': 'another-language',
+          'telemetry.sdk.version': '999.0.0',
+        },
+      })),
+    };
+    expect(doctorSemanticDigest(changed)).toBe(doctorSemanticDigest(value));
+    expect(doctorSemanticDigest({
+      ...changed,
+      spans: changed.spans.map((item, index) => index === 0
+        ? { ...item, output: { changed: true } }
+        : item),
+    })).not.toBe(doctorSemanticDigest(value));
+  });
+
   it('detects a canonical nested assistant tool request without an execution span', () => {
     const value = envelope();
     const spans = value.spans

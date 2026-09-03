@@ -116,10 +116,35 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function doctorSemanticDigest(envelope: DiagnosticEnvelope): string {
+  const namesById = new Map(envelope.spans.map((span) => [span.span_id, span.name]));
   const projection = {
-    trace_id: envelope.trace_id,
-    root_span_id: envelope.root_span_id,
-    spans: [...envelope.spans].sort((left, right) => left.span_id.localeCompare(right.span_id)),
+    root_name: namesById.get(envelope.root_span_id) ?? null,
+    spans: envelope.spans.map((span) => ({
+      name: span.name,
+      parent_name: span.parent_span_id === null
+        ? null
+        : namesById.get(span.parent_span_id) ?? null,
+      kind: span.kind,
+      status: span.status,
+      input: span.input,
+      output: span.output,
+      choices: span.choices,
+      expected_choice_count: span.expected_choice_count,
+      tool_calls: span.tool_calls,
+      tool_call: span.tool_call,
+      streaming: span.streaming,
+      stream_fragments: span.stream_fragments,
+      oversized: span.oversized,
+      payload_references: span.payload_references,
+      sampled: span.sampled,
+      ended: span.ended,
+      token_counts: {
+        prompt: span.attributes?.['neatlogs.llm.token_count.prompt'],
+        completion: span.attributes?.['neatlogs.llm.token_count.completion'],
+        total: span.attributes?.['neatlogs.llm.token_count.total'],
+      },
+    })).sort((left, right) =>
+      left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind)),
   };
   const bytes = JSON.stringify(canonicalize(projection));
   return `sha256:${createHash('sha256').update(bytes, 'utf8').digest('hex')}`;

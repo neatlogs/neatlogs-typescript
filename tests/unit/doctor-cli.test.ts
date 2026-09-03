@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { runDoctorCli } from '../../src/doctor-cli.js';
+import { getDoctorCaptureStats } from '../../src/core/doctor-capture.js';
 
 function successfulProbeFixture() {
   const exported: ReadableSpan[] = [];
@@ -28,19 +29,23 @@ function successfulProbeFixture() {
       spans: spans.map((item) => {
         const rawKind = String(item.attributes['openinference.span.kind'] ?? item.attributes['neatlogs.span.kind'] ?? '');
         const kind = rawKind.replace(/^Neatlogs\./, '').toUpperCase();
+        const kindKey = kind.toLowerCase();
         return {
           span_id: item.spanContext().spanId,
           ...(item.parentSpanId ? { parent_span_id: item.parentSpanId } : {}),
           node_name: item.name,
           node_type: kindToType[kind],
           data: {
-            input_value: item.attributes['input.value'] ?? item.attributes['neatlogs.input'] ?? '{}',
-            output_value: item.attributes['output.value'] ?? item.attributes['neatlogs.output'] ?? '{}',
+            input_value: item.attributes[`neatlogs.${kindKey}.input`] ?? item.attributes['input.value'],
+            output_value: item.attributes[`neatlogs.${kindKey}.output`] ?? item.attributes['output.value'],
           },
           span_metadata: {
             'neatlogs.doctor': item.attributes['neatlogs.doctor'],
             'neatlogs.doctor.version': item.attributes['neatlogs.doctor.version'],
+            'service.name': item.attributes['service.name'],
             'telemetry.sdk.language': item.attributes['telemetry.sdk.language'],
+            'telemetry.sdk.version': item.attributes['telemetry.sdk.version'],
+            'neatlogs.span.type': item.attributes['neatlogs.span.type'],
           },
         };
       }),
@@ -68,8 +73,13 @@ describe('doctor CLI', () => {
       ownership: { provider: 'private' },
       queue: { mode: 'diagnostic_capture', pending_spans: 0, dropped_spans: 0 },
       flush: { outcome: 'success', timeout_ms: 5000 },
-      checks: [{ reason_code: 'LOCAL_ENVELOPE_VALID' }],
+      checks: expect.arrayContaining([
+        expect.objectContaining({ reason_code: 'LOCAL_ENVELOPE_VALID' }),
+        expect.objectContaining({ reason_code: 'CONTROLLED_HIERARCHY_VALID' }),
+        expect.objectContaining({ reason_code: 'CONTROLLED_METADATA_VALID' }),
+      ]),
     });
+    expect(getDoctorCaptureStats().traceCount).toBe(0);
   });
 
   it('does not attempt a probe without credentials', async () => {
@@ -119,6 +129,7 @@ describe('doctor CLI', () => {
     expect(String(fetch.mock.calls[0]![0])).toMatch(/^http:\/\/localhost:4100\/api\/traces\/v3\/[0-9a-f]{32}$/);
     expect(fetch.mock.calls[0]![1]).toMatchObject({
       method: 'GET', headers: { 'x-api-key': 'private-key' },
+      signal: expect.any(AbortSignal),
     });
     expect(JSON.parse(value.output[0]!)).toMatchObject({
       mode: 'probe', status: 'pass',
@@ -141,11 +152,13 @@ describe('doctor CLI', () => {
     const code = await runDoctorCli(['doctor', '--probe', '--json'], {
       ...value.overrides,
       fetch: fetch as typeof globalThis.fetch,
-      sleep: async () => undefined,
+      probeTimeoutMs: 5,
+      requestTimeoutMs: 5,
+      pollIntervalMs: 5,
       probeExporter: fixture.probeExporter,
     });
     expect(code).toBe(3);
-    expect(fetch).toHaveBeenCalledTimes(45);
+    expect(fetch).toHaveBeenCalledTimes(1);
     expect(JSON.parse(value.output[0]!)).toMatchObject({
       status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE',
     });
@@ -166,8 +179,81 @@ describe('doctor CLI', () => {
     expect(code).toBe(3);
     expect(JSON.parse(value.output[0]!)).toMatchObject({
       status: 'fail',
-      first_failure: 'TYPED_TOKENS_VALID_FAILED',
+      first_failure: 'TYPED_TOKENS_INVALID',
       probe: { typed_tokens_valid: false },
+    });
+  });
+
+  it('cancels a permanently stalled read request within the deadline', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    let signal: AbortSignal | undefined;
+    const fetch = vi.fn((_url: URL, options?: RequestInit) => {
+      signal = options?.signal as AbortSignal;
+      return new Promise<Response>(() => undefined);
+    });
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+      requestTimeoutMs: 5,
+      probeTimeoutMs: 20,
+    });
+    expect(code).toBe(3);
+    expect(signal?.aborted).toBe(true);
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+    });
+  });
+
+  it.each([
+    ['extra span', (response: any) => {
+      response.spans.push({ ...response.spans[3], span_id: 'f'.repeat(16), node_name: 'unexpected' });
+      response.spanCount = 5;
+    }, 'TRACE_INCOMPLETE'],
+    ['wrong edge', (response: any) => {
+      const llm = response.spans.find((item: any) => item.node_name === 'doctor.probe.llm');
+      const root = response.spans.find((item: any) => item.node_name === 'doctor.probe.root');
+      llm.parent_span_id = root.span_id;
+    }, 'HIERARCHY_INVALID'],
+    ['missing metadata', (response: any) => {
+      response.spans[0].span_metadata['telemetry.sdk.version'] = undefined;
+    }, 'METADATA_INVALID'],
+    ['null output', (response: any) => {
+      response.spans[0].data.output_value = null;
+    }, 'INPUT_OUTPUT_INVALID'],
+  ])('fails closed for %s', async (_name, mutate, expectedReason) => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => {
+      const response = fixture.response() as any;
+      mutate(response);
+      return new Response(JSON.stringify(response), { status: 200 });
+    });
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+    });
+    expect(code).toBe(3);
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      status: 'fail', first_failure: expectedReason,
+    });
+  });
+
+  it('maps authenticated read rejection without exposing the key', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => new Response(null, { status: 403 }));
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+    });
+    expect(code).toBe(3);
+    expect(value.output[0]).not.toContain('private-key');
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      status: 'fail', first_failure: 'AUTH_FAILED',
     });
   });
 

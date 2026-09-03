@@ -88,6 +88,7 @@ interface InitIdentity {
   mask: InitOptions["mask"];
   tracerProvider: InitOptions["tracerProvider"];
   uploadAuthority: UploadAuthorityOption | undefined;
+  doctorProbeExporter: InitOptions["doctorProbeExporter"];
 }
 let _initIdentity: InitIdentity | null = null;
 let _effectiveSampleRate = 1;
@@ -160,6 +161,8 @@ const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
   "debug",
   "disableExport",
   "diagnosticCapture",
+  "doctorProbe",
+  "doctorProbeExporter",
   "tracerProvider",
   "registerShutdownHandlers",
   "mask",
@@ -209,6 +212,21 @@ function validateInitOptions(options: InitOptions): void {
   ) {
     throw new TypeError(
       "uploadAuthority must be a boolean or an UploadAuthority implementation",
+    );
+  }
+  if (options.doctorProbeExporter !== undefined && options.doctorProbe !== true) {
+    throw new TypeError("doctorProbeExporter requires doctorProbe: true");
+  }
+  if (options.doctorProbe === true && options.diagnosticCapture !== true) {
+    throw new TypeError("doctorProbe requires diagnosticCapture: true");
+  }
+  if (
+    options.diagnosticCapture === true &&
+    options.disableExport !== true &&
+    options.doctorProbe !== true
+  ) {
+    throw new TypeError(
+      "diagnosticCapture requires disableExport: true or doctorProbe: true",
     );
   }
 }
@@ -278,6 +296,8 @@ function initIdentity(options: InitOptions): InitIdentity {
       ["true", "1", "yes"].includes(
         (process.env.NEATLOGS_DISABLE_EXPORT ?? "").toLowerCase(),
       ),
+    diagnosticCapture: options.diagnosticCapture ?? false,
+    doctorProbe: options.doctorProbe ?? false,
     registerShutdownHandlers: options.registerShutdownHandlers ?? null,
     sampleRate: options.sampleRate ?? 1,
     captureLogs: options.captureLogs ?? false,
@@ -302,6 +322,7 @@ function initIdentity(options: InitOptions): InitIdentity {
     uploadAuthority: isUploadAuthority(options.uploadAuthority)
       ? options.uploadAuthority
       : undefined,
+    doctorProbeExporter: options.doctorProbeExporter,
   };
 }
 
@@ -314,7 +335,8 @@ function sameInitIdentity(
     left.serialized === right.serialized &&
     left.mask === right.mask &&
     left.tracerProvider === right.tracerProvider &&
-    left.uploadAuthority === right.uploadAuthority
+    left.uploadAuthority === right.uploadAuthority &&
+    left.doctorProbeExporter === right.doctorProbeExporter
   );
 }
 
@@ -987,6 +1009,7 @@ async function _performShutdown(
   _queueMaxSize = 2_048;
   _signalShutdownStarted = false;
   _initIdentity = null;
+  clearDoctorCapture();
 
   // Reset session config
   _setSessionConfig({});

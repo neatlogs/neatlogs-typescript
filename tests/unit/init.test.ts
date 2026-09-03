@@ -167,6 +167,45 @@ describe('init()', () => {
     });
   });
 
+  it('treats diagnostic capture as part of initialization identity', async () => {
+    await init({ apiKey: 'key1', disableExport: true });
+    await expect(init({
+      apiKey: 'key1',
+      disableExport: true,
+      diagnosticCapture: true,
+    })).rejects.toMatchObject({ code: 'CONFLICTING_INIT' });
+  });
+
+  it('requires Doctor marking to use the bounded diagnostic capture lifecycle', async () => {
+    await expect(init({
+      apiKey: 'key1',
+      doctorProbe: true,
+    })).rejects.toThrow('doctorProbe requires diagnosticCapture: true');
+  });
+
+  it('treats the Doctor transport instance as part of initialization identity', async () => {
+    const exporter = () => ({
+      export(_spans: unknown[], callback: (result: { code: number }) => void) {
+        callback({ code: 0 });
+      },
+      async shutdown() {},
+    });
+    const first = exporter();
+    const second = exporter();
+    await init({
+      apiKey: 'key1',
+      diagnosticCapture: true,
+      doctorProbe: true,
+      doctorProbeExporter: first as any,
+    });
+    await expect(init({
+      apiKey: 'key1',
+      diagnosticCapture: true,
+      doctorProbe: true,
+      doctorProbeExporter: second as any,
+    })).rejects.toMatchObject({ code: 'CONFLICTING_INIT' });
+  });
+
   it('coalesces overlapping initialization calls', async () => {
     const first = init({ apiKey: 'key1', disableExport: true });
     const second = init({ apiKey: 'key1', disableExport: true });
@@ -300,6 +339,7 @@ describe('init()', () => {
       apiKey: 'project-key',
       endpoint: 'https://ingest.example.test',
       doctorProbe: true,
+      diagnosticCapture: true,
     });
 
     expect(OTLPTraceExporter).toHaveBeenCalledWith({
@@ -308,6 +348,7 @@ describe('init()', () => {
         'x-api-key': 'project-key',
         'x-neatlogs-doctor': 'v1',
       },
+      compression: 'gzip',
     });
   });
 

@@ -211,8 +211,7 @@
     "example:pi-agent": "tsx examples/pi_agent_workflow/main.mts",
     "example:pi-agent:surface": "tsx examples/pi_agent_workflow/surface.mts",
     "test:examples:original7": "node scripts/run-original7-examples.mjs",
-    "verify:logs": "node scripts/verify-original7-logs.mjs",
-    "test:e2e:phase4": "npm run build && tsx examples/phase4-launch-readiness/run.ts"
+    "verify:logs": "node scripts/verify-original7-logs.mjs"
   },
   "keywords": [
     "observability",
