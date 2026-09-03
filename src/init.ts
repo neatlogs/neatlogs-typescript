@@ -241,6 +241,12 @@ async function _performInit(options: InitOptions): Promise<void> {
     'service.version': __version__,
     'neatlogs.workflow_name': resolvedWorkflowName,
   };
+  if (options.doctorProbe) {
+    resourceAttrs['neatlogs.doctor'] = true;
+    resourceAttrs['neatlogs.doctor.version'] = 'v1';
+    resourceAttrs['telemetry.sdk.language'] = 'typescript';
+    resourceAttrs['telemetry.sdk.version'] = __version__;
+  }
   addVerificationMarkerResourceAttribute(resourceAttrs);
   // Operator identity only — whoever RUNS the SDK. Session & end-user identity
   // are per-request (trace()/span()/identify()), never resource attributes.
@@ -306,12 +312,17 @@ async function _performInit(options: InitOptions): Promise<void> {
     };
 
     const otlpExporter = new FilteringExporter(
-      options.diagnosticCapture
+      disableExportResolved
         ? diagnosticSink
-        : new OTLPTraceExporter({
+        : (options.doctorProbeExporter ?? new OTLPTraceExporter({
             url: tracesEndpoint,
-            headers: { 'x-api-key': resolvedKey },
-          }),
+            headers: {
+              'x-api-key': resolvedKey,
+              ...(options.doctorProbe
+                ? { 'x-neatlogs-doctor': 'v1' }
+                : {}),
+            },
+          })),
       capturePreparedSpans,
     );
     _filteringExporter = otlpExporter;

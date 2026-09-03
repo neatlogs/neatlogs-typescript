@@ -253,6 +253,25 @@ describe('init()', () => {
     expect(BatchSpanProcessor).toHaveBeenCalledTimes(1);
   });
 
+  it('uses the normal trace route with the versioned Doctor marker', async () => {
+    const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-proto');
+    (OTLPTraceExporter as any).mockClear();
+
+    await init({
+      apiKey: 'project-key',
+      endpoint: 'https://ingest.example.test',
+      doctorProbe: true,
+    });
+
+    expect(OTLPTraceExporter).toHaveBeenCalledWith({
+      url: 'https://ingest.example.test/v1/traces',
+      headers: {
+        'x-api-key': 'project-key',
+        'x-neatlogs-doctor': 'v1',
+      },
+    });
+  });
+
   it('sets up OTLP log export when captureLogs: true', async () => {
     const {
       LoggerProvider,
