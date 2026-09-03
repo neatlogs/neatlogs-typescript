@@ -78,6 +78,15 @@ export interface InitOptions {
    */
   diagnosticCapture?: boolean;
   /**
+   * Mark the SDK Doctor's controlled OTLP export. This only adds the versioned
+   * Doctor resource attributes and request header; it never changes auth,
+   * tenancy, sampling, or the normal trace pipeline.
+   * @internal
+   */
+  doctorProbe?: boolean;
+  /** Test-only transport override for the controlled Doctor export. @internal */
+  doctorProbeExporter?: import('@opentelemetry/sdk-trace-base').SpanExporter;
+  /**
    * Optional caller-owned private provider. Neatlogs never registers it
    * globally. The SDK adds its processors and flushes it, but never shuts it
    * down.

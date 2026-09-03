@@ -84,6 +84,10 @@ function toDiagnosticSpan(span: ReadableSpan): DiagnosticSpan {
 /** Capture the exact masked batch presented to the network exporter. */
 export function capturePreparedSpans(spans: readonly ReadableSpan[]): void {
   for (const span of spans) {
+    // The completion marker is a transport/finalizer control record and is
+    // intentionally folded out of the UI-facing trace. Keep Doctor's capture
+    // count limited to semantic spans so persisted read-back is comparable.
+    if (span.name === 'neatlogs.trace.complete') continue;
     const traceId = span.spanContext().traceId;
     const current = traces.get(traceId) ?? new Map<string, DiagnosticSpan>();
     current.set(span.spanContext().spanId, toDiagnosticSpan(span));
