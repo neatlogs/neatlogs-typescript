@@ -62,10 +62,14 @@ describe('barrel exports (src/index.ts)', () => {
     expect(mod.PromptClientError).toBeDefined();
     expect(mod.PromptApiError).toBeDefined();
     expect(mod.PromptNotFoundError).toBeDefined();
+    expect(mod.PromptRequestTimeoutError).toBeDefined();
+    expect(mod.PromptClientClosedError).toBeDefined();
     // These should be Error subclasses
     expect(new mod.PromptClientError('test')).toBeInstanceOf(Error);
     expect(new mod.PromptApiError('test')).toBeInstanceOf(Error);
     expect(new mod.PromptNotFoundError('test')).toBeInstanceOf(Error);
+    expect(new mod.PromptRequestTimeoutError('test')).toBeInstanceOf(mod.PromptApiError);
+    expect(new mod.PromptClientClosedError()).toBeInstanceOf(mod.PromptClientError);
   });
 
   it('should export prompt CRUD functions', async () => {
@@ -77,6 +81,8 @@ describe('barrel exports (src/index.ts)', () => {
     expect(typeof mod.updatePrompt).toBe('function');
     expect(typeof mod.saveAsVersion).toBe('function');
     expect(typeof mod.deletePrompt).toBe('function');
+    expect(typeof mod.setLabel).toBe('function');
+    expect(typeof mod.addTag).toBe('function');
     expect(typeof mod.removeTag).toBe('function');
   });
 
