@@ -99,16 +99,78 @@ describe('PromptClient transport replay boundary', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('does not replay when context.with throws after invoking transport', async () => {
+  it('uses the transport result when context.with throws after invoking transport', async () => {
     const contextError = new Error('context manager failed after callback');
     otel.withContext.mockImplementation((_context, callback: () => Promise<Response>) => {
       callback();
       throw contextError;
     });
-    const fetchMock = vi.fn().mockResolvedValue(response());
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'transport' } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient()._request('/api/test')).rejects.toBe(contextError);
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'transport' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('uses the transport result when an async context wrapper rejects after invoking it', async () => {
+    const contextError = new Error('async context wrapper failed after callback');
+    otel.withContext.mockImplementation((_context, callback: () => Promise<Response>) => {
+      callback();
+      return Promise.reject(contextError);
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'transport' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'transport' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('uses the transport error when an async context wrapper also rejects', async () => {
+    const contextError = new Error('async context wrapper failed after callback');
+    const transportError = new Error('transport failed');
+    otel.withContext.mockImplementation((_context, callback: () => Promise<Response>) => {
+      callback();
+      return Promise.reject(contextError);
+    });
+    const fetchMock = vi.fn().mockRejectedValue(transportError);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).rejects.toBe(transportError);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('falls back once when an async context wrapper rejects before invoking transport', async () => {
+    otel.withContext.mockImplementation(() => Promise.reject(new Error('context unavailable')));
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'fallback' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'fallback' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('starts one plain transport when context.with returns without invoking the callback', async () => {
+    otel.withContext.mockImplementation(() => undefined);
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'fallback' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'fallback' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('starts transport once when a context manager invokes the callback twice', async () => {
+    otel.withContext.mockImplementation((_context, callback: () => Promise<Response>) => {
+      callback();
+      return callback();
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response({ body: { value: 'transport' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient()._request('/api/test')).resolves.toEqual({ value: 'transport' });
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
