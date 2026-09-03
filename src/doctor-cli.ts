@@ -338,6 +338,7 @@ async function localResult(
       const output = await diagnosticTool({ value: 1 });
       const result = { result: output };
       setTraceOutput(result);
+      root.setStatus({ code: SpanStatusCode.OK });
       return result;
     });
 

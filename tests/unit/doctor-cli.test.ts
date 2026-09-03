@@ -86,7 +86,10 @@ describe('doctor CLI', () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(JSON.parse(value.output[0]!)).toMatchObject({
       format_version: 'neatlogs.doctor/v2', mode: 'local', status: 'pass',
-      capture: { span_count: 4 },
+      capture: {
+        span_count: 4,
+        semantic_digest: 'sha256:7163d2de42c4165f3ae552279fdde2ec0839413ce608c6e5d71f3fb532df319b',
+      },
       ownership: { provider: 'private' },
       queue: { mode: 'diagnostic_capture', pending_spans: 0, dropped_spans: 0 },
       flush: { outcome: 'success', timeout_ms: 5000 },
@@ -110,7 +113,10 @@ describe('doctor CLI', () => {
       format_version: 'neatlogs.doctor/v2', mode: 'probe', status: 'fail',
       first_failure: 'CREDENTIAL_MISSING',
       runtime: { language: 'typescript' },
-      capture: { span_count: 4 },
+      capture: {
+        span_count: 4,
+        semantic_digest: 'sha256:7163d2de42c4165f3ae552279fdde2ec0839413ce608c6e5d71f3fb532df319b',
+      },
       checks: expect.arrayContaining([expect.objectContaining({
         reason_code: 'CREDENTIAL_MISSING', remediation_code: 'SET_CREDENTIAL',
       })]),
@@ -150,7 +156,10 @@ describe('doctor CLI', () => {
     });
     expect(JSON.parse(value.output[0]!)).toMatchObject({
       mode: 'probe', status: 'pass',
-      capture: { span_count: 4 },
+      capture: {
+        span_count: 4,
+        semantic_digest: 'sha256:7163d2de42c4165f3ae552279fdde2ec0839413ce608c6e5d71f3fb532df319b',
+      },
       probe: {
         ingest_route: '/v1/traces', marker_header: 'x-neatlogs-doctor', marker_version: 'v1',
         readback_trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),

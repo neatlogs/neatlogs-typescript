@@ -110,7 +110,10 @@ describe('Doctor probe over the actual OTLP HTTP exporter', () => {
       expect(JSON.parse(output[0]!)).toMatchObject({
         mode: 'probe',
         status: 'pass',
-        capture: { span_count: 4 },
+        capture: {
+          span_count: 4,
+          semantic_digest: 'sha256:7163d2de42c4165f3ae552279fdde2ec0839413ce608c6e5d71f3fb532df319b',
+        },
         probe: {
           visible: true,
           readback_trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
