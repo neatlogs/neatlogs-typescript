@@ -701,13 +701,13 @@ export class PromptClient {
     );
 
     if (items.length === 0) {
-      throw new PromptNotFoundError(`No versions found for prompt '${name}'`);
+      throw new PromptNotFoundError('Managed prompt not found');
     }
 
     if (version != null) {
       const match = items.find((item) => Number(item['version']) === version);
       if (!match) {
-        throw new PromptNotFoundError(`Prompt '${name}' version ${version} not found`);
+        throw new PromptNotFoundError(`Managed prompt version ${version} not found`);
       }
       return new PromptHandle(normalizePromptObject(match));
     }
@@ -941,7 +941,7 @@ export class PromptClient {
       label: selector?.label,
     });
     if (!handle.id) {
-      throw new PromptNotFoundError(`Prompt '${name}' did not return a version id`);
+      throw new PromptNotFoundError('Managed prompt response did not include a version id');
     }
     return handle.id;
   }

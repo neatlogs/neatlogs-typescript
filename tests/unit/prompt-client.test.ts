@@ -924,7 +924,10 @@ describe('PromptClient', () => {
         }),
       );
 
-      await expect(client.fetchPrompt('nonexistent')).rejects.toThrow(PromptNotFoundError);
+      const error = await client.fetchPrompt('private-customer-name').catch((caught) => caught);
+      expect(error).toBeInstanceOf(PromptNotFoundError);
+      expect(error.message).toBe('Managed prompt not found');
+      expect(error.message).not.toContain('customer');
     });
 
     it('should throw PromptNotFoundError when version not found', async () => {
