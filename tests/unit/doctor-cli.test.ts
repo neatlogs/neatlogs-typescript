@@ -103,6 +103,52 @@ describe('doctor CLI', () => {
     expect(getDoctorCaptureStats().traceCount).toBe(0);
   });
 
+  it('emits the complete Doctor v2 contract when local capture throws', async () => {
+    const value = io();
+    const capture = vi.spyOn(doctorCapture, 'getCapturedEnvelope')
+      .mockImplementation(() => { throw new Error('capture unavailable'); });
+    const fetch = vi.fn();
+    try {
+      const code = await runDoctorCli(['doctor', '--local', '--json'], {
+        ...value.overrides,
+        fetch,
+        requestTimeoutMs: 1234,
+      });
+      expect(code).toBe(2);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(JSON.parse(value.output[0]!)).toEqual({
+        format_version: 'neatlogs.doctor/v2',
+        mode: 'local',
+        status: 'fail',
+        first_failure: 'INSTRUMENTOR_INACTIVE',
+        runtime: {
+          language: 'typescript',
+          sdk_version: expect.any(String),
+          schema_version: expect.any(String),
+          transport: 'otlp_http_protobuf',
+        },
+        sampling: {
+          effective_sampler: 'unknown', root_sample_rate: 0, sampled: false,
+        },
+        ownership: { provider: 'ambiguous', instrumentor_count: 0 },
+        queue: {
+          mode: 'diagnostic_capture', pending_spans: 0, dropped_spans: 0, capacity: null,
+        },
+        retry: { attempts: 0, window_ms: 0, exhausted: false },
+        flush: { outcome: 'failed', timeout_ms: 1234, duration_ms: null },
+        checks: [{
+          name: 'local_envelope',
+          status: 'fail',
+          reason_code: 'INSTRUMENTOR_INACTIVE',
+          remediation_code: 'ENABLE_INSTRUMENTOR',
+          message: 'Doctor could not capture a local diagnostic envelope',
+        }],
+      });
+    } finally {
+      capture.mockRestore();
+    }
+  });
+
   it('does not attempt a probe without credentials', async () => {
     const value = io();
     const fetch = vi.fn();

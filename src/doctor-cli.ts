@@ -147,6 +147,11 @@ type ProbeCheck = Readonly<{
 type DoctorProbeFailureResult = Omit<DoctorV2Result, 'mode'> &
   Readonly<{ mode: 'probe' }>;
 
+type DoctorFailureBase = Omit<
+  DoctorV2Result,
+  'mode' | 'first_failure' | 'checks' | 'capture'
+>;
+
 class ProbeReadError extends Error {
   constructor(
     readonly reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
@@ -583,10 +588,33 @@ function failedProbeWithoutCapture(
   details?: CheckDetails,
 ): DoctorProbeFailureResult {
   return {
-    format_version: DOCTOR_V2_FORMAT_VERSION,
+    ...failedDoctorBase(flushTimeoutMs),
     mode: 'probe',
-    status: 'fail',
     first_failure: reasonCode,
+    checks: [failedProbeTransportCheck(reasonCode, details)],
+  };
+}
+
+function failedLocalWithoutCapture(flushTimeoutMs: number): DoctorV2Result {
+  const reasonCode = 'INSTRUMENTOR_INACTIVE';
+  return {
+    ...failedDoctorBase(flushTimeoutMs),
+    mode: 'local',
+    first_failure: reasonCode,
+    checks: [{
+      name: 'local_envelope',
+      status: 'fail',
+      reason_code: reasonCode,
+      remediation_code: 'ENABLE_INSTRUMENTOR',
+      message: 'Doctor could not capture a local diagnostic envelope',
+    }],
+  };
+}
+
+function failedDoctorBase(flushTimeoutMs: number): DoctorFailureBase {
+  return {
+    format_version: DOCTOR_V2_FORMAT_VERSION,
+    status: 'fail',
     runtime: {
       language: 'typescript',
       sdk_version: __version__,
@@ -618,8 +646,7 @@ function failedProbeWithoutCapture(
       timeout_ms: flushTimeoutMs,
       duration_ms: null,
     },
-    checks: [failedProbeTransportCheck(reasonCode, details)],
-  } as const;
+  };
 }
 
 function human(result: {
@@ -765,18 +792,7 @@ export async function runDoctorCli(
       io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
       return result.status === 'fail' ? 2 : result.status === 'warn' ? 1 : 0;
     } catch {
-      const result = {
-        format_version: DOCTOR_V2_FORMAT_VERSION,
-        mode: 'local',
-        status: 'fail',
-        first_failure: 'INSTRUMENTOR_INACTIVE',
-        checks: [{
-          name: 'local_envelope', status: 'fail',
-          reason_code: 'INSTRUMENTOR_INACTIVE',
-          remediation_code: 'ENABLE_INSTRUMENTOR',
-          message: 'Doctor could not capture a local diagnostic envelope',
-        }],
-      } as const;
+      const result = failedLocalWithoutCapture(io.requestTimeoutMs);
       io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
       return 2;
     }
