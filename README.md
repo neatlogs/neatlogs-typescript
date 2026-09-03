@@ -503,7 +503,7 @@ For `neatlogs >=1.1.19 <2.0.0`, use only the explicit helper shown below. The
 SDK has no `instrumentations: [...]` loader. These helpers attach to the object,
 callback surface, processor, or plugin you pass and use Neatlogs' private
 context. The public support IDs are governed by the
-[skills support manifest](https://github.com/neatlogs/skills/blob/main/contracts/skills-support-v1.json).
+[versioned skills support manifest](https://github.com/neatlogs/skills/releases/download/skills-v1.3.0/skills-support-v1.json).
 Versioned rows below name the dependencies installed by this repository's test
 matrix; API-shaped rows deliberately make no blanket semver claim.
 

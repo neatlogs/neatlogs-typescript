@@ -786,6 +786,7 @@ export class PromptClient {
     selector?: PromptMutationSelector,
   ): Promise<void> {
     this.assertOpen();
+    this.assertLabel(label, 'setLabel');
     const promptId = await this.resolvePromptId(name, selector);
     await this._request(`/api/managed-prompts/${encodeURIComponent(promptId)}/labels`, {
       method: 'POST',
@@ -799,6 +800,7 @@ export class PromptClient {
    */
   async addTag(name: string, tag: string, selector?: PromptMutationSelector): Promise<void> {
     this.assertOpen();
+    this.assertTag(tag, 'addTag');
     const promptId = await this.resolvePromptId(name, selector);
     await this._request(`/api/managed-prompts/${encodeURIComponent(promptId)}/tags`, {
       method: 'POST',
@@ -810,6 +812,7 @@ export class PromptClient {
   /** Remove a tag from one immutable prompt version. */
   async removeTag(name: string, tag: string, selector?: PromptMutationSelector): Promise<void> {
     this.assertOpen();
+    this.assertTag(tag, 'removeTag');
     const promptId = await this.resolvePromptId(name, selector);
     await this._request(`/api/managed-prompts/${encodeURIComponent(promptId)}/tags`, {
       method: 'DELETE',
@@ -869,6 +872,7 @@ export class PromptClient {
       throw new PromptClientError(`${operation} requires non-empty content or messages.`);
     }
     this.resolveWriteLabels(data, operation);
+    for (const tag of (data as PromptWriteInput).tags ?? []) this.assertTag(tag, operation);
   }
 
   private resolveWriteLabels(
@@ -877,11 +881,34 @@ export class PromptClient {
   ): string[] {
     const write = data as PromptWriteInput & { label?: string };
     const labels = [...(write.labels ?? [])];
-    if (write.label && !labels.includes(write.label)) labels.unshift(write.label);
+    if (write.label !== undefined && !labels.includes(write.label)) labels.unshift(write.label);
     if (labels.length > 1) {
       throw new PromptClientError(`${operation} accepts at most one label per prompt version.`);
     }
+    for (const label of labels) this.assertLabel(label, operation);
     return labels;
+  }
+
+  private assertLabel(label: string, operation: string): void {
+    if (typeof label !== 'string' || !/^[A-Za-z0-9_-]{1,50}$/.test(label)) {
+      throw new PromptClientError(
+        `${operation} labels must contain 1-50 letters, numbers, underscores, or hyphens.`,
+      );
+    }
+  }
+
+  private assertTag(tag: string, operation: string): void {
+    if (
+      typeof tag !== 'string' ||
+      tag !== tag.trim() ||
+      tag.length < 1 ||
+      tag.length > 64 ||
+      /[\r\n]/.test(tag)
+    ) {
+      throw new PromptClientError(
+        `${operation} tags must contain 1-64 characters without surrounding whitespace or newlines.`,
+      );
+    }
   }
 
   private validateMutationSelector(selector?: PromptMutationSelector): void {
@@ -900,9 +927,7 @@ export class PromptClient {
     ) {
       throw new PromptClientError('version must be a positive integer.');
     }
-    if (selector?.label != null && selector.label.trim().length === 0) {
-      throw new PromptClientError('label must not be empty.');
-    }
+    if (selector?.label != null) this.assertLabel(selector.label, 'selector');
   }
 
   private async resolvePromptId(
@@ -959,6 +984,7 @@ export class PromptClient {
   async _request(path: string, options?: RequestInit): Promise<any> {
     this.assertOpen();
     const url = `${this.baseUrl}${path}`;
+    const safePath = PromptClient.safeErrorPath(path);
     const headers: Record<string, string> = {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -994,10 +1020,10 @@ export class PromptClient {
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
         throw new PromptApiError(
-          `${fetchOptions.method} ${path} failed (${response.status})${requestIdSuffix}`,
+          `${fetchOptions.method} ${safePath} failed (${response.status})${requestIdSuffix}`,
           {
             method: fetchOptions.method,
-            path,
+            path: safePath,
             status: response.status,
             requestId,
           },
@@ -1008,21 +1034,21 @@ export class PromptClient {
         return await response.json();
       } catch {
         throw new PromptApiError(
-          `${fetchOptions.method} ${path} returned non-JSON response (${response.status})${requestIdSuffix}`,
-          { method: fetchOptions.method, path, status: response.status, requestId },
+          `${fetchOptions.method} ${safePath} returned non-JSON response (${response.status})${requestIdSuffix}`,
+          { method: fetchOptions.method, path: safePath, status: response.status, requestId },
         );
       }
     } catch (error) {
       if (error instanceof PromptClientError) throw error;
       if (timedOut) {
         throw new PromptRequestTimeoutError(
-          `${fetchOptions.method} ${path} exceeded ${this.requestTimeoutMs}ms`,
+          `${fetchOptions.method} ${safePath} exceeded ${this.requestTimeoutMs}ms`,
         );
       }
       if (this._closed) throw new PromptClientClosedError();
-      throw new PromptApiError(`${fetchOptions.method} ${path} request failed`, {
+      throw new PromptApiError(`${fetchOptions.method} ${safePath} request failed`, {
         method: fetchOptions.method,
-        path,
+        path: safePath,
       });
     } finally {
       clearTimeout(timeout);
@@ -1034,6 +1060,17 @@ export class PromptClient {
     if (value == null) return undefined;
     const trimmed = value.trim();
     return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(trimmed) ? trimmed : undefined;
+  }
+
+  private static safeErrorPath(path: string): string {
+    const route = path.split('?', 1)[0];
+    if (/^\/api\/v1\/prompts\/[^/]+\/fetch$/.test(route)) {
+      return '/api/v1/prompts/:name/fetch';
+    }
+    return route.replace(
+      /^\/api\/managed-prompts\/[^/]+(?=\/|$)/,
+      '/api/managed-prompts/:promptId',
+    );
   }
 }
 

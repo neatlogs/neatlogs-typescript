@@ -442,6 +442,20 @@ describe('PromptClient', () => {
       expect(error.message).toBe('GET /api/failure failed (500)');
     });
 
+    it('does not include prompt selectors in request errors', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
+
+      const error = await client
+        .fetchPrompt('private/customer prompt', { label: 'production' })
+        .catch((caught) => caught);
+
+      expect(error).toBeInstanceOf(PromptApiError);
+      expect(error.message).toBe('GET /api/v1/prompts/:name/fetch request failed');
+      expect(error.path).toBe('/api/v1/prompts/:name/fetch');
+      expect(error.message).not.toContain('customer');
+      expect(error.message).not.toContain('production');
+    });
+
     it('should throw PromptApiError on non-JSON response', async () => {
       vi.stubGlobal(
         'fetch',
@@ -719,7 +733,7 @@ describe('PromptClient', () => {
 
       now += 20;
       await expect(outageClient.getPrompt('my-prompt')).rejects.toThrow(
-        'GET /api/managed-prompts?name=my-prompt&limit=500&offset=0 request failed',
+        'GET /api/managed-prompts request failed',
       );
       expect(mockFetch).toHaveBeenCalledTimes(3);
     });
@@ -811,7 +825,7 @@ describe('PromptClient', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       await expect(client.getPrompt('unavailable')).rejects.toThrow(
-        'GET /api/managed-prompts?name=unavailable&limit=500&offset=0 request failed',
+        'GET /api/managed-prompts request failed',
       );
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
@@ -1123,6 +1137,13 @@ describe('PromptClient', () => {
       await expect(
         client.createPrompt({ name: 'invalid', content: 'content', labels: ['a', 'b'] }),
       ).rejects.toThrow('createPrompt accepts at most one label per prompt version');
+
+      await expect(
+        client.createPrompt({ content: 'hello', labels: ['  '], name: 'assistant' }),
+      ).rejects.toThrow('createPrompt labels must contain 1-50');
+      await expect(
+        client.saveAsVersion('assistant', { content: 'hello', label: '' }),
+      ).rejects.toThrow('saveAsVersion labels must contain 1-50');
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
@@ -1170,6 +1191,29 @@ describe('PromptClient', () => {
   });
 
   describe('label and tag mutations', () => {
+    it('rejects labels that the backend cannot accept before resolving a prompt', async () => {
+      const mockFetch = vi.fn();
+      vi.stubGlobal('fetch', mockFetch);
+
+      await expect(client.setLabel('test', 'not valid')).rejects.toThrow(
+        'setLabel labels must contain 1-50',
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid tags before resolving a prompt', async () => {
+      const mockFetch = vi.fn();
+      vi.stubGlobal('fetch', mockFetch);
+
+      await expect(client.addTag('test', ' unsafe ')).rejects.toThrow(
+        'addTag tags must contain 1-64',
+      );
+      await expect(client.removeTag('test', 'line\nbreak')).rejects.toThrow(
+        'removeTag tags must contain 1-64',
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('posts a label to the UUID label endpoint', async () => {
       const promptId = '123e4567-e89b-12d3-a456-426614174000';
       const mockFetch = vi.fn().mockResolvedValue({
