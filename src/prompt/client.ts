@@ -1009,11 +1009,34 @@ export class PromptClient {
     (timeout as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
     fetchOptions.signal = controller.signal;
 
+    let transportPromise: Promise<Response> | undefined;
+    const startTransport = (): Promise<Response> => {
+      if (transportPromise) return transportPromise;
+
+      try {
+        transportPromise = fetch(url, fetchOptions);
+      } catch (error) {
+        transportPromise = Promise.reject(error);
+      }
+      return transportPromise;
+    };
+
+    let contextResult: Promise<Response> | undefined;
     try {
-      // Suppress OTel instrumentation on our own HTTP calls so prompt CRUD
-      // never becomes a child span of user telemetry.
-      const suppressedContext = suppressTracing(context.active());
-      const response = await context.with(suppressedContext, () => fetch(url, fetchOptions));
+      try {
+        // Suppress OTel instrumentation on our own HTTP calls so prompt CRUD
+        // never becomes a child span of user telemetry.
+        const suppressedContext = suppressTracing(context.active());
+        contextResult = context.with(suppressedContext, startTransport);
+      } catch {
+        // A started transport remains authoritative; setup failures fall through.
+      }
+
+      if (contextResult && contextResult !== transportPromise) {
+        void Promise.resolve(contextResult).catch(() => undefined);
+      }
+
+      const response = await (transportPromise ?? startTransport());
       const requestId = PromptClient.safeRequestId(response.headers?.get?.('x-request-id'));
       const requestIdSuffix = requestId ? `; request_id=${requestId}` : '';
 
