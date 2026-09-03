@@ -646,7 +646,9 @@ export async function runDoctorCli(
       exportProbe: true,
       probeExporter: io.probeExporter,
     });
-    if (!local.capture || local.status === 'fail') {
+    const onlyExportFailed = local.status === 'fail' &&
+      local.first_failure === 'FLUSH_TIMEOUT';
+    if (!local.capture || (local.status === 'fail' && !onlyExportFailed)) {
       throw new ProbeReadError('BACKEND_PROBE_UNAVAILABLE', 'Local Doctor fixture failed');
     }
 

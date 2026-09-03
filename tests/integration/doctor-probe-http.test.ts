@@ -140,4 +140,49 @@ describe('Doctor probe over the actual OTLP HTTP exporter', () => {
       await once(server, 'close');
     }
   }, 15_000);
+
+  it('classifies a rejected project key without exposing it', async () => {
+    const requests: Array<Readonly<{ method: string; path: string }>> = [];
+    const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      for await (const _chunk of request) {
+        // Drain the real OTLP request before replying.
+      }
+      requests.push({ method: request.method ?? '', path: request.url ?? '' });
+      response.writeHead(401, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'unauthorized' }));
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('HTTP test server did not bind');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    try {
+      const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+        env: {
+          NEATLOGS_API_KEY: 'rejected-project-key',
+          NEATLOGS_ENDPOINT: `http://127.0.0.1:${address.port}`,
+        },
+        stdout: (line) => stdout.push(line),
+        stderr: (line) => stderr.push(line),
+        probeTimeoutMs: 2_000,
+        requestTimeoutMs: 500,
+        pollIntervalMs: 10,
+      });
+
+      expect(code).toBe(3);
+      expect(JSON.parse(stdout[0]!)).toMatchObject({
+        mode: 'probe',
+        status: 'fail',
+        first_failure: 'AUTH_FAILED',
+      });
+      expect(requests.some((request) => request.method === 'POST' && request.path === '/v1/traces')).toBe(true);
+      expect(requests.some((request) => request.method === 'GET' && /^\/api\/traces\/v3\/[0-9a-f]{32}$/.test(request.path))).toBe(true);
+      expect(`${stdout.join('\n')}\n${stderr.join('\n')}`).not.toContain('rejected-project-key');
+    } finally {
+      server.close();
+      await once(server, 'close');
+    }
+  }, 15_000);
 });
