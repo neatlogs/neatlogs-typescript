@@ -5,8 +5,13 @@ import { trace, setTraceOutput } from './core/context.js';
 import { disableLogging, enableLogging } from './core/logger.js';
 import { getActiveNeatlogsSpan, getRoutingNeatlogsTracer } from './core/provider.js';
 import { span } from './decorators/orchestration.js';
-import { doctorCapturedLocalV2, DOCTOR_V2_FORMAT_VERSION } from './doctor-v2.js';
+import {
+  doctorCapturedLocalV2,
+  DOCTOR_V2_FORMAT_VERSION,
+  type DoctorV2Result,
+} from './doctor-v2.js';
 import { flush, init, shutdown } from './init.js';
+import { TELEMETRY_SCHEMA_VERSION } from './schema-v2.js';
 import { __version__ } from './version.js';
 
 const DOCTOR_SERVICE = 'neatlogs.doctor.v2';
@@ -138,6 +143,9 @@ type ProbeCheck = Readonly<{
   message: string;
   details?: CheckDetails;
 }>;
+
+type DoctorProbeFailureResult = Omit<DoctorV2Result, 'mode'> &
+  Readonly<{ mode: 'probe' }>;
 
 class ProbeReadError extends Error {
   constructor(
@@ -541,23 +549,76 @@ function failedProbeResult(
   reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
   details?: CheckDetails,
 ) {
+  const transportCheck = failedProbeTransportCheck(reasonCode, details);
   return {
     ...local,
     mode: 'probe',
     status: 'fail',
     first_failure: reasonCode,
-    checks: [...local.checks, {
-      name: 'probe_transport',
-      status: 'fail',
-      reason_code: reasonCode,
-      remediation_code: reasonCode === 'AUTH_FAILED'
-        ? 'CHECK_INGEST_CREDENTIAL'
-        : 'CHECK_TRACE_ENDPOINT',
-      message: reasonCode === 'AUTH_FAILED'
-        ? 'The project key was rejected by the existing trace API'
-        : 'The existing trace ingestion or read path is unavailable',
-      ...(details ? { details } : {}),
-    }],
+    checks: [...local.checks, transportCheck],
+  } as const;
+}
+
+function failedProbeTransportCheck(
+  reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+  details?: CheckDetails,
+): ProbeCheck {
+  return {
+    name: 'probe_transport',
+    status: 'fail',
+    reason_code: reasonCode,
+    remediation_code: reasonCode === 'AUTH_FAILED'
+      ? 'CHECK_INGEST_CREDENTIAL'
+      : 'CHECK_TRACE_ENDPOINT',
+    message: reasonCode === 'AUTH_FAILED'
+      ? 'The project key was rejected by the existing trace API'
+      : 'The existing trace ingestion or read path is unavailable',
+    ...(details ? { details } : {}),
+  };
+}
+
+function failedProbeWithoutCapture(
+  reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+  flushTimeoutMs: number,
+  details?: CheckDetails,
+): DoctorProbeFailureResult {
+  return {
+    format_version: DOCTOR_V2_FORMAT_VERSION,
+    mode: 'probe',
+    status: 'fail',
+    first_failure: reasonCode,
+    runtime: {
+      language: 'typescript',
+      sdk_version: __version__,
+      schema_version: String(TELEMETRY_SCHEMA_VERSION),
+      transport: 'otlp_http_protobuf',
+    },
+    sampling: {
+      effective_sampler: 'unknown',
+      root_sample_rate: 0,
+      sampled: false,
+    },
+    ownership: {
+      provider: 'ambiguous',
+      instrumentor_count: 0,
+    },
+    queue: {
+      mode: 'diagnostic_capture',
+      pending_spans: 0,
+      dropped_spans: 0,
+      capacity: null,
+    },
+    retry: {
+      attempts: 0,
+      window_ms: 0,
+      exhausted: false,
+    },
+    flush: {
+      outcome: 'failed',
+      timeout_ms: flushTimeoutMs,
+      duration_ms: null,
+    },
+    checks: [failedProbeTransportCheck(reasonCode, details)],
   } as const;
 }
 
@@ -863,13 +924,11 @@ export async function runDoctorCli(
           reason,
           error instanceof ProbeReadError ? error.details : undefined,
         )
-      : {
-          format_version: DOCTOR_V2_FORMAT_VERSION,
-          mode: 'probe',
-          status: 'fail',
-          first_failure: reason,
-          reason_codes: [reason],
-        } as const;
+      : failedProbeWithoutCapture(
+          reason,
+          io.requestTimeoutMs,
+          error instanceof ProbeReadError ? error.details : undefined,
+        );
     io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
     return 3;
   }

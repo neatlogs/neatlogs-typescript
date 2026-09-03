@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ExportResultCode } from '@opentelemetry/core';
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { runDoctorCli } from '../../src/doctor-cli.js';
+import * as doctorCapture from '../../src/core/doctor-capture.js';
 import { getDoctorCaptureStats } from '../../src/core/doctor-capture.js';
 
 function successfulProbeFixture() {
@@ -608,6 +609,55 @@ describe('doctor CLI', () => {
     expect(JSON.parse(value.output[0]!)).toMatchObject({
       status: 'fail', first_failure: 'AUTH_FAILED',
     });
+  });
+
+  it('emits the complete Doctor v2 contract when local probe capture throws', async () => {
+    const value = io({
+      NEATLOGS_API_KEY: 'private-key',
+      NEATLOGS_ENDPOINT: 'http://localhost:4100',
+    });
+    const capture = vi.spyOn(doctorCapture, 'getCapturedEnvelope')
+      .mockImplementation(() => { throw new Error('capture unavailable'); });
+    const fetch = vi.fn();
+    try {
+      const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+        ...value.overrides,
+        fetch,
+        requestTimeoutMs: 1234,
+      });
+      expect(code).toBe(3);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(JSON.parse(value.output[0]!)).toEqual({
+        format_version: 'neatlogs.doctor/v2',
+        mode: 'probe',
+        status: 'fail',
+        first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+        runtime: {
+          language: 'typescript',
+          sdk_version: expect.any(String),
+          schema_version: expect.any(String),
+          transport: 'otlp_http_protobuf',
+        },
+        sampling: {
+          effective_sampler: 'unknown', root_sample_rate: 0, sampled: false,
+        },
+        ownership: { provider: 'ambiguous', instrumentor_count: 0 },
+        queue: {
+          mode: 'diagnostic_capture', pending_spans: 0, dropped_spans: 0, capacity: null,
+        },
+        retry: { attempts: 0, window_ms: 0, exhausted: false },
+        flush: { outcome: 'failed', timeout_ms: 1234, duration_ms: null },
+        checks: [{
+          name: 'probe_transport',
+          status: 'fail',
+          reason_code: 'BACKEND_PROBE_UNAVAILABLE',
+          remediation_code: 'CHECK_TRACE_ENDPOINT',
+          message: 'The existing trace ingestion or read path is unavailable',
+        }],
+      });
+    } finally {
+      capture.mockRestore();
+    }
   });
 
   it('uses stable invocation exit code four', async () => {
