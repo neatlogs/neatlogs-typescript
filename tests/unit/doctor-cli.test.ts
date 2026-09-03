@@ -62,7 +62,7 @@ function successfulProbeFixture() {
             'service.name': item.attributes['service.name'],
             'telemetry.sdk.language': item.attributes['telemetry.sdk.language'],
             'telemetry.sdk.version': item.attributes['telemetry.sdk.version'],
-            'neatlogs.span.type': item.attributes['neatlogs.span.type'],
+            'neatlogs.span.kind': item.attributes['neatlogs.span.kind'],
           },
         };
       }),

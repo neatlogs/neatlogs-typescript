@@ -86,6 +86,8 @@ export interface InitOptions {
   doctorProbe?: boolean;
   /** Test-only transport override for the controlled Doctor export. @internal */
   doctorProbeExporter?: import('@opentelemetry/sdk-trace-base').SpanExporter;
+  /** Bound the controlled Doctor OTLP request. @internal */
+  doctorProbeTimeoutMillis?: number;
   /**
    * Optional caller-owned private provider. Neatlogs never registers it
    * globally. The SDK adds its processors and flushes it, but never shuts it

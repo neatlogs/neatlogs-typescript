@@ -230,7 +230,7 @@ function diagnosticAttributes(
     'service.name',
     'telemetry.sdk.language',
     'telemetry.sdk.version',
-    'neatlogs.span.type',
+    'neatlogs.span.kind',
     'neatlogs.llm.token_count.prompt',
     'neatlogs.llm.token_count.completion',
     'neatlogs.llm.token_count.total',

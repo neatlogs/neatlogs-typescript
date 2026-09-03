@@ -141,7 +141,7 @@ function markDoctorSpan(spanType: 'WORKFLOW' | 'AGENT' | 'LLM' | 'TOOL'): void {
     'service.name': DOCTOR_SERVICE,
     'telemetry.sdk.language': 'typescript',
     'telemetry.sdk.version': __version__,
-    'neatlogs.span.type': spanType,
+    'neatlogs.span.kind': spanType.toLowerCase(),
   });
 }
 
@@ -229,7 +229,7 @@ function validateLocalFixture(traceId: string): readonly ProbeCheck[] {
       attributes['service.name'] === DOCTOR_SERVICE &&
       attributes['telemetry.sdk.language'] === 'typescript' &&
       attributes['telemetry.sdk.version'] === __version__ &&
-      attributes['neatlogs.span.type'] === spanType;
+      attributes['neatlogs.span.kind'] === spanType.toLowerCase();
   });
   const exactTokens = !!llm && [
     llm.attributes?.['neatlogs.llm.token_count.prompt'],
@@ -270,9 +270,13 @@ async function withTimeout<T>(
 
 async function localResult(
   env: NodeJS.ProcessEnv,
-  options: Readonly<{ exportProbe?: boolean; probeExporter?: SpanExporter }> = {},
+  options: Readonly<{
+    exportProbe?: boolean;
+    probeExporter?: SpanExporter;
+    flushTimeoutMs?: number;
+  }> = {},
 ) {
-  const flushTimeoutMs = 5_000;
+  const flushTimeoutMs = Math.max(1, options.flushTimeoutMs ?? 5_000);
   const started = Date.now();
   let traceId = '';
   disableLogging();
@@ -285,6 +289,7 @@ async function localResult(
       diagnosticCapture: true,
       doctorProbe: options.exportProbe === true,
       doctorProbeExporter: options.probeExporter,
+      doctorProbeTimeoutMillis: options.exportProbe ? flushTimeoutMs : undefined,
       registerShutdownHandlers: false,
       batchSize: 32,
       flushInterval: 60,
@@ -365,7 +370,7 @@ async function localResult(
       checks: Object.freeze([...result.checks, ...fixtureChecks]),
     });
   } finally {
-    await shutdown('doctor-complete', 5_000).catch(() => false);
+    await shutdown('doctor-complete', flushTimeoutMs).catch(() => false);
     enableLogging();
   }
 }
@@ -426,7 +431,7 @@ function persistedProbeResult(
       metadata['service.name'] === DOCTOR_SERVICE &&
       metadata['telemetry.sdk.language'] === 'typescript' &&
       metadata['telemetry.sdk.version'] === __version__ &&
-      metadata['neatlogs.span.type'] === spanType;
+      metadata['neatlogs.span.kind'] === spanType.toLowerCase();
   });
   const exactTokens = [
     traceValue.promptTokens,
@@ -645,6 +650,7 @@ export async function runDoctorCli(
     local = await localResult(io.env, {
       exportProbe: true,
       probeExporter: io.probeExporter,
+      flushTimeoutMs: io.requestTimeoutMs,
     });
     const onlyExportFailed = local.status === 'fail' &&
       local.first_failure === 'FLUSH_TIMEOUT';

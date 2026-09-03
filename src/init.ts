@@ -163,6 +163,7 @@ const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
   "diagnosticCapture",
   "doctorProbe",
   "doctorProbeExporter",
+  "doctorProbeTimeoutMillis",
   "tracerProvider",
   "registerShutdownHandlers",
   "mask",
@@ -216,6 +217,15 @@ function validateInitOptions(options: InitOptions): void {
   }
   if (options.doctorProbeExporter !== undefined && options.doctorProbe !== true) {
     throw new TypeError("doctorProbeExporter requires doctorProbe: true");
+  }
+  if (options.doctorProbeTimeoutMillis !== undefined && options.doctorProbe !== true) {
+    throw new TypeError("doctorProbeTimeoutMillis requires doctorProbe: true");
+  }
+  if (
+    options.doctorProbeTimeoutMillis !== undefined &&
+    (!Number.isFinite(options.doctorProbeTimeoutMillis) || options.doctorProbeTimeoutMillis <= 0)
+  ) {
+    throw new RangeError("doctorProbeTimeoutMillis must be a positive finite number");
   }
   if (options.doctorProbe === true && options.diagnosticCapture !== true) {
     throw new TypeError("doctorProbe requires diagnosticCapture: true");
@@ -298,6 +308,7 @@ function initIdentity(options: InitOptions): InitIdentity {
       ),
     diagnosticCapture: options.diagnosticCapture ?? false,
     doctorProbe: options.doctorProbe ?? false,
+    doctorProbeTimeoutMillis: options.doctorProbeTimeoutMillis ?? null,
     registerShutdownHandlers: options.registerShutdownHandlers ?? null,
     sampleRate: options.sampleRate ?? 1,
     captureLogs: options.captureLogs ?? false,
@@ -571,6 +582,9 @@ async function _performInit(options: InitOptions): Promise<void> {
       : (options.doctorProbeExporter ?? new ByteLimitedSpanExporter(
           new OTLPTraceExporter({
             url: tracesEndpoint,
+            ...(options.doctorProbeTimeoutMillis !== undefined
+              ? { timeoutMillis: options.doctorProbeTimeoutMillis }
+              : {}),
             headers: {
               "x-api-key": resolvedKey,
               ...(options.doctorProbe ? { "x-neatlogs-doctor": "v1" } : {}),

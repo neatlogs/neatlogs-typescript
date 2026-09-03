@@ -185,4 +185,68 @@ describe('Doctor probe over the actual OTLP HTTP exporter', () => {
       await once(server, 'close');
     }
   }, 15_000);
+
+  it('aborts a permanently stalled OTLP POST within the probe deadline', async () => {
+    let postStarted = false;
+    let postConnectionClosed = false;
+    let resolvePostConnectionClosed: (() => void) | undefined;
+    const postConnectionClosedSignal = new Promise<void>((resolve) => {
+      resolvePostConnectionClosed = resolve;
+    });
+    const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      for await (const _chunk of request) {
+        // Drain the real OTLP request, then deliberately never send a response.
+      }
+      if (request.method === 'POST' && request.url === '/v1/traces') {
+        postStarted = true;
+        response.on('close', () => {
+          postConnectionClosed = true;
+          resolvePostConnectionClosed?.();
+        });
+        return;
+      }
+      response.writeHead(404, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'not found' }));
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('HTTP test server did not bind');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const started = Date.now();
+
+    try {
+      const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+        env: {
+          NEATLOGS_API_KEY: 'stalled-project-key',
+          NEATLOGS_ENDPOINT: `http://127.0.0.1:${address.port}`,
+        },
+        stdout: (line) => stdout.push(line),
+        stderr: (line) => stderr.push(line),
+        probeTimeoutMs: 500,
+        requestTimeoutMs: 100,
+        pollIntervalMs: 10,
+      });
+
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(code).toBe(3);
+      expect(postStarted).toBe(true);
+      await Promise.race([
+        postConnectionClosedSignal,
+        new Promise<void>((resolve) => setTimeout(resolve, 250)),
+      ]);
+      expect(postConnectionClosed).toBe(true);
+      expect(JSON.parse(stdout[0]!)).toMatchObject({
+        mode: 'probe',
+        status: 'fail',
+        first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+      });
+      expect(`${stdout.join('\n')}\n${stderr.join('\n')}`).not.toContain('stalled-project-key');
+    } finally {
+      server.closeAllConnections();
+      server.close();
+      await once(server, 'close');
+    }
+  }, 5_000);
 });
