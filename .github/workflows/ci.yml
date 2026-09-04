@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: typescript-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Pack the published artifact
+        run: npm pack --dry-run
+
+  doctor-e2e:
+    name: packed package to finalized trace
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEATLOGS_API_KEY: ${{ secrets.NEATLOGS_DEV_API_KEY }}
+      NEATLOGS_ENDPOINT: ${{ vars.NEATLOGS_DEV_ENDPOINT }}
+      EVIDENCE_DIR: ${{ github.workspace }}/.doctor-evidence
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Require protected canary configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${NEATLOGS_API_KEY:-}" || {
+            echo 'NEATLOGS_DEV_API_KEY is not configured' >&2
+            exit 1
+          }
+          test -n "${NEATLOGS_ENDPOINT:-}" || {
+            echo 'NEATLOGS_DEV_ENDPOINT is not configured' >&2
+            exit 1
+          }
+
+      - name: Build and install the package outside the checkout
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          artifact_dir="$RUNNER_TEMP/neatlogs-typescript-artifact"
+          install_dir="$RUNNER_TEMP/neatlogs-typescript-install"
+          mkdir -p "$artifact_dir" "$install_dir"
+          npm pack --pack-destination "$artifact_dir"
+          tarball=$(find "$artifact_dir" -maxdepth 1 -name '*.tgz' -print -quit)
+          test -n "$tarball"
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$install_dir" "$tarball"
+          test -x "$install_dir/node_modules/.bin/neatlogs"
+          echo "bin=$install_dir/node_modules/.bin/neatlogs" >> "$GITHUB_OUTPUT"
+
+      - name: Run local and hosted Doctor checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          env -u NEATLOGS_API_KEY -u NEATLOGS_ENDPOINT \
+            "${{ steps.package.outputs.bin }}" doctor --local --json \
+            > "$EVIDENCE_DIR/doctor-local.json"
+          "${{ steps.package.outputs.bin }}" doctor --probe --json \
+            > "$EVIDENCE_DIR/doctor-probe.json"
+
+      - name: Verify exact finalized readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+
+          const read = (name) => JSON.parse(readFileSync(join(process.env.EVIDENCE_DIR, name), 'utf8'));
+          const local = read('doctor-local.json');
+          const probe = read('doctor-probe.json');
+          const expectedDigest = 'sha256:7163d2de42c4165f3ae552279fdde2ec0839413ce608c6e5d71f3fb532df319b';
+
+          assert.equal(local.format_version, 'neatlogs.doctor/v2');
+          assert.equal(local.mode, 'local');
+          assert.equal(local.status, 'pass');
+          assert.equal(local.capture.span_count, 4);
+          assert.equal(probe.format_version, 'neatlogs.doctor/v2');
+          assert.equal(probe.mode, 'probe');
+          assert.equal(probe.status, 'pass');
+          assert.equal(probe.capture.span_count, 4);
+          assert.equal(probe.capture.semantic_digest, expectedDigest);
+          assert.equal(probe.probe.ingest_route, '/v1/traces');
+          assert.equal(probe.probe.marker_header, 'x-neatlogs-doctor');
+          assert.equal(probe.probe.marker_version, 'v1');
+          assert.equal(probe.probe.visible, true);
+          assert.equal(probe.probe.readback_trace_id, probe.capture.trace_id);
+          assert.equal(probe.probe.finalized, true);
+          assert.equal(probe.probe.readback_span_count, 4);
+          assert.equal(probe.probe.meaningful_root_count, 1);
+          assert.equal(probe.probe.duplicate_span_count, 0);
+          for (const field of [
+            'hierarchy_valid',
+            'attributes_valid',
+            'input_output_valid',
+            'metadata_valid',
+            'typed_tokens_valid',
+          ]) assert.equal(probe.probe[field], true, field);
+          const checks = probe.checks.filter((item) => item.name.startsWith('probe_'));
+          assert.ok(checks.length > 0);
+          assert.ok(checks.every((item) => item.status === 'pass'));
+          NODE
+
+      - name: Publish sanitized Doctor evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: typescript-doctor-e2e-${{ github.sha }}
+          path: ${{ github.workspace }}/.doctor-evidence/*.json
+          if-no-files-found: warn
+          retention-days: 7
