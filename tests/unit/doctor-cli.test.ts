@@ -419,29 +419,31 @@ describe('doctor CLI', () => {
   it.each([202, 404])('never treats HTTP %i without persisted visibility as success', async (status) => {
     const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
     const fixture = successfulProbeFixture();
-    const fetch = vi.fn(async () => new Response(JSON.stringify({
-      message: 'processing',
-      projectId: 'must-not-survive',
-      ingestionDiagnostics: {
-        protocolVersion: 'v1',
-        state: 'processing',
-        currentStage: 'raw_durable',
-        lastSuccessfulStage: 'raw_durable',
-        retryable: false,
-        stages: [{ firstObservedAt: 'must-not-survive' }],
-      },
-    }), { status }));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        message: 'processing',
+        projectId: 'must-not-survive',
+        ingestionDiagnostics: {
+          protocolVersion: 'v1',
+          state: 'processing',
+          currentStage: 'raw_durable',
+          lastSuccessfulStage: 'raw_durable',
+          retryable: false,
+          stages: [{ firstObservedAt: 'must-not-survive' }],
+        },
+      }), { status }))
+      .mockRejectedValueOnce(new Error('read path unavailable'));
     const code = await runDoctorCli(['doctor', '--probe', '--json'], {
       ...value.overrides,
       fetch: fetch as typeof globalThis.fetch,
-      probeTimeoutMs: 5,
-      requestTimeoutMs: 5,
-      pollIntervalMs: 5,
+      probeTimeoutMs: 100,
+      requestTimeoutMs: 20,
+      pollIntervalMs: 1,
       probeExporter: fixture.probeExporter,
     });
     expect(code).toBe(3);
     expect(fetch).toHaveBeenCalled();
-    expect(fetch.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
     const result = JSON.parse(value.output[0]!);
     expect(result).toMatchObject({
       status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE',
