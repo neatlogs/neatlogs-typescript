@@ -54,6 +54,28 @@ documented Neatlogs wrapper, hook, processor, or telemetry helper.
 | `log()` | Capture timestamped log steps within the active trace |
 | `shutdown()` | Flush all pending data and shut down the SDK gracefully |
 
+## Doctor v2
+
+Run the local SDK pipeline check without credentials or network access:
+
+```bash
+npx neatlogs doctor --local --json
+```
+
+Run the controlled end-to-end probe explicitly:
+
+```bash
+NEATLOGS_API_KEY=<project-key> \
+NEATLOGS_ENDPOINT=https://ingest.neatlogs.com \
+npx neatlogs doctor --probe --json
+```
+
+Probe mode exports four generated spans through the normal `/v1/traces` route
+with `x-neatlogs-doctor: v1`, flushes, and polls
+`/api/traces/v3/:traceId` for that exact trace. It passes only after persisted
+hierarchy, span semantics, input/output, versioned metadata, and numeric token
+totals validate. It does not call an LLM or inspect user data.
+
 ### Important: Explicit integration
 
 `init()` does not monkey-patch provider libraries. Use the documented explicit

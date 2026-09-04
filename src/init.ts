@@ -19,7 +19,9 @@ import {
   TraceIdRatioBasedSampler,
   type BasicTracerProvider,
   type SpanProcessor,
+  type SpanExporter,
 } from "@opentelemetry/sdk-trace-base";
+import { ExportResultCode } from "@opentelemetry/core";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { CompressionAlgorithm } from "@opentelemetry/otlp-exporter-base";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
@@ -32,6 +34,7 @@ import {
 import { addVerificationMarkerResourceAttribute } from "./core/resource.js";
 import { getRegisteredClients } from "./core/client-registry.js";
 import { FilteringExporter } from "./core/filtering-exporter.js";
+import { capturePreparedSpans, clearDoctorCapture } from "./core/doctor-capture.js";
 import { ByteLimitedSpanExporter } from "./core/byte-limited-exporter.js";
 import { MaskingLogExporter } from "./core/masking-log-exporter.js";
 import { discardPendingMediaOwner } from "./core/media.js";
@@ -89,8 +92,12 @@ interface InitIdentity {
   mask: InitOptions["mask"];
   tracerProvider: InitOptions["tracerProvider"];
   uploadAuthority: UploadAuthorityOption | undefined;
+  doctorProbeExporter: InitOptions["doctorProbeExporter"];
 }
 let _initIdentity: InitIdentity | null = null;
+let _effectiveSampleRate = 1;
+let _exportEnabled = false;
+let _queueMaxSize = 2_048;
 
 // Track signal handlers so we can remove them in shutdown()
 let _sigHandlersRegistered = false;
@@ -157,6 +164,10 @@ const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
   "metadata",
   "debug",
   "disableExport",
+  "diagnosticCapture",
+  "doctorProbe",
+  "doctorProbeExporter",
+  "doctorProbeTimeoutMillis",
   "tracerProvider",
   "registerShutdownHandlers",
   "mask",
@@ -206,6 +217,30 @@ function validateInitOptions(options: InitOptions): void {
   ) {
     throw new TypeError(
       "uploadAuthority must be a boolean or an UploadAuthority implementation",
+    );
+  }
+  if (options.doctorProbeExporter !== undefined && options.doctorProbe !== true) {
+    throw new TypeError("doctorProbeExporter requires doctorProbe: true");
+  }
+  if (options.doctorProbeTimeoutMillis !== undefined && options.doctorProbe !== true) {
+    throw new TypeError("doctorProbeTimeoutMillis requires doctorProbe: true");
+  }
+  if (
+    options.doctorProbeTimeoutMillis !== undefined &&
+    (!Number.isFinite(options.doctorProbeTimeoutMillis) || options.doctorProbeTimeoutMillis <= 0)
+  ) {
+    throw new RangeError("doctorProbeTimeoutMillis must be a positive finite number");
+  }
+  if (options.doctorProbe === true && options.diagnosticCapture !== true) {
+    throw new TypeError("doctorProbe requires diagnosticCapture: true");
+  }
+  if (
+    options.diagnosticCapture === true &&
+    options.disableExport !== true &&
+    options.doctorProbe !== true
+  ) {
+    throw new TypeError(
+      "diagnosticCapture requires disableExport: true or doctorProbe: true",
     );
   }
 }
@@ -275,6 +310,9 @@ function initIdentity(options: InitOptions): InitIdentity {
       ["true", "1", "yes"].includes(
         (process.env.NEATLOGS_DISABLE_EXPORT ?? "").toLowerCase(),
       ),
+    diagnosticCapture: options.diagnosticCapture ?? false,
+    doctorProbe: options.doctorProbe ?? false,
+    doctorProbeTimeoutMillis: options.doctorProbeTimeoutMillis ?? null,
     registerShutdownHandlers: options.registerShutdownHandlers ?? null,
     sampleRate: options.sampleRate ?? 1,
     captureLogs: options.captureLogs ?? false,
@@ -299,6 +337,7 @@ function initIdentity(options: InitOptions): InitIdentity {
     uploadAuthority: isUploadAuthority(options.uploadAuthority)
       ? options.uploadAuthority
       : undefined,
+    doctorProbeExporter: options.doctorProbeExporter,
   };
 }
 
@@ -311,7 +350,8 @@ function sameInitIdentity(
     left.serialized === right.serialized &&
     left.mask === right.mask &&
     left.tracerProvider === right.tracerProvider &&
-    left.uploadAuthority === right.uploadAuthority
+    left.uploadAuthority === right.uploadAuthority &&
+    left.doctorProbeExporter === right.doctorProbeExporter
   );
 }
 
@@ -382,6 +422,8 @@ export function init(options: InitOptions = {}): Promise<void> {
 }
 
 async function _performInit(options: InitOptions): Promise<void> {
+  // A new runtime must not diagnose envelopes from a previous initialization.
+  clearDoctorCapture();
   const sampleRate = options.sampleRate ?? 1.0;
   if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
     throw new RangeError("sampleRate must be a finite number between 0 and 1.");
@@ -418,6 +460,9 @@ async function _performInit(options: InitOptions): Promise<void> {
       );
     }
   }
+  _effectiveSampleRate = sampleRate;
+  _exportEnabled = !disableExportResolved;
+  _queueMaxSize = 2_048;
 
   // 4. Debug mode
   if (options.debug) {
@@ -465,6 +510,12 @@ async function _performInit(options: InitOptions): Promise<void> {
     "service.version": __version__,
     "neatlogs.workflow_name": resolvedWorkflowName,
   };
+  if (options.doctorProbe) {
+    resourceAttrs['neatlogs.doctor'] = true;
+    resourceAttrs['neatlogs.doctor.version'] = 'v1';
+    resourceAttrs['telemetry.sdk.language'] = 'typescript';
+    resourceAttrs['telemetry.sdk.version'] = __version__;
+  }
   addVerificationMarkerResourceAttribute(resourceAttrs);
   // Operator identity only — whoever RUNS the SDK. Session & end-user identity
   // are per-request (trace()/span()/identify()), never resource attributes.
@@ -515,25 +566,45 @@ async function _performInit(options: InitOptions): Promise<void> {
   });
   provider.addSpanProcessor(_spanProcessor);
 
-  // 12. Add BatchSpanProcessor + OTLPSpanExporter (if export enabled)
-  if (!disableExportResolved) {
+  // 12. Add BatchSpanProcessor + exporter. Local Doctor uses the exact same
+  // final masking/filtering boundary with a successful in-memory sink, so it
+  // can inspect export-ready bytes without credentials or network access.
+  if (!disableExportResolved || options.diagnosticCapture) {
     const tracesEndpoint = endpoint.endsWith("/v1/traces")
       ? endpoint
       : `${baseUrl}/v1/traces`;
 
+    const diagnosticSink: SpanExporter = {
+      export(_spans, resultCallback) {
+        resultCallback({ code: ExportResultCode.SUCCESS });
+      },
+      async shutdown() {},
+      async forceFlush() {},
+    };
+
+    const transportExporter = disableExportResolved
+      ? diagnosticSink
+      : (options.doctorProbeExporter ?? new ByteLimitedSpanExporter(
+          new OTLPTraceExporter({
+            url: tracesEndpoint,
+            ...(options.doctorProbeTimeoutMillis !== undefined
+              ? { timeoutMillis: options.doctorProbeTimeoutMillis }
+              : {}),
+            headers: {
+              "x-api-key": resolvedKey,
+              ...(options.doctorProbe ? { "x-neatlogs-doctor": "v1" } : {}),
+            },
+            compression: CompressionAlgorithm.GZIP,
+          }),
+          undefined,
+          _deliveryDiagnostics,
+          uploadAuthority,
+        ));
     const otlpExporter = new FilteringExporter(
-      new ByteLimitedSpanExporter(
-        new OTLPTraceExporter({
-          url: tracesEndpoint,
-          headers: { "x-api-key": resolvedKey },
-          compression: CompressionAlgorithm.GZIP,
-        }),
-        undefined,
-        _deliveryDiagnostics,
-        uploadAuthority,
-      ),
+      transportExporter,
       _deliveryDiagnostics,
       uploadAuthority,
+      options.diagnosticCapture ? capturePreparedSpans : undefined,
     );
 
     const batchSize = options.batchSize ?? 100;
@@ -555,8 +626,10 @@ async function _performInit(options: InitOptions): Promise<void> {
     _transportSpanProcessors = [batchProcessor, completionProcessor];
     _completionProcessor = completionProcessor;
 
-    if (options.debug) {
+    if (options.debug && !options.diagnosticCapture) {
       logger.debug(`OTLP trace exporter configured: ${tracesEndpoint}`);
+    } else if (options.debug) {
+      logger.debug('Local Doctor diagnostic capture configured (network disabled)');
     }
   } else if (options.debug) {
     logger.debug("Export disabled — spans will not be sent to backend");
@@ -954,8 +1027,12 @@ async function _performShutdown(
   _transportSpanProcessors = [];
   _completionProcessor = null;
   _debugMode = false;
+  _effectiveSampleRate = 1;
+  _exportEnabled = false;
+  _queueMaxSize = 2_048;
   _signalShutdownStarted = false;
   _initIdentity = null;
+  clearDoctorCapture();
 
   // Reset session config
   _setSessionConfig({});
@@ -996,3 +1073,30 @@ export function isDebugEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 export { getSessionConfig } from "./core/context.js";
+
+/** @internal Immutable, credential-free state used by the read-only doctor. */
+export function _doctorRuntimeSnapshot(): Readonly<{
+  state: LifecycleState;
+  initialized: boolean;
+  ownsTracerProvider: boolean;
+  exportHealth: { droppedSpans: number; exportFailures: number } | null;
+  effectiveSampler: string;
+  exportEnabled: boolean;
+  queueMaxSize: number;
+}> {
+  return {
+    state: _lifecycleState,
+    initialized: _initialized,
+    ownsTracerProvider: _ownsTracerProvider,
+    exportHealth: {
+      droppedSpans:
+        _deliveryDiagnostics.snapshot().spanQueueDrops +
+        _deliveryDiagnostics.snapshot().frameworkSpanDrops +
+        _deliveryDiagnostics.snapshot().maskedSpanDrops,
+      exportFailures: _deliveryDiagnostics.snapshot().spanExportFailures,
+    },
+    effectiveSampler: `parentbased_traceidratio:${_effectiveSampleRate}`,
+    exportEnabled: _exportEnabled,
+    queueMaxSize: _queueMaxSize,
+  };
+}

@@ -151,6 +151,7 @@ export class FilteringExporter implements SpanExporter {
     private readonly _delegate: SpanExporter,
     private readonly diagnostics?: DeliveryDiagnostics,
     private readonly uploadAuthority: UploadAuthority = new DisabledUploadAuthority(),
+    private readonly _onPrepared?: (spans: readonly ReadableSpan[]) => void,
   ) {}
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -171,17 +172,17 @@ export class FilteringExporter implements SpanExporter {
         this.diagnostics?.recordMaskedDrop('span');
         return { span: null, mediaReady: true };
       }
-        const attributes = {
+      const attributes = {
         ...(masked.attributes && typeof masked.attributes === 'object' ? masked.attributes : {}),
-        };
-        const maskedData = { ...masked, attributes };
-        captureMediaInSnapshot(
-          span as object,
-          maskedData,
-          this.uploadAuthority.available,
-          this.uploadAuthority.unavailableReason,
-        );
-        const mediaReady = await resolvePendingMediaUploads(
+      };
+      const maskedData = { ...masked, attributes };
+      captureMediaInSnapshot(
+        span as object,
+        maskedData,
+        this.uploadAuthority.available,
+        this.uploadAuthority.unavailableReason,
+      );
+      const mediaReady = await resolvePendingMediaUploads(
         span as object,
         maskedData,
         this.uploadAuthority,
@@ -199,6 +200,11 @@ export class FilteringExporter implements SpanExporter {
         const mediaFailures = prepared.filter(
           (item) => item.span !== null && !item.mediaReady,
         ).length;
+        try {
+          this._onPrepared?.(Object.freeze([...filtered]));
+        } catch {
+          // Diagnostics must never affect application telemetry delivery.
+        }
         if (filtered.length === 0) {
           resultCallback({ code: ExportResultCode.SUCCESS });
           return;
