@@ -59,6 +59,8 @@ export {
   PromptClientError,
   PromptApiError,
   PromptNotFoundError,
+  PromptRequestTimeoutError,
+  PromptClientClosedError,
   getPrompt,
   fetchPrompt,
   listPrompts,
@@ -66,9 +68,16 @@ export {
   updatePrompt,
   saveAsVersion,
   deletePrompt,
+  setLabel,
+  addTag,
   removeTag,
   type GetPromptOptions,
   type PromptClientOptions,
+  type PromptMutationSelector,
+  type PromptWriteInput,
+  type CreatePromptInput,
+  type SavePromptVersionOptions,
+  type LegacySavePromptVersionOptions,
 } from "./prompt/client.js";
 
 // Mastra integration

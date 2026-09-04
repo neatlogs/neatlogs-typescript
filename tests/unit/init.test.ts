@@ -434,6 +434,20 @@ describe('flush()', () => {
 });
 
 describe('shutdown()', () => {
+  it('closes the shared prompt client without changing telemetry shutdown success', async () => {
+    const { getSharedClient, PromptClientClosedError } = await import(
+      '../../src/prompt/client.js'
+    );
+    await init({ apiKey: 'test-key', disableExport: true });
+    const promptClient = getSharedClient();
+
+    await expect(shutdown()).resolves.toBe(true);
+    await expect(promptClient.getPrompt('after-shutdown')).rejects.toBeInstanceOf(
+      PromptClientClosedError,
+    );
+    expect(() => getSharedClient()).toThrow('No prompt client available');
+  });
+
   it('resets state so init() can be called again', async () => {
     await init({ apiKey: 'test-key', disableExport: true });
     await shutdown();

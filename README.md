@@ -365,7 +365,10 @@ import { PromptClient } from 'neatlogs';
 const client = new PromptClient({
   baseUrl: 'https://ingest.neatlogs.com',
   apiKey: process.env.NEATLOGS_API_KEY!,
-  cacheTtlMs: 60_000, // stale prompts refresh in the background after this TTL
+  cacheTtlMs: 60_000,              // fresh lifetime for latest/label lookups
+  staleWhileRevalidateMs: 300_000, // bounded stale fallback during refresh
+  requestTimeoutMs: 10_000,        // deadline for each prompt API request
+  maxCacheEntries: 100,             // LRU bound for process memory
 });
 
 // Create a prompt
@@ -378,14 +381,17 @@ const prompt = await client.createPrompt({
 // Fetch by name (returns latest version)
 const handle = await client.getPrompt('qa-system');
 
-// Override the cache TTL for an unpinned prompt. When stale, getPrompt returns
-// the last known value immediately and performs one deduplicated background
-// refresh. A pinned version stays stable in the process cache.
-const fastRefresh = await client.getPrompt('qa-system', { cacheTtlMs: 5_000 });
+// Per-key cache policy is retained across refreshes. During the stale window,
+// getPrompt returns the last known value and starts one coalesced refresh.
+const fastRefresh = await client.getPrompt('qa-system', {
+  cacheTtlMs: 5_000,
+  staleWhileRevalidateMs: 60_000,
+});
 
 // Fetch by label or version
 const prod = await client.getPrompt('qa-system', { label: 'production' });
 const v2 = await client.getPrompt('qa-system', { version: 2 });
+const v3 = await client.getPrompt('qa-system', { version: 3 });
 
 // Compile with variables
 const rendered = handle.compile({ role: 'helpful', company: 'Acme' });
@@ -396,20 +402,62 @@ const messages = handle.compileMessages({ role: 'helpful', company: 'Acme' });
 // List all prompts
 const all = await client.listPrompts();
 
-// Update prompt content
+// Backward-compatible alias: managed prompts are immutable, so this creates a version
 await client.updatePrompt('qa-system', { content: 'Updated: {{role}} for {{company}}.' });
 
-// Save a new version
-await client.saveAsVersion('qa-system', { label: 'v2' });
+// Save a new version. Content or messages is required by the backend contract.
+await client.saveAsVersion('qa-system', {
+  content: 'Version 2: {{role}} for {{company}}.',
+  labels: ['staging'],
+  commitMessage: 'Try the revised system prompt',
+});
 
-// Delete a prompt
-await client.deletePrompt('qa-system');
+// Mutations target immutable version UUIDs. Name + version/label is resolved first.
+await client.setLabel('qa-system', 'production', { version: 2 });
+await client.addTag('qa-system', 'release-candidate', { version: 2 });
+await client.removeTag('qa-system', 'release-candidate', { version: 2 });
+await client.deletePrompt('qa-system', { version: 1 });
+
+// Explicit PromptClient instances own their cache and prompt requests.
+client.close();
 ```
+
+Each prompt version may have zero or one active label. Accordingly, `labels`
+accepts at most one value on create/save, and `setLabel()` replaces or moves
+that label rather than adding a second simultaneous label.
+
+Latest and label selectors are fresh for `cacheTtlMs`. After that, they may be
+served only for the bounded `staleWhileRevalidateMs` window while one shared
+same-key refresh runs. Refresh failure leaves the last known value available
+until that stale window ends; after it ends, the next lookup waits for the
+backend and reports a typed error. A version selector is immutable in-process:
+`{ version: 2 }` never changes into another version. Request a different
+version explicitly, call `clearCache()`, or create a new client.
+
+Every request has a finite `requestTimeoutMs`. `close()` aborts in-flight prompt
+requests and releases the cache; calls after close raise
+`PromptClientClosedError`. The shared prompt client created by `init()` is
+closed by `shutdown()`, without making prompt failures part of telemetry flush
+success. An explicitly constructed `PromptClient` must be closed by its owner.
+
+#### Prompt privacy and ownership
+
+Prompt CRUD is intentional product-data transfer, separate from trace
+telemetry. The API key selects the Neatlogs project and authenticates prompt
+requests to `baseUrl`; the in-memory cache retains prompt content only until
+eviction, `clearCache()`, or `close()`. Server retention follows the managed
+prompt service policy for that project.
+
+Telemetry `mask=`, `pii`, and `piiSpanTypes` settings do **not** transform prompt
+content sent to the prompt-management API. If prompt content must be redacted,
+transform it explicitly before calling prompt CRUD. The SDK does not currently
+provide a prompt transform and does not claim that telemetry masking protects
+managed prompt payloads.
 
 Module-level convenience functions are also available after `init()`:
 
 ```typescript
-import { init, getPrompt, fetchPrompt, listPrompts, createPrompt, updatePrompt, saveAsVersion, deletePrompt, removeTag } from 'neatlogs';
+import { init, getPrompt, fetchPrompt, listPrompts, createPrompt, updatePrompt, saveAsVersion, deletePrompt, setLabel, addTag, removeTag } from 'neatlogs';
 
 await init({ apiKey: process.env.NEATLOGS_API_KEY });
 
@@ -471,15 +519,36 @@ import { registerCrewaiTask } from 'neatlogs';
 registerCrewaiTask('research-task', 'Research the latest AI developments');
 ```
 
-## Framework Integrations
+## Supported TypeScript Integrations
 
-Use the SDK's explicit wrappers and helpers. They use Neatlogs' private context
-and remain isolated from other tracing SDKs:
+For `neatlogs >=1.1.19 <2.0.0`, use only the explicit helper shown below. The
+SDK has no `instrumentations: [...]` loader. These helpers attach to the object,
+callback surface, processor, or plugin you pass and use Neatlogs' private
+context. Versioned rows below name the dependencies installed by this repository's test
+matrix; API-shaped rows deliberately make no blanket semver claim.
 
-| Framework | Helper |
-|-----------|--------|
-| Mastra (`@mastra/core`) | `wrapMastra()` from `neatlogs/mastra` |
-| Vercel AI SDK (`ai`) | `wrapAISDK()` from `neatlogs/ai` |
+| Library | Repository test/API baseline | Explicit helper | Import path |
+|---|---|---|---|
+| OpenAI | `openai` 6.34.x | `wrapOpenAI(client)` | `neatlogs` or `neatlogs/openai` |
+| Anthropic | `@anthropic-ai/sdk` 0.68.x | `wrapAnthropic(client)` | `neatlogs` or `neatlogs/anthropic` |
+| Azure OpenAI | `openai` 6.34.x | `wrapAzureOpenAI(client)` | `neatlogs/azure-openai` |
+| AWS Bedrock Runtime | AWS SDK v3 command API | `wrapBedrock(client)` | `neatlogs/bedrock` |
+| Google GenAI | `@google/genai` 1.34.x | `wrapGoogleGenAI(client)` / `wrapGoogleGenAIChat(chat)` | `neatlogs/google-genai` |
+| Vertex AI through `@google/genai` | `@google/genai` 1.34.x | `wrapVertexAI(client)` / `wrapVertexAIChat(chat)` | `neatlogs/vertex-ai` |
+| OpenRouter Agent | `@openrouter/agent` 0.7.x | `wrapOpenRouterAgent(client)` / `wrapCallModel(fn)` | `neatlogs/openrouter-agent` |
+| Vercel AI SDK | `ai` 6.x | `wrapAISDK(ai)` | `neatlogs/ai` |
+| Mastra | `@mastra/core` 1.32.x | `wrapMastra(entity)` / `wrapMastraRerank(fn)` | `neatlogs/mastra` |
+| Claude Agent SDK | documented `query()` API | `wrapClaudeAgentSDK(sdk)` | `neatlogs/claude-agent-sdk` |
+| LangChain / LangGraph | `@langchain/core` 0.3.x | `langchainHandler()` callback | `neatlogs` or `neatlogs/langchain` |
+| OpenAI Agents SDK | documented `addTraceProcessor()` API | `openaiAgentsProcessor()` | `neatlogs` or `neatlogs/openai-agents` |
+| Pi Agent | `agent-core` 0.73.x and 0.83.x | `piAgentHooks(agent)` / `tracePiAgentEvents(...)` / `tracePiStream(...)` | `neatlogs` or `neatlogs/pi-agent` |
+| OpenCode | current plugin API | `NeatlogsOpencodePlugin` | `neatlogs/opencode` |
+| Browser client | browser SDK API in this release | `Neatlogs` | `neatlogs/browser` |
+
+Edge runtime packaging, the removed `instrumentations` init option, and Strands
+global-context hooks are not supported. `strandsHooks()` remains an explicit
+runtime rejection so an application cannot silently believe it is isolated or
+instrumented.
 
 ```typescript
 // Vercel AI SDK

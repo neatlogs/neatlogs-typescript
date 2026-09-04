@@ -50,7 +50,11 @@ import { _setOtelLogger } from "./core/log.js";
 import { _setSessionConfig } from "./core/context.js";
 import { _setNeatlogsProvider } from "./core/provider.js";
 import { getLogger, enableDebugLogging } from "./core/logger.js";
-import { PromptClient, setSharedClient } from "./prompt/client.js";
+import {
+  PromptClient,
+  closeSharedClient,
+  setSharedClient,
+} from "./prompt/client.js";
 import { _resetMastraCache } from "./mastra.js";
 import { __version__ } from "./version.js";
 import { NeatlogsConfigurationError } from "./errors.js";
@@ -408,6 +412,7 @@ export function init(options: InitOptions = {}): Promise<void> {
     () => {
       if (_initPromise === current) _initPromise = null;
       if (_lifecycleState === "initializing") {
+        closeSharedClient();
         _lifecycleState = "uninitialized";
         _initIdentity = null;
       }
@@ -950,6 +955,10 @@ async function _performShutdown(
   // Clear the Mastra bridge cache so a subsequent init() rebinds to the fresh
   // provider instead of a stale one.
   _resetMastraCache();
+
+  // Prompt CRUD has an independent transport and must never affect telemetry
+  // flush success. Closing it here only aborts its own refreshes and cache.
+  closeSharedClient();
 
   // LOG records must drain before trace completion. The trace provider carries
   // neatlogs.trace.complete, which can trigger server-side finalization.
