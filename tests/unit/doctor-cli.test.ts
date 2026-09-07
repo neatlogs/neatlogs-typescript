@@ -262,7 +262,7 @@ describe('doctor CLI', () => {
     expect(code).toBe(3);
     expect(fetch).toHaveBeenCalled();
     expect(JSON.parse(value.output[0]!)).toMatchObject({
-      first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+      first_failure: 'TRACE_READBACK_TIMEOUT',
     });
   });
 
@@ -284,6 +284,7 @@ describe('doctor CLI', () => {
     expect(code).toBe(3);
     expect(fetch).toHaveBeenCalledOnce();
     expect(value.output[0]).not.toContain('private-key');
+    expect(JSON.parse(value.output[0]!).first_failure).toBe('BACKEND_HTTP_ERROR');
   });
 
   it.each([
@@ -307,7 +308,11 @@ describe('doctor CLI', () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it.each([200, 202, 409])('rejects an oversized HTTP %i read-back body', async (status) => {
+  it.each([
+    [200, 'TRACE_READBACK_INVALID', 500],
+    [202, 'TRACE_READBACK_TIMEOUT', 20],
+    [409, 'TRACE_READBACK_INVALID', 500],
+  ] as const)('classifies an oversized HTTP %i read-back body', async (status, reasonCode, timeoutMs) => {
     const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
     const fixture = successfulProbeFixture();
     const oversized = JSON.stringify({
@@ -321,14 +326,14 @@ describe('doctor CLI', () => {
     const code = await runDoctorCli(['doctor', '--probe', '--json'], {
       ...value.overrides,
       fetch: fetch as typeof globalThis.fetch,
-      probeTimeoutMs: 5,
-      requestTimeoutMs: 5,
+      probeTimeoutMs: timeoutMs,
+      requestTimeoutMs: timeoutMs,
       pollIntervalMs: 5,
       probeExporter: fixture.probeExporter,
     });
     expect(code).toBe(3);
     const result = JSON.parse(value.output[0]!);
-    expect(result.first_failure).toBe('BACKEND_PROBE_UNAVAILABLE');
+    expect(result.first_failure).toBe(reasonCode);
     expect(result.checks.every((item: any) => item.details === undefined)).toBe(true);
   });
 
@@ -355,7 +360,7 @@ describe('doctor CLI', () => {
     expect(JSON.parse(value.output[0]!).checks.every((item: any) => item.details === undefined)).toBe(true);
   });
 
-  it('retains stage details only on network/server failures', async () => {
+  it('classifies readback failures and retains stage details only where safe', async () => {
     for (const terminal of ['network', 'server', 'auth', 'redirect', 'client'] as const) {
       const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
       const fixture = successfulProbeFixture();
@@ -381,8 +386,14 @@ describe('doctor CLI', () => {
       });
       expect(code).toBe(3);
       const result = JSON.parse(value.output[0]!);
-      const failure = result.checks.find((item: any) => item.status === 'fail' &&
-        ['AUTH_FAILED', 'BACKEND_PROBE_UNAVAILABLE'].includes(item.reason_code));
+      const failure = result.checks.find((item: any) => item.name === 'probe_transport');
+      expect(failure?.reason_code).toBe({
+        network: 'BACKEND_CONNECTION_FAILED',
+        server: 'BACKEND_HTTP_ERROR',
+        auth: 'AUTH_FAILED',
+        redirect: 'BACKEND_HTTP_ERROR',
+        client: 'BACKEND_HTTP_ERROR',
+      }[terminal]);
       expect(failure?.details).toEqual(['network', 'server'].includes(terminal) ? {
         ingestion_state: 'processing',
         current_stage: 'pii_dispatch',
@@ -402,6 +413,8 @@ describe('doctor CLI', () => {
         },
       }), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'Trace processing failed',
+        finalizationStatus: 'dlq',
         ingestionDiagnostics: { protocolVersion: 'v2' },
       }), { status: 409 }));
     const code = await runDoctorCli(['doctor', '--probe', '--json'], {
@@ -413,7 +426,25 @@ describe('doctor CLI', () => {
     expect(code).toBe(3);
     const failures = JSON.parse(value.output[0]!).checks.filter((item: any) => item.status === 'fail');
     const failure = failures[failures.length - 1];
+    expect(failure?.reason_code).toBe('TRACE_READBACK_INVALID');
     expect(failure?.details).toBeUndefined();
+  });
+
+  it('rejects a DLQ response without its required error field', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      finalizationStatus: 'dlq',
+    }), { status: 409 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+    });
+
+    expect(code).toBe(3);
+    expect(JSON.parse(value.output[0]!).first_failure).toBe('TRACE_READBACK_INVALID');
   });
 
   it.each([202, 404])('never treats HTTP %i without persisted visibility as success', async (status) => {
@@ -446,9 +477,9 @@ describe('doctor CLI', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     const result = JSON.parse(value.output[0]!);
     expect(result).toMatchObject({
-      status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+      status: 'fail', first_failure: 'BACKEND_CONNECTION_FAILED',
       checks: expect.arrayContaining([expect.objectContaining({
-        reason_code: 'BACKEND_PROBE_UNAVAILABLE',
+        reason_code: 'BACKEND_CONNECTION_FAILED',
         details: {
           ingestion_state: 'processing',
           current_stage: 'raw_durable',
@@ -486,9 +517,9 @@ describe('doctor CLI', () => {
     const result = JSON.parse(value.output[0]!);
     expect(result).toMatchObject({
       status: 'fail',
-      first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+      first_failure: 'INGESTION_PIPELINE_FAILED',
       checks: expect.arrayContaining([expect.objectContaining({
-        reason_code: 'BACKEND_PROBE_UNAVAILABLE',
+        reason_code: 'INGESTION_PIPELINE_FAILED',
         details: {
           ingestion_state: 'failed',
           current_stage: 'pii_redaction',
@@ -500,6 +531,33 @@ describe('doctor CLI', () => {
       })]),
     });
     expect(JSON.stringify(result)).not.toMatch(/database leaked|secret-timestamp|projectId/);
+  });
+
+  it('classifies a DLQ terminal response without optional diagnostics as a pipeline failure', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      error: 'Trace processing failed',
+      finalizationStatus: 'dlq',
+      message: "We couldn't finish preparing this trace. Please retry or contact support.",
+    }), { status: 409 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+    });
+
+    expect(code).toBe(3);
+    const result = JSON.parse(value.output[0]!);
+    expect(result).toMatchObject({
+      status: 'fail',
+      first_failure: 'INGESTION_PIPELINE_FAILED',
+      checks: expect.arrayContaining([expect.objectContaining({
+        reason_code: 'INGESTION_PIPELINE_FAILED',
+      })]),
+    });
+    expect(result.checks.every((item: any) => item.details === undefined)).toBe(true);
   });
 
   it('ignores unsupported or malformed ingestion diagnostics', async () => {
@@ -599,7 +657,7 @@ describe('doctor CLI', () => {
     expect(code).toBe(3);
     expect(signal?.aborted).toBe(true);
     expect(JSON.parse(value.output[0]!)).toMatchObject({
-      status: 'fail', first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+      status: 'fail', first_failure: 'BACKEND_CONNECTION_FAILED',
     });
   });
 

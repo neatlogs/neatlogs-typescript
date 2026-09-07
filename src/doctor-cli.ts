@@ -152,9 +152,52 @@ type DoctorFailureBase = Omit<
   'mode' | 'first_failure' | 'checks' | 'capture'
 >;
 
+type ProbeFailureReason =
+  | 'AUTH_FAILED'
+  | 'BACKEND_PROBE_UNAVAILABLE'
+  | 'TRACE_READBACK_TIMEOUT'
+  | 'INGESTION_PIPELINE_FAILED'
+  | 'BACKEND_HTTP_ERROR'
+  | 'BACKEND_CONNECTION_FAILED'
+  | 'TRACE_READBACK_INVALID';
+
+const PROBE_FAILURE = {
+  AUTH_FAILED: {
+    remediationCode: 'CHECK_INGEST_CREDENTIAL',
+    message: 'The project key was rejected by the existing trace API',
+  },
+  BACKEND_PROBE_UNAVAILABLE: {
+    remediationCode: 'CHECK_TRACE_ENDPOINT',
+    message: 'The existing trace ingestion or read path is unavailable',
+  },
+  TRACE_READBACK_TIMEOUT: {
+    remediationCode: 'WAIT_FOR_TRACE',
+    message: 'Timed out waiting for the exact Doctor trace',
+  },
+  INGESTION_PIPELINE_FAILED: {
+    remediationCode: 'CONTACT_SUPPORT',
+    message: 'Trace ingestion reported a terminal pipeline failure',
+  },
+  BACKEND_HTTP_ERROR: {
+    remediationCode: 'CHECK_TRACE_ENDPOINT',
+    message: 'The existing trace read path returned an unexpected HTTP status',
+  },
+  BACKEND_CONNECTION_FAILED: {
+    remediationCode: 'CHECK_TRACE_ENDPOINT',
+    message: 'Could not connect to the existing trace read path',
+  },
+  TRACE_READBACK_INVALID: {
+    remediationCode: 'CONTACT_SUPPORT',
+    message: 'Trace read-back returned an invalid response',
+  },
+} as const satisfies Readonly<Record<
+  ProbeFailureReason,
+  Readonly<{ remediationCode: string; message: string }>
+>>;
+
 class ProbeReadError extends Error {
   constructor(
-    readonly reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+    readonly reasonCode: ProbeFailureReason,
     message: string,
     readonly details?: CheckDetails,
   ) {
@@ -319,6 +362,7 @@ async function withTimeout<T>(
   operation: () => Promise<T>,
   timeoutMs: number,
   onTimeout?: () => void,
+  timeoutReason: ProbeFailureReason = 'BACKEND_PROBE_UNAVAILABLE',
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -327,7 +371,7 @@ async function withTimeout<T>(
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           onTimeout?.();
-          reject(new ProbeReadError('BACKEND_PROBE_UNAVAILABLE', 'Doctor operation timed out'));
+          reject(new ProbeReadError(timeoutReason, 'Doctor operation timed out'));
         }, Math.max(1, timeoutMs));
       }),
     ]);
@@ -551,7 +595,7 @@ function persistedProbeResult(
 
 function failedProbeResult(
   local: Awaited<ReturnType<typeof localResult>>,
-  reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+  reasonCode: ProbeFailureReason,
   details?: CheckDetails,
 ) {
   const transportCheck = failedProbeTransportCheck(reasonCode, details);
@@ -565,25 +609,22 @@ function failedProbeResult(
 }
 
 function failedProbeTransportCheck(
-  reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+  reasonCode: ProbeFailureReason,
   details?: CheckDetails,
 ): ProbeCheck {
+  const failure = PROBE_FAILURE[reasonCode];
   return {
     name: 'probe_transport',
     status: 'fail',
     reason_code: reasonCode,
-    remediation_code: reasonCode === 'AUTH_FAILED'
-      ? 'CHECK_INGEST_CREDENTIAL'
-      : 'CHECK_TRACE_ENDPOINT',
-    message: reasonCode === 'AUTH_FAILED'
-      ? 'The project key was rejected by the existing trace API'
-      : 'The existing trace ingestion or read path is unavailable',
+    remediation_code: failure.remediationCode,
+    message: failure.message,
     ...(details ? { details } : {}),
   };
 }
 
 function failedProbeWithoutCapture(
-  reasonCode: 'AUTH_FAILED' | 'BACKEND_PROBE_UNAVAILABLE',
+  reasonCode: ProbeFailureReason,
   flushTimeoutMs: number,
   details?: CheckDetails,
 ): DoctorProbeFailureResult {
@@ -676,6 +717,25 @@ function human(result: {
   return lines.join('\n');
 }
 
+function readbackTimeoutReason(
+  remainingMs: number,
+  requestTimeoutMs: number,
+): ProbeFailureReason {
+  return remainingMs <= requestTimeoutMs
+    ? 'TRACE_READBACK_TIMEOUT'
+    : 'BACKEND_CONNECTION_FAILED';
+}
+
+function responseBodyFailureReason(
+  status: number,
+  remainingMs: number,
+  requestTimeoutMs: number,
+): ProbeFailureReason {
+  return status === 409 || (status >= 200 && status < 300 && status !== 202)
+    ? 'TRACE_READBACK_INVALID'
+    : readbackTimeoutReason(remainingMs, requestTimeoutMs);
+}
+
 async function boundedFetch(
   io: DoctorCliIO,
   input: URL,
@@ -684,13 +744,14 @@ async function boundedFetch(
 ): Promise<Response> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
-    throw new ProbeReadError('BACKEND_PROBE_UNAVAILABLE', 'Doctor probe deadline expired');
+    throw new ProbeReadError('TRACE_READBACK_TIMEOUT', 'Doctor probe deadline expired');
   }
   const controller = new AbortController();
   return withTimeout(
     () => io.fetch(input, { ...initOptions, signal: controller.signal }),
     Math.min(io.requestTimeoutMs, remaining),
     () => controller.abort(),
+    readbackTimeoutReason(remaining, io.requestTimeoutMs),
   );
 }
 
@@ -723,7 +784,7 @@ async function boundedJson(
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
     await discardResponseBody(response);
-    throw new ProbeReadError('BACKEND_PROBE_UNAVAILABLE', 'Doctor probe deadline expired');
+    throw new ProbeReadError('TRACE_READBACK_TIMEOUT', 'Doctor probe deadline expired');
   }
   const contentLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > MAX_READBACK_BYTES) {
@@ -758,9 +819,17 @@ async function boundedJson(
     }
   }, Math.min(io.requestTimeoutMs, remaining), () => {
     void discardResponseBody(response, reader);
-  }).catch(async () => {
+  }, responseBodyFailureReason(
+    response.status,
+    remaining,
+    io.requestTimeoutMs,
+  )).catch(async (error: unknown) => {
     await discardResponseBody(response, reader);
-    return null;
+    if (error instanceof ProbeReadError) throw error;
+    throw new ProbeReadError(
+      'BACKEND_CONNECTION_FAILED',
+      'Trace read-back response could not be read',
+    );
   });
 }
 
@@ -874,10 +943,11 @@ export async function runDoctorCli(
             'x-neatlogs-doctor': DOCTOR_MARKER_VERSION,
           },
         }, deadline);
-      } catch {
+      } catch (error: unknown) {
+        if (error instanceof ProbeReadError) throw error;
         throw new ProbeReadError(
-          'BACKEND_PROBE_UNAVAILABLE',
-          'The existing trace read path is unavailable',
+          'BACKEND_CONNECTION_FAILED',
+          'Could not connect to the existing trace read path',
           lastDiagnostics,
         );
       }
@@ -885,7 +955,7 @@ export async function runDoctorCli(
         const value = await boundedJson(response, io, deadline);
         if (!value || typeof value !== 'object') {
           throw new ProbeReadError(
-            'BACKEND_PROBE_UNAVAILABLE',
+            'TRACE_READBACK_INVALID',
             'Trace read-back returned an invalid response',
           );
         }
@@ -898,12 +968,25 @@ export async function runDoctorCli(
         throw new ProbeReadError('AUTH_FAILED', 'Trace read-back rejected the project key');
       }
       if ([202, 404, 409].includes(response.status)) {
-        const value = await boundedJson(response, io, deadline).catch(() => null);
+        const value = await boundedJson(response, io, deadline);
         const currentDiagnostics = ingestionDiagnosticDetails(value);
         if (currentDiagnostics) lastDiagnostics = currentDiagnostics;
         if (response.status === 409) {
+          const terminalValue = objectValue(value);
+          const isDlq = terminalValue.finalizationStatus === 'dlq';
+          const hasDiagnostics = Object.hasOwn(terminalValue, 'ingestionDiagnostics');
+          const validDlq = typeof terminalValue.error === 'string' &&
+            (terminalValue.message === undefined || typeof terminalValue.message === 'string') &&
+            (!hasDiagnostics || currentDiagnostics !== undefined);
+          const validReceipt = currentDiagnostics?.ingestion_state === 'failed';
+          if (isDlq ? !validDlq : !validReceipt) {
+            throw new ProbeReadError(
+              'TRACE_READBACK_INVALID',
+              'Trace read-back returned an invalid terminal receipt',
+            );
+          }
           throw new ProbeReadError(
-            'BACKEND_PROBE_UNAVAILABLE',
+            'INGESTION_PIPELINE_FAILED',
             'Trace ingestion reported a terminal failure',
             currentDiagnostics,
           );
@@ -911,7 +994,7 @@ export async function runDoctorCli(
       } else {
         await discardResponseBody(response);
         throw new ProbeReadError(
-          'BACKEND_PROBE_UNAVAILABLE',
+          'BACKEND_HTTP_ERROR',
           `Trace read-back failed with HTTP ${response.status}`,
           response.status >= 500 ? lastDiagnostics : undefined,
         );
@@ -921,7 +1004,7 @@ export async function runDoctorCli(
     }
     if (!persisted) {
       throw new ProbeReadError(
-        'BACKEND_PROBE_UNAVAILABLE',
+        'TRACE_READBACK_TIMEOUT',
         'Timed out waiting for the exact Doctor trace',
         lastDiagnostics,
       );
@@ -931,8 +1014,8 @@ export async function runDoctorCli(
     io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
     return result.status === 'pass' ? 0 : 3;
   } catch (error) {
-    const reason = error instanceof ProbeReadError && error.reasonCode === 'AUTH_FAILED'
-      ? 'AUTH_FAILED'
+    const reason = error instanceof ProbeReadError
+      ? error.reasonCode
       : 'BACKEND_PROBE_UNAVAILABLE';
     const result = local
       ? failedProbeResult(
