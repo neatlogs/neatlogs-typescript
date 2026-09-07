@@ -2,11 +2,10 @@
  * Auto-root for direct-provider wrappers.
  *
  * The backend only renders a trace once it contains a *parentless* span of a
- * root-eligible kind (WORKFLOW / CHAIN / AGENT / MCP_TOOL). Direct-provider
- * wrappers (wrapOpenAI, wrapAnthropic, wrapBedrock, ...) only ever emit
- * non-root spans (LLM / EMBEDDING / TOOL). So a bare
- * `const client = wrapOpenAI(new OpenAI())` with no surrounding `span()` /
- * `trace()` produces an orphan span and the trace never renders.
+ * root-eligible kind (WORKFLOW / CHAIN / AGENT / MCP_TOOL / LLM). Direct-provider
+ * wrappers may emit either a root-eligible LLM span or a non-root span
+ * (EMBEDDING / TOOL). A bare non-root call still needs a workflow parent so the
+ * trace can finalize.
  *
  * `getProviderTracer(name)` returns a Tracer facade used *only* by those
  * direct-provider wrappers: when `startSpan` would otherwise produce a
@@ -36,13 +35,16 @@ import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
   getActiveNeatlogsSpan,
+  withNeatlogsSpan,
 } from './provider.js';
 import { getActiveClient } from './active-client.js';
 import { aliasMediaCaptureSpan } from './media.js';
 
+const boundAutoRoots = new WeakMap<object, Span>();
+
 // A parentless span of one of these kinds already satisfies the backend's
 // root requirement, so it must NOT be wrapped in another root.
-const ROOT_KINDS = new Set(['workflow', 'chain', 'agent', 'mcp_tool']);
+const ROOT_KINDS = new Set(['workflow', 'chain', 'agent', 'mcp_tool', 'llm']);
 
 function autoRootEnabled(): boolean {
   const val = (process.env.NEATLOGS_AUTO_ROOT ?? '').trim().toLowerCase();
@@ -67,7 +69,7 @@ function resolveRootWorkflowName(): string {
  * root to put trace()/span() args on, so identity comes purely from the
  * identify() context (passed undefined per-call values fall back to it).
  */
-function stampAutoRootIdentity(root: Span): void {
+function stampRootIdentity(root: Span): void {
   applySessionAttributes(root, undefined, true);
   applyEndUserAttributes(root, undefined, undefined, true);
 }
@@ -77,7 +79,8 @@ function stampAutoRootIdentity(root: Span): void {
  * root. A Proxy keeps this transparent across OTel versions: every property /
  * method except `end` passes straight through to the child span.
  */
-function wrapSpanWithRoot(child: Span, root: Span): Span {
+export function bindSpanToAutoRoot(child: Span, root: Span | undefined): Span {
+  if (!root) return child;
   let ended = false;
   const proxy = new Proxy(child, {
     get(target, prop, _receiver) {
@@ -100,6 +103,7 @@ function wrapSpanWithRoot(child: Span, root: Span): Span {
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+  boundAutoRoots.set(proxy, root);
   aliasMediaCaptureSpan(proxy, child);
   return proxy;
 }
@@ -141,7 +145,7 @@ export function maybeOpenAutoRoot(
     { attributes: { 'neatlogs.span.kind': 'workflow', 'neatlogs.auto_root': true } },
     baseCtx,
   );
-  stampAutoRootIdentity(root);
+  stampRootIdentity(root);
   return { root, ctx: otelTrace.setSpan(baseCtx, root) };
 }
 
@@ -166,15 +170,20 @@ class AutoRootTracer implements Tracer {
     ).toLowerCase();
 
     // Parent from our private context, never the foreign global.
+    const hasExplicitContext = context !== undefined;
     const ctx = context ?? getNeatlogsParentContext();
     const parent = getActiveNeatlogsSpan();
+    const isParentless =
+      !hasExplicitContext && !(parent !== undefined && parent.isRecording());
     const needsRoot =
       autoRootEnabled() &&
       !ROOT_KINDS.has(kind) &&
-      !(parent !== undefined && parent.isRecording());
+      isParentless;
 
     if (!needsRoot) {
-      return this._tracer.startSpan(name, options, ctx);
+      const span = this._tracer.startSpan(name, options, ctx);
+      if (isParentless && ROOT_KINDS.has(kind)) stampRootIdentity(span);
+      return span;
     }
 
     const root = this._tracer.startSpan(
@@ -182,18 +191,30 @@ class AutoRootTracer implements Tracer {
       { attributes: { 'neatlogs.span.kind': 'workflow', 'neatlogs.auto_root': true } },
       ctx,
     );
-    stampAutoRootIdentity(root);
+    stampRootIdentity(root);
     const childCtx = otelTrace.setSpan(ctx, root);
     const child = this._tracer.startSpan(name, options, childCtx);
-    return wrapSpanWithRoot(child, root);
+    return bindSpanToAutoRoot(child, root);
   }
 
-  // startActiveSpan is used by traceTool (callback-scoped, always under an
-  // active span in practice) — pass straight through, no auto-root.
-  startActiveSpan = ((...args: any[]) =>
-    (this._tracer.startActiveSpan as (...a: any[]) => any)(
-      ...args,
-    )) as Tracer['startActiveSpan'];
+  startActiveSpan = ((name: string, ...args: any[]) => {
+    const callback = args.at(-1);
+    if (typeof callback !== 'function') {
+      throw new TypeError('startActiveSpan requires a callback');
+    }
+    const options = args.length >= 2 ? args[0] : undefined;
+    const parentContext =
+      args.length >= 3 ? args[1] : getNeatlogsParentContext();
+    const span = args.length >= 3
+      ? this.startSpan(name, options, parentContext)
+      : this.startSpan(name, options);
+    return withNeatlogsSpan(
+      span,
+      () => callback(span),
+      parentContext,
+      boundAutoRoots.get(span as object),
+    );
+  }) as Tracer['startActiveSpan'];
 }
 
 /**

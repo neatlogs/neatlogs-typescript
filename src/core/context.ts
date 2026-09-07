@@ -27,6 +27,7 @@ import { applyEndUserAttributes } from './end-user.js';
 import { applySessionAttributes } from './session.js';
 import { currentSessionId } from './identity.js';
 import { captureMedia } from './media.js';
+import { bindSpanToAutoRoot, maybeOpenAutoRoot } from './auto-root.js';
 
 import { getLogger } from './logger.js';
 import { safeJsonDumps, serializeObj } from '../decorators/base.js';
@@ -387,12 +388,13 @@ export async function trace<T>(
     _setSpanAttributes(span, kind, extraAttributes);
 
     // Session/end-user belong to the trace root only; skipped on a non-root span.
-    applySessionAttributes(span, sessionId, isRootTrace, {
+    const spanIsRoot = isRootTrace && !autoRoot.root;
+    applySessionAttributes(span, sessionId, spanIsRoot, {
       parentSessionId,
       sessionFeatureName,
       sessionEntryPoint,
     });
-    applyEndUserAttributes(span, endUserId, endUserMetadata, isRootTrace);
+    applyEndUserAttributes(span, endUserId, endUserMetadata, spanIsRoot);
 
     if (input !== undefined && input !== null) {
       const capturedInput = captureMedia(
@@ -459,7 +461,25 @@ export async function trace<T>(
   // callback runs). Without this, a trace({ kind: 'LLM', promptTemplate }) span
   // isn't recognized as LLM in time and its prompt-template attributes are dropped.
   const startAttributes = kind ? { 'openinference.span.kind': kind } : undefined;
-  const span = tracer.startSpan(name, startAttributes ? { attributes: startAttributes } : {}, parentContext);
+  const autoRoot = isRootTrace
+    ? maybeOpenAutoRoot(tracer, String(kind ?? 'CHAIN'), parentContext)
+    : { root: undefined, ctx: parentContext };
+  if (autoRoot.root) {
+    applySessionAttributes(autoRoot.root, sessionId, true, {
+      parentSessionId,
+      sessionFeatureName,
+      sessionEntryPoint,
+    });
+    applyEndUserAttributes(autoRoot.root, endUserId, endUserMetadata, true);
+  }
+  const span = bindSpanToAutoRoot(
+    tracer.startSpan(
+      name,
+      startAttributes ? { attributes: startAttributes } : {},
+      autoRoot.ctx,
+    ),
+    autoRoot.root,
+  );
 
   if (shouldCreateRootTrace) {
     logger.debug(`[trace] Creating NEW root trace '${name}' (sessionId=${sessionId})`);
@@ -467,5 +487,10 @@ export async function trace<T>(
     logger.debug(`[trace] Creating child span '${name}'`);
   }
 
-  return withNeatlogsSpan(span, () => spanCallback(span), ctx);
+  return withNeatlogsSpan(
+    span,
+    () => spanCallback(span),
+    autoRoot.ctx,
+    autoRoot.root,
+  );
 }

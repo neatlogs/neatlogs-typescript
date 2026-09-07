@@ -13,6 +13,7 @@ import {
 
 import {
   trace,
+  setTraceOutput,
   _setSessionConfig,
   getSessionConfig,
   _setSpanAttributes,
@@ -130,6 +131,34 @@ describe('trace()', () => {
     const span = spans.find((s) => s.name === 'kind-custom');
     expect(span).toBeDefined();
     expect(span!.attributes['openinference.span.kind']).toBe('AGENT');
+  });
+
+  it('anchors a standalone TOOL and keeps trace output on the workflow root', async () => {
+    await trace(
+      { name: 'standalone-tool', kind: 'TOOL', sessionId: 'session-1' },
+      async () => {
+        setTraceOutput({ answer: 42 });
+      },
+    );
+
+    const spans = exporter.getFinishedSpans();
+    const root = spans.find((span) => span.attributes['neatlogs.auto_root'] === true);
+    const tool = spans.find((span) => span.name === 'standalone-tool');
+    expect(root).toBeDefined();
+    expect(tool?.parentSpanId).toBe(root?.spanContext().spanId);
+    expect(root?.attributes['neatlogs.trace.output']).toBe('{"answer":42}');
+    expect(root?.attributes['neatlogs.session.id']).toBe('session-1');
+    expect(tool?.attributes['neatlogs.session.id']).toBeUndefined();
+  });
+
+  it('keeps a standalone LLM as the parentless root', async () => {
+    await trace({ name: 'standalone-llm', kind: 'LLM' }, async () => 'ok');
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans).toHaveLength(1);
+    expect(spans[0].name).toBe('standalone-llm');
+    expect(spans[0].parentSpanId).toBeUndefined();
+    expect(spans[0].attributes['neatlogs.auto_root']).toBeUndefined();
   });
 
   it('should create a child span within an existing trace', async () => {

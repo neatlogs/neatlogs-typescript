@@ -253,13 +253,14 @@ export function withNeatlogsSpan<T>(
   span: Span,
   fn: () => T,
   baseContext?: Context,
+  rootSpan?: Span,
 ): T {
   const base = baseContext ?? getNeatlogsActiveContext();
   let ctx = otelTrace.setSpan(base, span);
   // The first span activated in a context with no root recorded IS the root of
   // this trace; remember it so descendants (setTraceOutput) can target it.
   if (base.getValue(NEATLOGS_ROOT_SPAN_KEY) === undefined) {
-    ctx = ctx.setValue(NEATLOGS_ROOT_SPAN_KEY, span);
+    ctx = ctx.setValue(NEATLOGS_ROOT_SPAN_KEY, rootSpan ?? span);
   }
   return privateContextStorage.run(ctx, fn);
 }

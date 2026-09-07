@@ -13,6 +13,7 @@ import {
   withNeatlogsSpan,
 } from '../../src/core/provider.js';
 import { captureMedia, resolvePendingMediaUploads } from '../../src/core/media.js';
+import { span as instrument } from '../../src/decorators/orchestration.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
@@ -51,20 +52,47 @@ function endLlmSpan(): void {
 }
 
 describe('auto-root', () => {
-  it('wraps a bare, parentless LLM span in a WORKFLOW root', () => {
+  it('keeps a bare LLM as the backend-supported root', () => {
     endLlmSpan();
 
     const spans = getSpans();
-    expect(spans.length).toBe(2);
+    expect(spans).toHaveLength(1);
+    expect(spans[0].attributes['neatlogs.span.kind']).toBe('LLM');
+    expect(spans[0].parentSpanId).toBeUndefined();
+    expect(spans[0].attributes['neatlogs.auto_root']).toBeUndefined();
+  });
 
-    const root = spans.find((s) => s.attributes['neatlogs.span.kind'] === 'workflow');
-    const llm = spans.find((s) => s.attributes['neatlogs.span.kind'] === 'LLM');
+  it('anchors a standalone manual TOOL span under a workflow root', () => {
+    const wrapped = instrument(
+      { kind: 'TOOL', sessionId: 'session-1' },
+      () => 'done',
+    );
+
+    expect(wrapped()).toBe('done');
+    const spans = getSpans();
+    const root = spans.find((item) => item.attributes['neatlogs.auto_root'] === true);
+    const tool = spans.find(
+      (item) => item.attributes['openinference.span.kind'] === 'TOOL',
+    );
     expect(root).toBeDefined();
-    expect(llm).toBeDefined();
-    expect(root!.attributes['neatlogs.auto_root']).toBe(true);
-    // The LLM span is parented to the auto-created root.
-    expect(llm!.parentSpanId).toBe(root!.spanContext().spanId);
-    expect(root!.spanContext().traceId).toBe(llm!.spanContext().traceId);
+    expect(tool?.parentSpanId).toBe(root?.spanContext().spanId);
+    expect(root?.attributes['neatlogs.session.id']).toBe('session-1');
+    expect(tool?.attributes['neatlogs.session.id']).toBeUndefined();
+  });
+
+  it('anchors a standalone traceTool startActiveSpan call', () => {
+    const tracer = getProviderTracer('neatlogs');
+    tracer.startActiveSpan(
+      'standalone.tool',
+      { attributes: { 'neatlogs.span.kind': 'TOOL' } },
+      (tool) => tool.end(),
+    );
+
+    const spans = getSpans();
+    const root = spans.find((item) => item.attributes['neatlogs.auto_root'] === true);
+    const tool = spans.find((item) => item.attributes['neatlogs.span.kind'] === 'TOOL');
+    expect(root).toBeDefined();
+    expect(tool?.parentSpanId).toBe(root?.spanContext().spanId);
   });
 
   it('does not wrap when NEATLOGS_AUTO_ROOT is disabled', () => {
