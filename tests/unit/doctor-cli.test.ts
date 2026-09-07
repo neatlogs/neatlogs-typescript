@@ -413,6 +413,8 @@ describe('doctor CLI', () => {
         },
       }), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'Trace processing failed',
+        finalizationStatus: 'dlq',
         ingestionDiagnostics: { protocolVersion: 'v2' },
       }), { status: 409 }));
     const code = await runDoctorCli(['doctor', '--probe', '--json'], {
@@ -426,6 +428,23 @@ describe('doctor CLI', () => {
     const failure = failures[failures.length - 1];
     expect(failure?.reason_code).toBe('TRACE_READBACK_INVALID');
     expect(failure?.details).toBeUndefined();
+  });
+
+  it('rejects a DLQ response without its required error field', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      finalizationStatus: 'dlq',
+    }), { status: 409 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+    });
+
+    expect(code).toBe(3);
+    expect(JSON.parse(value.output[0]!).first_failure).toBe('TRACE_READBACK_INVALID');
   });
 
   it.each([202, 404])('never treats HTTP %i without persisted visibility as success', async (status) => {
@@ -512,6 +531,33 @@ describe('doctor CLI', () => {
       })]),
     });
     expect(JSON.stringify(result)).not.toMatch(/database leaked|secret-timestamp|projectId/);
+  });
+
+  it('classifies a DLQ terminal response without optional diagnostics as a pipeline failure', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      error: 'Trace processing failed',
+      finalizationStatus: 'dlq',
+      message: "We couldn't finish preparing this trace. Please retry or contact support.",
+    }), { status: 409 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      probeExporter: fixture.probeExporter,
+    });
+
+    expect(code).toBe(3);
+    const result = JSON.parse(value.output[0]!);
+    expect(result).toMatchObject({
+      status: 'fail',
+      first_failure: 'INGESTION_PIPELINE_FAILED',
+      checks: expect.arrayContaining([expect.objectContaining({
+        reason_code: 'INGESTION_PIPELINE_FAILED',
+      })]),
+    });
+    expect(result.checks.every((item: any) => item.details === undefined)).toBe(true);
   });
 
   it('ignores unsupported or malformed ingestion diagnostics', async () => {

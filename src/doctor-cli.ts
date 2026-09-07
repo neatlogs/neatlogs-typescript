@@ -972,7 +972,14 @@ export async function runDoctorCli(
         const currentDiagnostics = ingestionDiagnosticDetails(value);
         if (currentDiagnostics) lastDiagnostics = currentDiagnostics;
         if (response.status === 409) {
-          if (!currentDiagnostics || currentDiagnostics.ingestion_state !== 'failed') {
+          const terminalValue = objectValue(value);
+          const isDlq = terminalValue.finalizationStatus === 'dlq';
+          const hasDiagnostics = Object.hasOwn(terminalValue, 'ingestionDiagnostics');
+          const validDlq = typeof terminalValue.error === 'string' &&
+            (terminalValue.message === undefined || typeof terminalValue.message === 'string') &&
+            (!hasDiagnostics || currentDiagnostics !== undefined);
+          const validReceipt = currentDiagnostics?.ingestion_state === 'failed';
+          if (isDlq ? !validDlq : !validReceipt) {
             throw new ProbeReadError(
               'TRACE_READBACK_INVALID',
               'Trace read-back returned an invalid terminal receipt',
