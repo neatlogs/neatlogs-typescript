@@ -240,7 +240,7 @@ describe('Doctor probe over the actual OTLP HTTP exporter', () => {
       expect(JSON.parse(stdout[0]!)).toMatchObject({
         mode: 'probe',
         status: 'fail',
-        first_failure: 'BACKEND_PROBE_UNAVAILABLE',
+        first_failure: 'TRACE_READBACK_TIMEOUT',
       });
       expect(`${stdout.join('\n')}\n${stderr.join('\n')}`).not.toContain('stalled-project-key');
     } finally {
