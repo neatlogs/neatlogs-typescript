@@ -201,12 +201,12 @@ describe('End-to-end provider isolation', () => {
     assertNoCrossExport(['langchain.chain.graph', 'langchain.chat_model']);
   });
 
-  it('LangChain bare LLM run opens an isolated auto-root WORKFLOW', async () => {
+  it('keeps a bare LangChain LLM as an isolated parentless root', async () => {
     const handler = langchainHandler();
 
     const foreignTracer = otelTrace.getTracer('foreign-observability');
     await foreignTracer.startActiveSpan('foreign.request', async (fspan) => {
-      // No chain above → LLM is parentless & non-root → auto-root fires.
+      // No chain above: LLM is a backend-supported root and needs no wrapper.
       await handler.handleChatModelStart(
         { kwargs: { model: 'gpt-4o' } },
         [[{ content: 'hi', _getType: () => 'human' }]],
@@ -220,19 +220,16 @@ describe('End-to-end provider isolation', () => {
     });
 
     const neatlogsSpans = neatlogsExporter.getFinishedSpans();
-    // Auto-root uses the configured workflowName.
-    const rootSpan = findSpan(neatlogsSpans, 'isolation-e2e');
     const llmSpan = findSpan(neatlogsSpans, 'langchain.chat_model');
     const foreignSpan = foreignExporter.getFinishedSpans()[0];
 
-    expect(rootSpan.attributes['neatlogs.auto_root']).toBe(true);
-    expect(rootSpan.parentSpanId).toBeUndefined();
-    expect(llmSpan.parentSpanId).toBe(rootSpan.spanContext().spanId);
-    expect(rootSpan.spanContext().traceId).not.toBe(
+    expect(llmSpan.attributes['neatlogs.auto_root']).toBeUndefined();
+    expect(llmSpan.parentSpanId).toBeUndefined();
+    expect(llmSpan.spanContext().traceId).not.toBe(
       foreignSpan.spanContext().traceId,
     );
 
-    assertNoCrossExport(['isolation-e2e', 'langchain.chat_model']);
+    assertNoCrossExport(['langchain.chat_model']);
   });
 
   it('LangChain handler nests under an enclosing Neatlogs trace (High-4), not the foreign span', async () => {

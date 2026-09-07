@@ -22,6 +22,10 @@ import {
   getNeatlogsParentContext,
   withNeatlogsSpan,
 } from "../core/provider.js";
+import {
+  bindSpanToAutoRoot,
+  maybeOpenAutoRoot,
+} from "../core/auto-root.js";
 import type { SpanOptions, MaskFunction } from "../types.js";
 import {
   DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
@@ -171,7 +175,28 @@ export function decorateSpan<TArgs extends any[], TReturn>(
     // Parent from our private span store; a root decorated function anchors a
     // fresh trace under ROOT_CONTEXT.
     const parentContext = isRoot ? ROOT_CONTEXT : getNeatlogsParentContext();
-    const span = tracer.startSpan(spanName, {}, parentContext);
+    const autoRoot = maybeOpenAutoRoot(
+      tracer,
+      String(opts.kind ?? ""),
+      parentContext,
+    );
+    if (autoRoot.root) {
+      applySessionAttributes(autoRoot.root, opts.sessionId, true, {
+        parentSessionId: opts.parentSessionId,
+        sessionFeatureName: opts.sessionFeatureName,
+        sessionEntryPoint: opts.sessionEntryPoint,
+      });
+      applyEndUserAttributes(
+        autoRoot.root,
+        opts.endUserId,
+        opts.endUserMetadata,
+        true,
+      );
+    }
+    const span = bindSpanToAutoRoot(
+      tracer.startSpan(spanName, {}, autoRoot.ctx),
+      autoRoot.root,
+    );
     return withNeatlogsSpan(span, () => {
       let finished = false;
       let streamInterrupted = false;
@@ -581,7 +606,8 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         setCommonSpanAttrs(span, opts);
 
         // Session/end-user identity (root span only; skipped on a non-root child).
-        applySessionAttributes(span, opts.sessionId, isRoot, {
+        const spanIsRoot = isRoot && !autoRoot.root;
+        applySessionAttributes(span, opts.sessionId, spanIsRoot, {
           parentSessionId: opts.parentSessionId,
           sessionFeatureName: opts.sessionFeatureName,
           sessionEntryPoint: opts.sessionEntryPoint,
@@ -590,7 +616,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
           span,
           opts.endUserId,
           opts.endUserMetadata,
-          isRoot,
+          spanIsRoot,
         );
 
         // Capture input
@@ -645,7 +671,7 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         finishError(error);
         throw error;
       }
-    });
+    }, autoRoot.ctx, autoRoot.root);
   };
 
   // Preserve function name for debugging

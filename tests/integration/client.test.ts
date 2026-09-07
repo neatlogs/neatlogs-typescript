@@ -207,12 +207,16 @@ describe("Client", () => {
         (span) => span.name === "openai.chat.completions.create",
       ),
     ).toBe(true);
-    expect(
-      firstSpans.find((span) => span.parentSpanId === undefined)?.name,
-    ).toBe("first-project");
-    expect(
-      secondSpans.find((span) => span.parentSpanId === undefined)?.name,
-    ).toBe("second-project");
+    const firstRoot = firstSpans.find((span) => span.parentSpanId === undefined);
+    const secondRoot = secondSpans.find((span) => span.parentSpanId === undefined);
+    expect(firstRoot?.name).toBe("openai.chat.completions.create");
+    expect(secondRoot?.name).toBe("openai.chat.completions.create");
+    expect(firstRoot?.resource.attributes["neatlogs.workflow_name"]).toBe(
+      "first-project",
+    );
+    expect(secondRoot?.resource.attributes["neatlogs.workflow_name"]).toBe(
+      "second-project",
+    );
   });
 
   it("routes reusable telemetry and Pi wrappers at invocation time", async () => {
