@@ -50,6 +50,33 @@ beforeEach(() => {
   _clearMaskRegistry();
 });
 
+describe('trace() HTTP rejection', () => {
+  it('rejects an HTTP kind before creating a span', async () => {
+    await expect(
+      trace({ name: 'transport', kind: 'HTTP' as any }, async () => 'unused'),
+    ).rejects.toMatchObject({
+      name: 'NeatlogsConfigurationError',
+      code: 'UNSUPPORTED_SPAN_KIND',
+      option: 'kind',
+    });
+    expect(exporter.getFinishedSpans()).toEqual([]);
+  });
+
+  it('rejects an HTTP kind smuggled through custom attributes', async () => {
+    await expect(
+      trace(
+        {
+          name: 'transport',
+          kind: 'TOOL',
+          attributes: { 'openinference.span.kind': 'HTTP' },
+        },
+        async () => 'unused',
+      ),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED_SPAN_KIND' });
+    expect(exporter.getFinishedSpans()).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Nested trace() calls
 // ---------------------------------------------------------------------------

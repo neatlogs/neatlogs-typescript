@@ -18,6 +18,7 @@ import {
   resolvePendingMediaUploads,
 } from './media.js';
 import { DisabledUploadAuthority, type UploadAuthority } from './upload-authority.js';
+import { isHttpSpan } from './http-span.js';
 
 const MEDIA_RESOLUTION_CONCURRENCY = 4;
 
@@ -156,6 +157,10 @@ export class FilteringExporter implements SpanExporter {
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
     void mapWithConcurrency(spans, MEDIA_RESOLUTION_CONCURRENCY, async (span) => {
+      if (isHttpSpan(span)) {
+        discardPendingMedia(span as object);
+        return { span: null, mediaReady: true };
+      }
       if (span.instrumentationLibrary.name === 'next.js') {
         discardPendingMedia(span as object);
         this.diagnostics?.recordFrameworkSpanDrop();
@@ -176,6 +181,11 @@ export class FilteringExporter implements SpanExporter {
         ...(masked.attributes && typeof masked.attributes === 'object' ? masked.attributes : {}),
       };
       const maskedData = { ...masked, attributes };
+      const maskedSpan = maskedReadableSpan(span, maskedData);
+      if (isHttpSpan(maskedSpan)) {
+        discardPendingMedia(span as object);
+        return { span: null, mediaReady: true };
+      }
       captureMediaInSnapshot(
         span as object,
         maskedData,

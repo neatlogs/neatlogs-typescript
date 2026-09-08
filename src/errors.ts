@@ -1,6 +1,7 @@
 export type NeatlogsConfigurationErrorCode =
   | 'UNKNOWN_INIT_OPTION'
   | 'UNSUPPORTED_INSTRUMENTATIONS'
+  | 'UNSUPPORTED_SPAN_KIND'
   | 'CONFLICTING_INIT';
 
 /** A caller-actionable SDK configuration failure. */

@@ -50,7 +50,7 @@ export interface NeatlogsLog {
 export type NeatlogsKind =
   | "WORKFLOW" | "AGENT" | "CHAIN" | "TOOL" | "RETRIEVER" | "RERANKER"
   | "EMBEDDING" | "LLM" | "GUARDRAIL" | "MCP_TOOL" | "TASK"
-  | "VECTOR_STORE" | "EVALUATOR" | "HTTP";
+  | "VECTOR_STORE" | "EVALUATOR";
 
 export interface NeatlogsSpan {
   name: string;
@@ -270,6 +270,12 @@ export class Neatlogs {
 
   /** POST the trace JSON to the backend's /v1/trace endpoint. */
   private async post(body: NeatlogsTrace): Promise<TrackResult> {
+    const httpKindPath = findHttpKind(body);
+    if (httpKindPath) {
+      const error = `HTTP spans are not supported (${httpKindPath}). Trace the semantic AI operation instead.`;
+      this.onError(new Error(error));
+      return { ok: false, error };
+    }
     if (!this.enabled) return { ok: true };
     // Fold identity (end-user + session) onto the root before anything else.
     body = this.applyIdentity(body);
@@ -318,6 +324,22 @@ function safeOrigin(endpoint: string): string | null {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function findHttpKind(span: NeatlogsSpan, path = 'root'): string | null {
+  const kindCandidates = [
+    span.kind,
+    span.attributes?.['neatlogs.span.kind'],
+    span.attributes?.['openinference.span.kind'],
+  ];
+  if (kindCandidates.some((value) => String(value ?? '').trim().toUpperCase() === 'HTTP')) {
+    return path;
+  }
+  for (let index = 0; index < (span.children?.length ?? 0); index += 1) {
+    const childPath = findHttpKind(span.children![index], `${path}.children[${index}]`);
+    if (childPath) return childPath;
+  }
+  return null;
 }
 
 export default Neatlogs;

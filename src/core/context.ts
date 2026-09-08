@@ -28,6 +28,7 @@ import { applySessionAttributes } from './session.js';
 import { currentSessionId } from './identity.js';
 import { captureMedia } from './media.js';
 import { bindSpanToAutoRoot, maybeOpenAutoRoot } from './auto-root.js';
+import { NeatlogsConfigurationError } from '../errors.js';
 
 import { getLogger } from './logger.js';
 import { safeJsonDumps, serializeObj } from '../decorators/base.js';
@@ -96,6 +97,24 @@ const KNOWN_OPTION_KEYS = new Set([
   'endUserId',
   'endUserMetadata',
 ]);
+
+function assertNoHttpSpanKind(
+  kind: unknown,
+  attributes: Record<string, any> | undefined,
+): void {
+  const candidates = [
+    kind,
+    attributes?.['neatlogs.span.kind'],
+    attributes?.['openinference.span.kind'],
+  ];
+  if (candidates.some((value) => String(value ?? '').trim().toUpperCase() === 'HTTP')) {
+    throw new NeatlogsConfigurationError(
+      'UNSUPPORTED_SPAN_KIND',
+      'kind',
+      'HTTP spans are not supported. Trace the semantic LLM, TOOL, RETRIEVER, or other AI operation instead.',
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -264,6 +283,8 @@ export async function trace<T>(
     attributes: explicitAttributes,
     ...extraOptions
   } = options;
+
+  assertNoHttpSpanKind(kind, explicitAttributes);
 
   // Per-call sessionId wins, else the request-scoped identify() context.
   // Session identity is NOT process-global — init() never sets it.
