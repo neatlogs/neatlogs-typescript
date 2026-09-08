@@ -27,6 +27,19 @@ export const ALL_SPAN_KINDS = new Set<string>([
   'VECTOR_STORE',
 ]);
 
+/** Resolve explicit kinds using the canonical Neatlogs attribute first. */
+export function resolveExplicitSpanKind(attributes: Record<string, any>): string {
+  for (const key of [
+    'neatlogs.span.kind',
+    'openinference.span.kind',
+    'traceloop.span.kind',
+  ]) {
+    const value = String(attributes[key] ?? '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+
 /**
  * Infer OpenInference span kind from span name.
  * Distinguishes RETRIEVER (read ops) vs VECTOR_STORE (write ops) for vector DBs.

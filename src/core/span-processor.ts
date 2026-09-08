@@ -37,6 +37,7 @@ import { AttributeMapper } from '../config/attribute-mapper.js';
 import { getNeatlogsTracer } from './provider.js';
 import { verificationMarkerFromEnv } from './resource.js';
 import { setMediaCaptureAvailability } from './media.js';
+import { isHttpSpan } from './http-span.js';
 
 const logger = getLogger();
 
@@ -437,6 +438,10 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
     this._activeSpans.delete(span.spanContext().spanId);
     if (this._closed) return;
 
+    // Transport spans are never part of NeatLogs telemetry. Suppress them
+    // before logging, normalization, root I/O backfill, masking, or markers.
+    if (isHttpSpan(span)) return;
+
     // Completion markers skip normalization but still cross the same global
     // masking boundary: they carry root identity and metadata.
     if (span.name === 'neatlogs.trace.complete') {
@@ -664,6 +669,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
       const pending = maskResult
         .then((maskedSpanData) => {
           if (maskedSpanData === null) return;
+          if (isHttpSpan(span, maskedSpanData.attributes ?? {})) return;
 
           // Processed diagnostic logs follow the same masking boundary as OTLP.
           if (this._processedLogStream && !this._processedLogStream.destroyed) {
@@ -1017,7 +1023,13 @@ export class CompletionMarkerSpanProcessor implements SpanProcessor {
   onStart(_span: SdkSpan, _parentContext: Context): void {}
 
   onEnd(span: ReadableSpan): void {
-    if (this.closed || span.name === 'neatlogs.trace.complete' || span.parentSpanId) return;
+    if (
+      this.closed ||
+      span.name === 'neatlogs.trace.complete' ||
+      span.parentSpanId ||
+      isHttpSpan(span)
+    )
+      return;
     if (!this.source.ownsSpan(span)) return;
     const task = this.source
       .whenMaskComplete(span)

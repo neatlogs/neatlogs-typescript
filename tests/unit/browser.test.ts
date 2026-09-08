@@ -122,18 +122,28 @@ describe("Neatlogs browser SDK — canonical attributes + kinds", () => {
     expect(body.attributes["neatlogs.llm.top_p"]).toBe(0.9);
   });
 
-  it("supports all kinds incl. VECTOR_STORE / EVALUATOR / HTTP via trace()", async () => {
-    const nl = new Neatlogs({ apiKey: "k" });
-    await nl.trace({
+  it("supports extended semantic kinds but rejects HTTP before transport", async () => {
+    const onError = vi.fn();
+    const nl = new Neatlogs({ apiKey: "k", onError });
+    const semantic = await nl.trace({
       name: "root",
       children: [
         { name: "vs", kind: "VECTOR_STORE", input: "q" },
         { name: "ev", kind: "EVALUATOR", attributes: { "neatlogs.evaluator.input": "x" } },
-        { name: "h", kind: "HTTP", input: "GET /x" },
       ],
     });
     const body = bodyOf();
-    expect(body.children.map((c: any) => c.kind)).toEqual(["VECTOR_STORE", "EVALUATOR", "HTTP"]);
+    expect(semantic.ok).toBe(true);
+    expect(body.children.map((c: any) => c.kind)).toEqual(["VECTOR_STORE", "EVALUATOR"]);
+
+    const rejected = await nl.trace({
+      name: "bad-root",
+      children: [{ name: "transport", kind: "HTTP", input: "GET /x" }],
+    });
+    expect(rejected.ok).toBe(false);
+    expect(rejected.error).toContain("root.children[0]");
+    expect(calls).toHaveLength(1);
+    expect(onError).toHaveBeenCalledOnce();
   });
 });
 
