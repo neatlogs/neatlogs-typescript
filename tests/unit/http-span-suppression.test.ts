@@ -38,6 +38,7 @@ describe('HTTP span suppression', () => {
   it('does not mistake a semantic LLM span containing HTTP metadata for an HTTP span', async () => {
     const sink = new InMemorySpanExporter();
     const provider = new BasicTracerProvider();
+    provider.addSpanProcessor(new NeatlogsSpanProcessor({ ownAllSpans: true }));
     provider.addSpanProcessor(new SimpleSpanProcessor(new FilteringExporter(sink)));
 
     const span = provider.getTracer('@opentelemetry/instrumentation-http').startSpan(
@@ -57,6 +58,7 @@ describe('HTTP span suppression', () => {
     await provider.forceFlush();
 
     expect(sink.getFinishedSpans()).toHaveLength(1);
+    expect(sink.getFinishedSpans()[0].attributes['neatlogs.span.kind']).toBe('reranker');
     await provider.shutdown();
   });
 

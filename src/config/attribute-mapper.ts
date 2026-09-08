@@ -6,6 +6,7 @@
  */
 
 import { getLogger } from '../core/logger.js';
+import { resolveExplicitSpanKind } from '../span-kinds/mapping.js';
 import attributeMappingConfig from './attribute-mapping.json';
 
 const logger = getLogger();
@@ -82,35 +83,12 @@ export class AttributeMapper {
   /** Extract and normalize span kind from multiple possible sources. */
   mapSpanKind(attributes: Record<string, any>): string {
     const spanKindConfig = this.mappings.span_kind ?? {};
-    const sources: string[] = spanKindConfig.sources ?? [];
     const valuesMap: Record<string, string> = spanKindConfig.values ?? {};
-    const priority: string = spanKindConfig.priority ?? 'openinference';
+    const spanKindValue = resolveExplicitSpanKind(attributes);
 
-    let spanKindValue: string | undefined;
-
-    if (priority === 'openinference') {
-      if ('openinference.span.kind' in attributes) {
-        spanKindValue = attributes['openinference.span.kind'];
-      }
-    } else {
-      for (const source of sources) {
-        if (source in attributes) {
-          spanKindValue = attributes[source];
-          break;
-        }
-      }
-    }
-
-    // Honor a kind already set directly on the neatlogs namespace by a wrapper
-    // (e.g. wrapMastra/strands/openai set `neatlogs.span.kind` = 'AGENT'/'TOOL'/'LLM').
-    // Without this the value below gets clobbered to 'unknown' and re-inferred from
-    // the span name, which mis-classifies (e.g. 'mastra.agent.*' → vector_store).
-    if (!spanKindValue && 'neatlogs.span.kind' in attributes) {
-      spanKindValue = attributes['neatlogs.span.kind'];
-    }
-
-    if (spanKindValue && spanKindValue in valuesMap) {
-      return valuesMap[spanKindValue];
+    if (spanKindValue) {
+      const mapped = valuesMap[spanKindValue] ?? valuesMap[spanKindValue.toUpperCase()];
+      if (mapped) return mapped;
     }
     // A pre-set neatlogs kind may already be the normalized lowercase form.
     if (spanKindValue && Object.values(valuesMap).includes(spanKindValue)) {

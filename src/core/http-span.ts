@@ -1,5 +1,6 @@
 import { SpanKind, type Attributes } from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import { resolveExplicitSpanKind } from '../span-kinds/mapping.js';
 
 const HTTP_SCOPE_PREFIXES = [
   '@opentelemetry/instrumentation-http',
@@ -38,15 +39,9 @@ export function isHttpSpan(
   span: ReadableSpan,
   attributes: Attributes = span.attributes ?? {},
 ): boolean {
-  const neatlogsKind = String(attributes['neatlogs.span.kind'] ?? '').trim().toUpperCase();
-  const openInferenceKind = String(attributes['openinference.span.kind'] ?? '')
-    .trim()
-    .toUpperCase();
-
-  if (neatlogsKind === 'HTTP') return true;
-  if (SEMANTIC_AI_KINDS.has(neatlogsKind)) return false;
-  if (openInferenceKind === 'HTTP') return true;
-  if (SEMANTIC_AI_KINDS.has(openInferenceKind)) return false;
+  const resolvedKind = resolveExplicitSpanKind(attributes).toUpperCase();
+  if (resolvedKind === 'HTTP') return true;
+  if (SEMANTIC_AI_KINDS.has(resolvedKind)) return false;
 
   const scopeName = span.instrumentationLibrary.name ?? '';
   if (HTTP_SCOPE_PREFIXES.some((prefix) => scopeName.startsWith(prefix))) return true;
