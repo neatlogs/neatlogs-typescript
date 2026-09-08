@@ -558,12 +558,21 @@ import * as ai from 'ai';
 import { openai } from '@ai-sdk/openai';
 
 await init({ apiKey: process.env.NEATLOGS_API_KEY });
-const { generateText } = wrapAISDK(ai);
+const { generateText, ToolLoopAgent } = wrapAISDK(ai);
 
 const { text } = await generateText({
   model: openai('gpt-4o-mini'),
   prompt: 'What is TypeScript?',
 });
+
+// AI SDK v6 agents are supported too. The wrapper injects telemetry into the
+// constructor settings, including calls returned from a custom prepareCall.
+const agent = new ToolLoopAgent({
+  id: 'support-agent',
+  model: openai('gpt-4o-mini'),
+  experimental_telemetry: { functionId: 'support-agent' },
+});
+await agent.generate({ prompt: 'Help me debug my order' });
 
 await shutdown();
 ```

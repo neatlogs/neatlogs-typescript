@@ -8,18 +8,30 @@
  * Usage:
  *   import { wrapAISDK } from 'neatlogs';
  *   import * as ai from 'ai';
- *   const { streamText, generateText } = wrapAISDK(ai);
+ *   const { streamText, generateText, ToolLoopAgent } = wrapAISDK(ai);
  */
 
-import { SpanStatusCode, type Span, type Tracer } from '@opentelemetry/api';
-import { getNeatlogsTracer, getNeatlogsParentContext, getRoutingNeatlogsTracer, withNeatlogsSpan } from './core/provider.js';
+import {
+  SpanStatusCode,
+  type AttributeValue,
+  type Span,
+  type Tracer,
+} from '@opentelemetry/api';
+import {
+  getNeatlogsTracer,
+  getNeatlogsParentContext,
+  getRoutingNeatlogsTracer,
+  withNeatlogsSpan,
+} from './core/provider.js';
 
 const TRACER_NAME = 'neatlogs.ai-sdk';
 
 // -- Telemetry config --------------------------------------------------------
 
 export interface CreateAITelemetryOptions {
-  metadata?: Record<string, unknown>;
+  /** Identifier used by the AI SDK to group telemetry for this operation. */
+  functionId?: string;
+  metadata?: Record<string, AttributeValue>;
 }
 
 export interface AITelemetryConfig {
@@ -27,7 +39,8 @@ export interface AITelemetryConfig {
   recordInputs: true;
   recordOutputs: true;
   tracer: Tracer;
-  metadata: Record<string, unknown>;
+  functionId?: string;
+  metadata: Record<string, AttributeValue>;
 }
 
 export function createAITelemetry(
@@ -43,6 +56,7 @@ export function createAITelemetry(
     // global context AND push them onto it (so a co-tenant's next span inherits
     // ours). The facade routes both through the private Neatlogs context.
     tracer: getRoutingNeatlogsTracer(TRACER_NAME),
+    ...(opts.functionId !== undefined ? { functionId: opts.functionId } : {}),
     metadata: { ...userMeta, neatlogsWrapped: true },
   };
 }
@@ -126,7 +140,14 @@ function setStreamOutputValue(span: Span, event: unknown): void {
 
 // -- Wrapping ----------------------------------------------------------------
 
-type WrappedFunctionName = 'generateText' | 'streamText' | 'generateObject' | 'streamObject' | 'embed' | 'embedMany' | 'rerank';
+type WrappedFunctionName =
+  | 'generateText'
+  | 'streamText'
+  | 'generateObject'
+  | 'streamObject'
+  | 'embed'
+  | 'embedMany'
+  | 'rerank';
 
 const WRAPPED_FUNCTIONS: readonly WrappedFunctionName[] = [
   'generateText',
@@ -138,15 +159,29 @@ const WRAPPED_FUNCTIONS: readonly WrappedFunctionName[] = [
   'rerank',
 ] as const;
 
+type WrappedAgentConstructorName = 'ToolLoopAgent' | 'Experimental_Agent';
+
+const WRAPPED_AGENT_CONSTRUCTORS: readonly WrappedAgentConstructorName[] = [
+  'ToolLoopAgent',
+  'Experimental_Agent',
+] as const;
+
+type AgentConstructor = new (...args: any[]) => unknown;
+
+const wrappedExports = new WeakSet<Function>();
+const wrapperByOriginal = new WeakMap<Function, Function>();
+
 /**
- * Wrap the `ai` module namespace so that every `generateText` / `streamText` /
- * `generateObject` / `streamObject` call:
+ * Wrap the `ai` module namespace so that every supported generation, embedding,
+ * and reranking call:
  *
  *   1. Opens a parent OTel span on the active TracerProvider.
  *   2. Forces `experimental_telemetry: { isEnabled: true }`, merging user metadata.
  *   3. Records input/output on the parent span and propagates errors.
  *
- * Other exports (types, helpers) pass through unchanged.
+ * AI SDK v6's `ToolLoopAgent` (and its `Experimental_Agent` alias) is wrapped at
+ * construction time so its internal model and tool calls receive the same native
+ * telemetry configuration. Other exports pass through unchanged.
  */
 export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
   const wrapped: Record<string, unknown> = { ...aiModule };
@@ -155,21 +190,93 @@ export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
     const original = aiModule[name];
     if (typeof original !== 'function') continue;
 
-    if (name === 'streamText' || name === 'streamObject') {
-      wrapped[name] = createStreamWrapper(name, original as (opts: any) => unknown);
-    } else {
-      wrapped[name] = createAsyncWrapper(name, original as (opts: any) => Promise<unknown>);
+    const existing = getExistingWrapper(original);
+    if (existing) {
+      wrapped[name] = existing;
+      continue;
     }
+
+    if (name === 'streamText' || name === 'streamObject') {
+      wrapped[name] = cacheWrapper(
+        original,
+        createStreamWrapper(name, original as (opts: any) => unknown),
+      );
+    } else {
+      wrapped[name] = cacheWrapper(
+        original,
+        createAsyncWrapper(name, original as (opts: any) => Promise<unknown>),
+      );
+    }
+  }
+
+  for (const name of WRAPPED_AGENT_CONSTRUCTORS) {
+    const original = aiModule[name];
+    if (typeof original !== 'function') continue;
+
+    const existing = getExistingWrapper(original);
+    wrapped[name] =
+      existing ??
+      cacheWrapper(
+        original,
+        createAgentConstructorWrapper(original as AgentConstructor),
+      );
   }
 
   return wrapped as T;
 }
 
-function rootSpanKind(name: WrappedFunctionName): string {
-  if (name === 'embed' || name === 'embedMany' || name === 'rerank') return 'CHAIN';
-  return 'WORKFLOW';
+function getExistingWrapper(original: Function): Function | undefined {
+  if (wrappedExports.has(original)) return original;
+  return wrapperByOriginal.get(original);
 }
 
+function cacheWrapper(original: Function, wrapped: Function): Function {
+  wrapperByOriginal.set(original, wrapped);
+  wrappedExports.add(wrapped);
+  return wrapped;
+}
+
+function createAgentConstructorWrapper(
+  original: AgentConstructor,
+): AgentConstructor {
+  return new Proxy(original, {
+    construct(target, args, newTarget) {
+      if (
+        args.length === 0 ||
+        typeof args[0] !== 'object' ||
+        args[0] === null
+      ) {
+        return Reflect.construct(target, args, newTarget);
+      }
+
+      const settings = mergeAgentSettings(args[0]);
+      return Reflect.construct(target, [settings, ...args.slice(1)], newTarget);
+    },
+  });
+}
+
+function mergeAgentSettings(settings: any): any {
+  const merged = mergeTelemetry(settings);
+  const userPrepareCall = settings.prepareCall;
+  if (typeof userPrepareCall !== 'function') return merged;
+
+  return {
+    ...merged,
+    prepareCall: async function wrappedPrepareCall(
+      this: unknown,
+      ...args: any[]
+    ) {
+      const prepared = await Reflect.apply(userPrepareCall, this, args);
+      return prepared == null ? prepared : mergeTelemetry(prepared);
+    },
+  };
+}
+
+function rootSpanKind(name: WrappedFunctionName): string {
+  if (name === 'embed' || name === 'embedMany' || name === 'rerank')
+    return 'CHAIN';
+  return 'WORKFLOW';
+}
 
 function getParentContext() {
   // Our parent comes solely from the private span store; a
@@ -198,7 +305,8 @@ function createAsyncWrapper(
       span,
       async () => {
         try {
-          const isEmbedOrRerank = name === 'embed' || name === 'embedMany' || name === 'rerank';
+          const isEmbedOrRerank =
+            name === 'embed' || name === 'embedMany' || name === 'rerank';
           if (!isEmbedOrRerank) {
             setInputValue(span, opts);
           }
@@ -293,6 +401,7 @@ function createStreamWrapper(
 
 function mergeTelemetry(opts: any): any {
   const baseTelemetry: AITelemetryConfig = createAITelemetry({
+    functionId: opts?.experimental_telemetry?.functionId,
     metadata: opts?.experimental_telemetry?.metadata,
   });
   return {
@@ -303,7 +412,6 @@ function mergeTelemetry(opts: any): any {
     },
   };
 }
-
 
 function recordSpanError(span: Span, err: unknown): void {
   if (err instanceof Error) {
