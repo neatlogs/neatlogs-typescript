@@ -582,6 +582,24 @@ Laminar), the wrapper mirrors the AI SDK's native spans to both that tracer and
 Neatlogs. The caller-owned tracer remains the global context owner; Neatlogs
 keeps separate parent context and export state in its private provider.
 
+The same coexistence is available without the wrapper by passing the existing
+tracer to `createAITelemetry`:
+
+```typescript
+import { getTracer } from '@lmnr-ai/lmnr';
+import { streamText } from 'ai';
+import { createAITelemetry } from 'neatlogs/ai';
+
+await streamText({
+  model,
+  prompt,
+  experimental_telemetry: createAITelemetry({
+    tracer: getTracer(),
+    functionId: 'progress-narration',
+  }),
+});
+```
+
 ## Configuration
 
 ### Environment Variables
