@@ -14,7 +14,9 @@
 import {
   SpanStatusCode,
   type AttributeValue,
+  type Context,
   type Span,
+  type SpanOptions,
   type Tracer,
 } from '@opentelemetry/api';
 import {
@@ -267,7 +269,9 @@ function mergeAgentSettings(settings: any): any {
       ...args: any[]
     ) {
       const prepared = await Reflect.apply(userPrepareCall, this, args);
-      return prepared == null ? prepared : mergeTelemetry(prepared);
+      return prepared == null
+        ? prepared
+        : mergeTelemetry(prepared, settings.experimental_telemetry);
     },
   };
 }
@@ -399,16 +403,154 @@ function createStreamWrapper(
   };
 }
 
-function mergeTelemetry(opts: any): any {
+function createMirroredSpan(primary: Span, secondary: Span): Span {
+  const mirrored: Span = {
+    spanContext() {
+      // The caller-owned tracer remains the process-global context owner. Its
+      // context is therefore the one external instrumentation must observe.
+      return primary.spanContext();
+    },
+    setAttribute(key, value) {
+      primary.setAttribute(key, value);
+      secondary.setAttribute(key, value);
+      return mirrored;
+    },
+    setAttributes(attributes) {
+      primary.setAttributes(attributes);
+      secondary.setAttributes(attributes);
+      return mirrored;
+    },
+    addEvent(name, attributesOrStartTime, startTime) {
+      primary.addEvent(name, attributesOrStartTime, startTime);
+      secondary.addEvent(name, attributesOrStartTime, startTime);
+      return mirrored;
+    },
+    addLink(link) {
+      primary.addLink(link);
+      secondary.addLink(link);
+      return mirrored;
+    },
+    addLinks(links) {
+      primary.addLinks(links);
+      secondary.addLinks(links);
+      return mirrored;
+    },
+    setStatus(status) {
+      primary.setStatus(status);
+      secondary.setStatus(status);
+      return mirrored;
+    },
+    updateName(name) {
+      primary.updateName(name);
+      secondary.updateName(name);
+      return mirrored;
+    },
+    end(endTime) {
+      primary.end(endTime);
+      secondary.end(endTime);
+    },
+    isRecording() {
+      return primary.isRecording() || secondary.isRecording();
+    },
+    recordException(exception, time) {
+      primary.recordException(exception, time);
+      secondary.recordException(exception, time);
+    },
+  };
+  return mirrored;
+}
+
+/**
+ * Mirror one AI SDK telemetry stream to two isolated tracer pipelines.
+ *
+ * The caller-owned tracer is deliberately outermost so its normal global OTel
+ * activation and parentage stay unchanged. The Neatlogs routing tracer keeps
+ * its span active only in Neatlogs' private AsyncLocalStorage context.
+ */
+function createMirroredTracer(primary: Tracer, secondary: Tracer): Tracer {
+  return {
+    startSpan(name: string, options?: SpanOptions, context?: Context): Span {
+      const primarySpan = primary.startSpan(name, options, context);
+      const secondarySpan = secondary.startSpan(name, options);
+      return createMirroredSpan(primarySpan, secondarySpan);
+    },
+    startActiveSpan: (<F extends (span: Span) => unknown>(
+      name: string,
+      arg2?: SpanOptions | F,
+      arg3?: Context | F,
+      arg4?: F,
+    ): ReturnType<F> => {
+      let options: SpanOptions | undefined;
+      let context: Context | undefined;
+      let fn: F;
+
+      if (typeof arg2 === 'function') {
+        fn = arg2;
+      } else if (typeof arg3 === 'function') {
+        options = arg2;
+        fn = arg3;
+      } else {
+        options = arg2;
+        context = arg3 as Context;
+        fn = arg4!;
+      }
+
+      const runSecondary = (primarySpan: Span): ReturnType<F> => {
+        const onSecondarySpan = (secondarySpan: Span) =>
+          fn(createMirroredSpan(primarySpan, secondarySpan)) as ReturnType<F>;
+        return options === undefined
+          ? secondary.startActiveSpan(name, onSecondarySpan)
+          : secondary.startActiveSpan(name, options, onSecondarySpan);
+      };
+
+      if (context !== undefined) {
+        return primary.startActiveSpan(
+          name,
+          options ?? {},
+          context,
+          runSecondary,
+        ) as ReturnType<F>;
+      }
+      return options === undefined
+        ? (primary.startActiveSpan(name, runSecondary) as ReturnType<F>)
+        : (primary.startActiveSpan(name, options, runSecondary) as ReturnType<F>);
+    }) as Tracer['startActiveSpan'],
+  };
+}
+
+function mergeTelemetry(opts: any, fallbackTelemetry?: any): any {
+  const requestedTelemetry = {
+    ...fallbackTelemetry,
+    ...opts?.experimental_telemetry,
+    metadata: {
+      ...fallbackTelemetry?.metadata,
+      ...opts?.experimental_telemetry?.metadata,
+    },
+  };
   const baseTelemetry: AITelemetryConfig = createAITelemetry({
-    functionId: opts?.experimental_telemetry?.functionId,
-    metadata: opts?.experimental_telemetry?.metadata,
+    functionId: requestedTelemetry.functionId,
+    metadata: requestedTelemetry.metadata,
   });
+  const callerTracer = requestedTelemetry.tracer as Tracer | undefined;
+  const hasCallerTracer = callerTracer !== undefined;
+
   return {
     ...opts,
     experimental_telemetry: {
-      ...opts?.experimental_telemetry,
       ...baseTelemetry,
+      ...requestedTelemetry,
+      isEnabled: true,
+      recordInputs: requestedTelemetry.recordInputs ?? true,
+      recordOutputs: requestedTelemetry.recordOutputs ?? true,
+      tracer: hasCallerTracer
+        ? createMirroredTracer(callerTracer, baseTelemetry.tracer)
+        : baseTelemetry.tracer,
+      // Do not add Neatlogs-only marker metadata to a caller-owned telemetry
+      // pipeline such as Laminar. Both providers receive the same AI SDK span
+      // data, while their providers, parent contexts, and exporters stay separate.
+      metadata: hasCallerTracer
+        ? requestedTelemetry.metadata
+        : baseTelemetry.metadata,
     },
   };
 }

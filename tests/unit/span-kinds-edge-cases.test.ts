@@ -9,8 +9,8 @@ import {
 } from '../../src/span-kinds/mapping.js';
 
 describe('VALID_SPAN_KINDS', () => {
-  it('should contain all 8 valid span kinds', () => {
-    expect(VALID_SPAN_KINDS.size).toBe(8);
+  it('should contain all 9 valid span kinds', () => {
+    expect(VALID_SPAN_KINDS.size).toBe(9);
     expect(VALID_SPAN_KINDS.has('WORKFLOW')).toBe(true);
     expect(VALID_SPAN_KINDS.has('AGENT')).toBe(true);
     expect(VALID_SPAN_KINDS.has('CHAIN')).toBe(true);
@@ -19,6 +19,7 @@ describe('VALID_SPAN_KINDS', () => {
     expect(VALID_SPAN_KINDS.has('EMBEDDING')).toBe(true);
     expect(VALID_SPAN_KINDS.has('MCP_TOOL')).toBe(true);
     expect(VALID_SPAN_KINDS.has('GUARDRAIL')).toBe(true);
+    expect(VALID_SPAN_KINDS.has('EVALUATOR')).toBe(true);
   });
 
   it('should not contain extended kinds', () => {

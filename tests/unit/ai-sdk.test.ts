@@ -1,7 +1,59 @@
 import { describe, it, expect } from 'vitest';
 import * as ai from 'ai';
 import type { TelemetrySettings } from 'ai';
+import type { Span, Tracer } from '@opentelemetry/api';
 import { wrapAISDK, createAITelemetry } from '../../src/ai-sdk.js';
+import type { TraceOptions } from '../../src/types.js';
+
+function createRecordingTracer() {
+  const calls: string[] = [];
+  const attributes: Record<string, unknown> = {};
+  const span: Span = {
+    spanContext: () => ({ traceId: '1'.repeat(32), spanId: '2'.repeat(16), traceFlags: 1 }),
+    setAttribute(key, value) {
+      attributes[key] = value;
+      return this;
+    },
+    setAttributes(values) {
+      Object.assign(attributes, values);
+      return this;
+    },
+    addEvent() {
+      return this;
+    },
+    addLink() {
+      return this;
+    },
+    addLinks() {
+      return this;
+    },
+    setStatus() {
+      return this;
+    },
+    updateName() {
+      return this;
+    },
+    end() {
+      calls.push('end');
+    },
+    isRecording: () => true,
+    recordException() {},
+  };
+  const tracer: Tracer = {
+    startSpan(name) {
+      calls.push(name);
+      return span;
+    },
+    startActiveSpan(name, arg2?: unknown, arg3?: unknown, arg4?: unknown) {
+      calls.push(name);
+      const fn = [arg2, arg3, arg4].find((arg) => typeof arg === 'function') as (
+        activeSpan: Span,
+      ) => unknown;
+      return fn(span);
+    },
+  } as Tracer;
+  return { tracer, calls, attributes };
+}
 
 describe('wrapAISDK', () => {
   it('wraps known AI SDK functions and passes other exports through unchanged', () => {
@@ -65,6 +117,45 @@ describe('wrapAISDK', () => {
     expect(cfg.metadata.neatlogsWrapped).toBe(true);
   });
 
+  it('mirrors native AI SDK spans to a caller-owned tracer without changing its settings', async () => {
+    const caller = createRecordingTracer();
+    let receivedTelemetry: any;
+    const aiModule = {
+      generateText: async (opts: any) => {
+        receivedTelemetry = opts.experimental_telemetry;
+        return opts.experimental_telemetry.tracer.startActiveSpan(
+          'ai.generateText.doGenerate',
+          { attributes: { 'ai.model.id': 'test-model' } },
+          async (span: Span) => {
+            span.setAttribute('ai.usage.promptTokens', 12);
+            span.end();
+            return { text: 'mirrored', finishReason: 'stop' };
+          },
+        );
+      },
+    };
+
+    const wrapped = wrapAISDK(aiModule);
+    const result = await (wrapped.generateText as any)({
+      prompt: 'hi',
+      experimental_telemetry: {
+        isEnabled: true,
+        recordInputs: false,
+        tracer: caller.tracer,
+        functionId: 'laminar-search-agent',
+        metadata: { owner: 'laminar' },
+      },
+    });
+
+    expect(result).toEqual({ text: 'mirrored', finishReason: 'stop' });
+    expect(caller.calls).toEqual(['ai.generateText.doGenerate', 'end']);
+    expect(caller.attributes['ai.usage.promptTokens']).toBe(12);
+    expect(receivedTelemetry.tracer).not.toBe(caller.tracer);
+    expect(receivedTelemetry.recordInputs).toBe(false);
+    expect(receivedTelemetry.functionId).toBe('laminar-search-agent');
+    expect(receivedTelemetry.metadata).toEqual({ owner: 'laminar' });
+  });
+
   it('wraps ToolLoopAgent and its alias with constructor telemetry', async () => {
     class FakeToolLoopAgent {
       constructor(public readonly settings: any) {}
@@ -109,6 +200,43 @@ describe('wrapAISDK', () => {
       functionId: 'prepared-search',
       metadata: { phase: 'prepared', neatlogsWrapped: true },
     });
+  });
+
+  it('retains constructor telemetry when prepareCall does not return telemetry', async () => {
+    const caller = createRecordingTracer();
+    class FakeToolLoopAgent {
+      constructor(public readonly settings: any) {}
+    }
+    const wrapped = wrapAISDK({ ToolLoopAgent: FakeToolLoopAgent });
+    const agent = new wrapped.ToolLoopAgent({
+      experimental_telemetry: {
+        isEnabled: true,
+        tracer: caller.tracer,
+        functionId: 'zest-search-agent',
+        metadata: { owner: 'laminar' },
+      },
+      prepareCall: () => ({ temperature: 0 }),
+    });
+
+    const prepared = await agent.settings.prepareCall();
+    await prepared.experimental_telemetry.tracer.startActiveSpan(
+      'ai.generateText.doGenerate',
+      (span: Span) => {
+        span.end();
+      },
+    );
+
+    expect(caller.calls).toEqual(['ai.generateText.doGenerate', 'end']);
+    expect(prepared.experimental_telemetry.functionId).toBe('zest-search-agent');
+    expect(prepared.experimental_telemetry.metadata).toEqual({ owner: 'laminar' });
+  });
+
+  it('types custom rerankers as trace-only span kinds', () => {
+    const options: TraceOptions = {
+      name: 'weighted_rrf',
+      kind: 'RERANKER',
+    };
+    expect(options.kind).toBe('RERANKER');
   });
 
   it('wraps the installed AI SDK v6 ToolLoopAgent without breaking its class contract', () => {

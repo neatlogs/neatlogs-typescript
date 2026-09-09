@@ -16,10 +16,11 @@ describe('span-kinds', () => {
       expect(VALID_SPAN_KINDS.has('EMBEDDING')).toBe(true);
       expect(VALID_SPAN_KINDS.has('MCP_TOOL')).toBe(true);
       expect(VALID_SPAN_KINDS.has('GUARDRAIL')).toBe(true);
+      expect(VALID_SPAN_KINDS.has('EVALUATOR')).toBe(true);
     });
 
-    it('should have exactly 8 kinds', () => {
-      expect(VALID_SPAN_KINDS.size).toBe(8);
+    it('should have exactly 9 kinds', () => {
+      expect(VALID_SPAN_KINDS.size).toBe(9);
     });
   });
 

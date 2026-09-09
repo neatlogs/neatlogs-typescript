@@ -143,6 +143,7 @@ export type {
   InitOptions,
   SpanOptions,
   TraceOptions,
+  TraceSpanKind,
   SpanKind,
   MaskFunction,
   MaskContext,
