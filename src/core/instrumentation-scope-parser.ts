@@ -27,10 +27,10 @@ const SCOPE_PATTERNS: Record<string, ScopeInfo> = {
   // Neatlogs custom instrumentations
   '@neatlogs/instrumentation-google-genai': { provider: 'google', framework: 'google_genai' },
   '@neatlogs/instrumentation-mastra': { framework: 'mastra' },
-  '@neatlogs/instrumentation-ai-sdk': { framework: 'ai_sdk' },
+  '@neatlogs/instrumentation-ai-sdk': { framework: 'vercel_ai_sdk' },
 
   // Vercel AI SDK native scope (the `ai` package emits this directly)
-  ai: { framework: 'ai_sdk' },
+  ai: { framework: 'vercel_ai_sdk' },
 
   // OpenInference instrumentations (npm @arizeai scope names)
   '@arizeai/openinference-instrumentation-openai': { provider: 'openai', framework: 'openai' },
@@ -156,7 +156,7 @@ export function parseInstrumentationScope(scopeName: string | null | undefined):
   } else if (scopeLower.includes('dspy')) {
     result.framework = 'dspy';
   } else if (scopeLower.includes('vercel-ai') || scopeLower.includes('ai-sdk')) {
-    result.framework = 'ai_sdk';
+    result.framework = 'vercel_ai_sdk';
   }
 
   // Check for provider indicators
