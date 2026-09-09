@@ -183,6 +183,14 @@ const INIT_OPTION_KEYS = new Set<keyof InitOptions>([
   "uploadAuthority",
 ]);
 
+/** Explicit `endpoint` wins, then NEATLOGS_ENDPOINT, then the prod default. */
+export function resolveInitEndpoint(endpoint: string | undefined): string {
+  const explicit = (endpoint ?? "").trim();
+  if (explicit) return explicit;
+  const fromEnv = (process.env.NEATLOGS_ENDPOINT ?? "").trim();
+  return fromEnv || DEFAULT_INGEST_ENDPOINT;
+}
+
 function validateInitOptions(options: InitOptions): void {
   const raw = options as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(raw, "instrumentations")) {
@@ -318,7 +326,7 @@ function initIdentity(options: InitOptions): InitIdentity {
     captureLogs: options.captureLogs ?? false,
     pii: options.pii ?? null,
     version: options.version ?? null,
-    endpoint: options.endpoint ?? DEFAULT_INGEST_ENDPOINT,
+    endpoint: resolveInitEndpoint(options.endpoint),
     batchSize: options.batchSize ?? 100,
     flushInterval: options.flushInterval ?? 5,
     piiEnabled: options.piiEnabled ?? null,
@@ -474,7 +482,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   const resolvedWorkflowName = _resolveWorkflowName(options.workflowName);
 
   // 6. Parse base URL from endpoint
-  const endpoint = options.endpoint ?? DEFAULT_INGEST_ENDPOINT;
+  const endpoint = resolveInitEndpoint(options.endpoint);
   const baseUrl = new URL(endpoint).origin;
   const uploadAuthority = disableExportResolved
     ? new DisabledUploadAuthority("export_disabled")
