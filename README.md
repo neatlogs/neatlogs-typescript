@@ -267,7 +267,7 @@ const result = await trace({
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `name` | `string` | — | **Required.** Name for the trace span. |
-| `kind` | `TraceSpanKind` | `'CHAIN'` | Span kind. `trace()` additionally accepts `LLM`, `RERANKER`, and `VECTOR_STORE`. |
+| `kind` | `TraceSpanKind` | `'CHAIN'` | Span kind. Base kinds include `GUARDRAIL` and `EVALUATOR`; `trace()` additionally accepts `LLM`, `RERANKER`, and `VECTOR_STORE`. |
 | `sessionId` | `string` | — | Session ID for grouping this root trace. |
 | `parentSessionId` | `string` | — | Immediate parent session ID. |
 | `sessionFeatureName` | `string` | — | Product feature that initiated the session request. |

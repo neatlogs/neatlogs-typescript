@@ -205,6 +205,23 @@ describe('UnifiedAttributeProcessor', () => {
     });
   });
 
+  describe('evaluator attributes', () => {
+    it('maps generic input and output to the evaluator namespace', () => {
+      const span = makeSpan({
+        attributes: {
+          'openinference.span.kind': 'EVALUATOR',
+          'input.value': '{"creatorId":"creator-1"}',
+          'output.value': '{"decision":"keep"}',
+        },
+      });
+
+      const result = processor.normalize(span);
+      expect(result['neatlogs.span.kind']).toBe('evaluator');
+      expect(result['neatlogs.evaluator.input']).toBe('{"creatorId":"creator-1"}');
+      expect(result['neatlogs.evaluator.output']).toBe('{"decision":"keep"}');
+    });
+  });
+
   describe('CrewAI token usage fallback', () => {
     it('should parse CrewAI token usage string', () => {
       const span = makeSpan({

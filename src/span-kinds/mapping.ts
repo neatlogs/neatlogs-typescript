@@ -16,6 +16,7 @@ export const VALID_SPAN_KINDS = new Set<SpanKind>([
   'EMBEDDING',
   'MCP_TOOL',
   'GUARDRAIL',
+  'EVALUATOR',
 ]);
 
 /** Extended span kinds that can appear in processed spans (from OpenInference). */
@@ -23,7 +24,6 @@ export const ALL_SPAN_KINDS = new Set<string>([
   ...VALID_SPAN_KINDS,
   'LLM',
   'RERANKER',
-  'EVALUATOR',
   'VECTOR_STORE',
 ]);
 

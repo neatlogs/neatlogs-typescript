@@ -810,6 +810,17 @@ describe("span()", () => {
     expect(result).toEqual({ allowed: true });
   });
 
+  it("should handle EVALUATOR kind", () => {
+    const fn = () => ({ score: 0.9 });
+    const wrapped = span({ kind: "EVALUATOR" }, fn);
+    const result = wrapped();
+    expect(result).toEqual({ score: 0.9 });
+    expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+      "openinference.span.kind",
+      "EVALUATOR",
+    );
+  });
+
   it("should set MCP_TOOL attributes", () => {
     const fn = () => "mcp result";
     const wrapped = span(

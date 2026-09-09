@@ -133,6 +133,19 @@ describe('trace()', () => {
     expect(span!.attributes['openinference.span.kind']).toBe('AGENT');
   });
 
+  it('captures evaluator input and output for canonical normalization', async () => {
+    await trace(
+      { name: 'creator-fit-evaluator', kind: 'EVALUATOR', input: { creatorId: 'creator-1' } },
+      async () => ({ decision: 'keep' }),
+    );
+
+    const span = exporter.getFinishedSpans().find((item) => item.name === 'creator-fit-evaluator');
+    expect(span).toBeDefined();
+    expect(span!.attributes['openinference.span.kind']).toBe('EVALUATOR');
+    expect(span!.attributes['input.value']).toBe('{"creatorId":"creator-1"}');
+    expect(span!.attributes['output.value']).toBe('{"decision":"keep"}');
+  });
+
   it('anchors a standalone TOOL and keeps trace output on the workflow root', async () => {
     await trace(
       { name: 'standalone-tool', kind: 'TOOL', sessionId: 'session-1' },
