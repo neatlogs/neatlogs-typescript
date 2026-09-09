@@ -117,6 +117,25 @@ describe('wrapAISDK', () => {
     expect(cfg.metadata.neatlogsWrapped).toBe(true);
   });
 
+  it('mirrors native spans when createAITelemetry receives an existing tracer', async () => {
+    const caller = createRecordingTracer();
+    const cfg = createAITelemetry({
+      tracer: caller.tracer,
+      functionId: 'zest-search-agent-progress',
+      metadata: { owner: 'laminar' },
+    });
+
+    await cfg.tracer.startActiveSpan('ai.streamText.doStream', (span) => {
+      span.setAttribute('ai.model.id', 'progress-model');
+      span.end();
+    });
+
+    expect(caller.calls).toEqual(['ai.streamText.doStream', 'end']);
+    expect(caller.attributes['ai.model.id']).toBe('progress-model');
+    expect(cfg.functionId).toBe('zest-search-agent-progress');
+    expect(cfg.metadata).toEqual({ owner: 'laminar' });
+  });
+
   it('mirrors native AI SDK spans to a caller-owned tracer without changing its settings', async () => {
     const caller = createRecordingTracer();
     let receivedTelemetry: any;

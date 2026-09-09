@@ -34,6 +34,11 @@ export interface CreateAITelemetryOptions {
   /** Identifier used by the AI SDK to group telemetry for this operation. */
   functionId?: string;
   metadata?: Record<string, AttributeValue>;
+  /**
+   * Existing telemetry tracer to preserve alongside Neatlogs (for example,
+   * Laminar). Native AI SDK spans are mirrored to both isolated pipelines.
+   */
+  tracer?: Tracer;
 }
 
 export interface AITelemetryConfig {
@@ -49,6 +54,8 @@ export function createAITelemetry(
   opts: CreateAITelemetryOptions = {},
 ): AITelemetryConfig {
   const userMeta = opts.metadata ?? {};
+  const neatlogsTracer = getRoutingNeatlogsTracer(TRACER_NAME);
+  const callerTracer = opts.tracer;
   return {
     isEnabled: true,
     recordInputs: true,
@@ -57,9 +64,13 @@ export function createAITelemetry(
     // internally, which would otherwise parent its native spans from the foreign
     // global context AND push them onto it (so a co-tenant's next span inherits
     // ours). The facade routes both through the private Neatlogs context.
-    tracer: getRoutingNeatlogsTracer(TRACER_NAME),
+    tracer: callerTracer
+      ? createMirroredTracer(callerTracer, neatlogsTracer)
+      : neatlogsTracer,
     ...(opts.functionId !== undefined ? { functionId: opts.functionId } : {}),
-    metadata: { ...userMeta, neatlogsWrapped: true },
+    // The marker is an implementation detail used only when Neatlogs owns the
+    // telemetry stream. Do not leak it into caller-owned providers.
+    metadata: callerTracer ? { ...userMeta } : { ...userMeta, neatlogsWrapped: true },
   };
 }
 
@@ -530,6 +541,7 @@ function mergeTelemetry(opts: any, fallbackTelemetry?: any): any {
   const baseTelemetry: AITelemetryConfig = createAITelemetry({
     functionId: requestedTelemetry.functionId,
     metadata: requestedTelemetry.metadata,
+    tracer: requestedTelemetry.tracer as Tracer | undefined,
   });
   const callerTracer = requestedTelemetry.tracer as Tracer | undefined;
   const hasCallerTracer = callerTracer !== undefined;
@@ -542,9 +554,7 @@ function mergeTelemetry(opts: any, fallbackTelemetry?: any): any {
       isEnabled: true,
       recordInputs: requestedTelemetry.recordInputs ?? true,
       recordOutputs: requestedTelemetry.recordOutputs ?? true,
-      tracer: hasCallerTracer
-        ? createMirroredTracer(callerTracer, baseTelemetry.tracer)
-        : baseTelemetry.tracer,
+      tracer: baseTelemetry.tracer,
       // Do not add Neatlogs-only marker metadata to a caller-owned telemetry
       // pipeline such as Laminar. Both providers receive the same AI SDK span
       // data, while their providers, parent contexts, and exporters stay separate.

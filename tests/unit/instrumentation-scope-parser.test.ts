@@ -298,30 +298,30 @@ describe('instrumentation-scope-parser', () => {
   describe('parseInstrumentationScope — Vercel AI SDK', () => {
     it('recognizes the bare "ai" scope name', () => {
       const info = parseInstrumentationScope('ai');
-      expect(info.framework).toBe('ai_sdk');
+      expect(info.framework).toBe('vercel_ai_sdk');
     });
 
     it('recognizes @neatlogs/instrumentation-ai-sdk scope', () => {
       const info = parseInstrumentationScope('@neatlogs/instrumentation-ai-sdk');
-      expect(info.framework).toBe('ai_sdk');
+      expect(info.framework).toBe('vercel_ai_sdk');
     });
 
     it('catches versioned ai scope via prefix match', () => {
       const info = parseInstrumentationScope('ai.v3');
-      expect(info.framework).toBe('ai_sdk');
+      expect(info.framework).toBe('vercel_ai_sdk');
     });
 
     it('catches "vercel-ai" via fuzzy fallback', () => {
       const info = parseInstrumentationScope('vercel-ai-tracer');
-      expect(info.framework).toBe('ai_sdk');
+      expect(info.framework).toBe('vercel_ai_sdk');
     });
   });
 
   describe('enrichWithScopeDetection — Vercel AI SDK', () => {
-    it('sets neatlogs.framework=ai_sdk for "ai" scope', () => {
+    it('sets neatlogs.framework=vercel_ai_sdk for "ai" scope', () => {
       const attrs: Record<string, any> = {};
       enrichWithScopeDetection(attrs, 'ai');
-      expect(attrs['neatlogs.framework']).toBe('ai_sdk');
+      expect(attrs['neatlogs.framework']).toBe('vercel_ai_sdk');
       expect(attrs['neatlogs.instrumentation.name']).toBe('ai');
     });
   });
