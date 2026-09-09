@@ -267,7 +267,7 @@ const result = await trace({
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `name` | `string` | — | **Required.** Name for the trace span. |
-| `kind` | `SpanKind` | `'CHAIN'` | Span kind. |
+| `kind` | `TraceSpanKind` | `'CHAIN'` | Span kind. `trace()` additionally accepts `LLM`, `RERANKER`, and `VECTOR_STORE`. |
 | `sessionId` | `string` | — | Session ID for grouping this root trace. |
 | `parentSessionId` | `string` | — | Immediate parent session ID. |
 | `sessionFeatureName` | `string` | — | Product feature that initiated the session request. |
@@ -576,6 +576,11 @@ await agent.generate({ prompt: 'Help me debug my order' });
 
 await shutdown();
 ```
+
+If a call already supplies an `experimental_telemetry.tracer` (for example,
+Laminar), the wrapper mirrors the AI SDK's native spans to both that tracer and
+Neatlogs. The caller-owned tracer remains the global context owner; Neatlogs
+keeps separate parent context and export state in its private provider.
 
 ## Configuration
 

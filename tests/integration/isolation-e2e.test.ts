@@ -24,6 +24,7 @@ import {
 
 import { getTracerProvider, init, shutdown } from '../../src/init.js';
 import { span, trace } from '../../src/index.js';
+import { wrapAISDK } from '../../src/ai-sdk.js';
 import { langchainHandler } from '../../src/langchain.js';
 
 let foreignProvider: NodeTracerProvider;
@@ -82,6 +83,60 @@ function assertNoCrossExport(neatlogsNames: string[]): void {
 }
 
 describe('End-to-end provider isolation', () => {
+  it('mirrors AI SDK spans without replacing or cross-parenting the caller tracer', async () => {
+    const callerTracer = otelTrace.getTracer('foreign-ai-sdk');
+    const wrapped = wrapAISDK({
+      generateText: async (options: any) =>
+        options.experimental_telemetry.tracer.startActiveSpan(
+          'ai.generateText.doGenerate',
+          async (llmSpan: any) => {
+            const result = await options.experimental_telemetry.tracer.startActiveSpan(
+              'ai.toolCall',
+              (toolSpan: any) => {
+                toolSpan.end();
+                return { text: 'done', finishReason: 'stop' };
+              },
+            );
+            llmSpan.end();
+            return result;
+          },
+        ),
+    });
+
+    await (wrapped.generateText as any)({
+      prompt: 'find creators',
+      experimental_telemetry: {
+        isEnabled: true,
+        tracer: callerTracer,
+        functionId: 'zest-search-agent',
+      },
+    });
+
+    const foreignSpans = foreignExporter.getFinishedSpans();
+    const neatlogsSpans = neatlogsExporter.getFinishedSpans();
+    const foreignLlm = findSpan(foreignSpans, 'ai.generateText.doGenerate');
+    const foreignTool = findSpan(foreignSpans, 'ai.toolCall');
+    const neatlogsRoot = findSpan(neatlogsSpans, 'ai.generateText');
+    const neatlogsLlm = findSpan(neatlogsSpans, 'ai.generateText.doGenerate');
+    const neatlogsTool = findSpan(neatlogsSpans, 'ai.toolCall');
+
+    expect(foreignSpans.map((item) => item.name).sort()).toEqual([
+      'ai.generateText.doGenerate',
+      'ai.toolCall',
+    ]);
+    expect(neatlogsSpans.map((item) => item.name).sort()).toEqual([
+      'ai.generateText',
+      'ai.generateText.doGenerate',
+      'ai.toolCall',
+    ]);
+    expect(foreignTool.parentSpanId).toBe(foreignLlm.spanContext().spanId);
+    expect(neatlogsLlm.parentSpanId).toBe(neatlogsRoot.spanContext().spanId);
+    expect(neatlogsTool.parentSpanId).toBe(neatlogsLlm.spanContext().spanId);
+    expect(neatlogsLlm.spanContext().traceId).not.toBe(
+      foreignLlm.spanContext().traceId,
+    );
+  });
+
   it('span() decorators stay isolated from an active foreign trace', async () => {
     const inner = span({ kind: 'TOOL', name: 'inner-tool' }, async (x: number) => x + 1);
     const outer = span({ kind: 'WORKFLOW', name: 'outer-flow' }, async () => {

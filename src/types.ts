@@ -13,6 +13,16 @@ export type SpanKind =
   | 'MCP_TOOL'
   | 'GUARDRAIL';
 
+/**
+ * Span kinds accepted by the lower-level trace() API.
+ *
+ * Unlike span(), trace() can represent provider-style operations that are not
+ * valid decorator kinds. Keep SpanKind narrow so span({ kind: ... }) retains
+ * its runtime/type-level validation while documented custom reranker, vector
+ * store, and LLM traces remain assertion-free.
+ */
+export type TraceSpanKind = SpanKind | 'LLM' | 'RERANKER' | 'VECTOR_STORE';
+
 /** Context supplied to an export-boundary mask callback. */
 export interface MaskContext {
   /** Aborted when the callback exceeds the SDK's masking deadline. */
@@ -200,7 +210,7 @@ export interface TraceOptions {
   /** Name for the trace span. */
   name: string;
   /** Span kind. Defaults to 'CHAIN'. */
-  kind?: SpanKind;
+  kind?: TraceSpanKind;
   /** Session this root trace belongs to. */
   sessionId?: string;
   /** Optional immediate parent session. */
