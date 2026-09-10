@@ -191,6 +191,25 @@ export function resolveInitEndpoint(endpoint: string | undefined): string {
   return fromEnv || DEFAULT_INGEST_ENDPOINT;
 }
 
+/**
+ * Parse a resolved ingest endpoint down to its base origin. The endpoint must
+ * be a bare base URL or an OTLP traces URL ending in /v1/traces. Any other
+ * path would be silently dropped by origin parsing and misroute telemetry, so
+ * it is rejected instead (same contract as the python SDK).
+ */
+export function resolveIngestBaseUrl(endpoint: string): string {
+  const parsed = new URL(endpoint.trim());
+  const path = parsed.pathname.replace(/\/+$/, "");
+  if (path !== "" && path !== "/v1/traces") {
+    throw new NeatlogsConfigurationError(
+      "INVALID_ENDPOINT",
+      "endpoint",
+      "endpoint must be a base URL or an OTLP traces URL ending in /v1/traces.",
+    );
+  }
+  return parsed.origin;
+}
+
 function validateInitOptions(options: InitOptions): void {
   const raw = options as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(raw, "instrumentations")) {
@@ -485,7 +504,7 @@ async function _performInit(options: InitOptions): Promise<void> {
 
   // 6. Parse base URL from endpoint
   const endpoint = resolveInitEndpoint(options.endpoint);
-  const baseUrl = new URL(endpoint).origin;
+  const baseUrl = resolveIngestBaseUrl(endpoint);
   const uploadAuthority = disableExportResolved
     ? new DisabledUploadAuthority("export_disabled")
     : resolveUploadAuthority(
