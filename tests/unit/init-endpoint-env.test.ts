@@ -18,22 +18,22 @@ describe('resolveInitEndpoint', () => {
   });
 
   it('explicit endpoint wins over the env var', () => {
-    process.env.NEATLOGS_ENDPOINT = 'https://dev-cloud.neatlogs.com';
-    expect(resolveInitEndpoint('https://staging.neatlogs.com')).toBe(
-      'https://staging.neatlogs.com',
+    process.env.NEATLOGS_ENDPOINT = 'https://env-endpoint.example.com';
+    expect(resolveInitEndpoint('https://explicit-endpoint.example.com')).toBe(
+      'https://explicit-endpoint.example.com',
     );
   });
 
   it('falls back to NEATLOGS_ENDPOINT when no explicit endpoint', () => {
-    process.env.NEATLOGS_ENDPOINT = 'https://dev-cloud.neatlogs.com';
-    expect(resolveInitEndpoint(undefined)).toBe('https://dev-cloud.neatlogs.com');
-    expect(resolveInitEndpoint('')).toBe('https://dev-cloud.neatlogs.com');
-    expect(resolveInitEndpoint('   ')).toBe('https://dev-cloud.neatlogs.com');
+    process.env.NEATLOGS_ENDPOINT = 'https://env-endpoint.example.com';
+    expect(resolveInitEndpoint(undefined)).toBe('https://env-endpoint.example.com');
+    expect(resolveInitEndpoint('')).toBe('https://env-endpoint.example.com');
+    expect(resolveInitEndpoint('   ')).toBe('https://env-endpoint.example.com');
   });
 
   it('trims the env var value', () => {
-    process.env.NEATLOGS_ENDPOINT = '  https://dev-cloud.neatlogs.com  ';
-    expect(resolveInitEndpoint(undefined)).toBe('https://dev-cloud.neatlogs.com');
+    process.env.NEATLOGS_ENDPOINT = '  https://env-endpoint.example.com  ';
+    expect(resolveInitEndpoint(undefined)).toBe('https://env-endpoint.example.com');
   });
 
   it('defaults to prod ingest when neither explicit nor env is set', () => {
