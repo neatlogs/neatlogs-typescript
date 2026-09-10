@@ -184,9 +184,15 @@ export class Neatlogs {
     this.apiKey = opts.apiKey;
     this.project = opts.project;
     // Use the origin of the configured endpoint (same convention as the Node SDK),
-    // so passing a full /v1/traces URL or a bare host both work.
+    // so passing a full /v1/traces URL or a bare host both work. A malformed
+    // endpoint throws instead of silently falling back to prod ingest, which
+    // would misroute telemetry with no signal to the host app.
     const endpoint = opts.endpoint || DEFAULT_INGEST_ENDPOINT;
-    this.baseUrl = safeOrigin(endpoint) || DEFAULT_INGEST_ENDPOINT;
+    const origin = safeOrigin(endpoint);
+    if (origin === null) {
+      throw new Error(`Neatlogs: invalid endpoint ${JSON.stringify(endpoint)}`);
+    }
+    this.baseUrl = origin;
     this.enabled = opts.enabled !== false;
     this.endUserId = opts.endUserId;
     this.endUserMetadata = opts.endUserMetadata;
