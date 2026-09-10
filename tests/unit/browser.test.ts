@@ -47,6 +47,15 @@ describe("Neatlogs browser SDK — construction", () => {
     await nl.trackAI({ name: "x" });
     expect(calls[0].url).toBe("http://localhost:4100/v1/trace");
   });
+
+  it("throws on a malformed endpoint instead of silently falling back to prod ingest", () => {
+    expect(() => new Neatlogs({ apiKey: "k", endpoint: "http://bad host:99999x" })).toThrow(
+      /invalid endpoint/,
+    );
+    expect(() => new Neatlogs({ apiKey: "k", endpoint: "not a url" })).toThrow(/invalid endpoint/);
+    // and nothing was sent anywhere
+    expect(calls).toHaveLength(0);
+  });
 });
 
 describe("Neatlogs browser SDK — trackAI", () => {
