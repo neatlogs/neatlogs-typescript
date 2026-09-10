@@ -184,11 +184,21 @@ describe('init() edge cases', () => {
     expect(resourceCall['user.id']).toBe('user-xyz');
   });
 
+  it('with a path endpoint init() throws instead of silently dropping the path', async () => {
+    await expect(
+      init({
+        apiKey: 'test-key',
+        disableExport: true,
+        endpoint: 'https://custom.neatlogs.com/api/data/v4/batch',
+      }),
+    ).rejects.toThrow('endpoint must be a base URL or an OTLP traces URL ending in /v1/traces.');
+  });
+
   it('with custom endpoint parses base URL correctly', async () => {
     await init({
       apiKey: 'test-key',
       disableExport: true,
-      endpoint: 'https://custom.neatlogs.com/api/data/v4/batch',
+      endpoint: 'https://custom.neatlogs.com',
     });
 
     const config = getSessionConfig();
@@ -223,7 +233,7 @@ describe('init() edge cases', () => {
       apiKey: 'test-key',
       disableExport: false,
       captureLogs: true,
-      endpoint: 'https://custom.neatlogs.com/api/data/v4/batch',
+      endpoint: 'https://custom.neatlogs.com',
       batchSize: 25,
       flushInterval: 3,
     });
