@@ -303,8 +303,15 @@ function stableValue(
   }
 }
 
+/** Explicit non-empty `apiKey` wins, then NEATLOGS_API_KEY. */
+export function resolveApiKey(apiKey: string | undefined): string {
+  const explicit = (apiKey ?? "").trim();
+  if (explicit) return explicit;
+  return (process.env.NEATLOGS_API_KEY ?? "").trim();
+}
+
 function initIdentity(options: InitOptions): InitIdentity {
-  const apiKey = (options.apiKey ?? process.env.NEATLOGS_API_KEY ?? "").trim();
+  const apiKey = resolveApiKey(options.apiKey);
   const apiKeyDigest = createHash("sha256").update(apiKey).digest("hex");
   const serialized = stableValue({
     apiKeyDigest,
@@ -444,12 +451,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   _deliveryDiagnostics = new DeliveryDiagnostics();
 
   // 2. Resolve API key
-  let resolvedKey: string;
-  if (options.apiKey && options.apiKey.trim()) {
-    resolvedKey = options.apiKey.trim();
-  } else {
-    resolvedKey = (process.env.NEATLOGS_API_KEY ?? "").trim();
-  }
+  let resolvedKey = resolveApiKey(options.apiKey);
 
   // 3. Resolve disableExport
   let disableExportResolved =
