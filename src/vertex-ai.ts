@@ -415,9 +415,7 @@ function setInputAttributes(span: Span, opts: any): void {
 
 function wrapStream(stream: any, span: Span): any {
   const accumulated: StreamAccumulator = {
-    textParts: [],
-    toolCalls: [],
-    finishReason: '',
+    candidates: new Map(),
     usage: null,
     mediaCount: 0,
     capturedBytes: 0,
@@ -471,10 +469,15 @@ function wrapStream(stream: any, span: Span): any {
   return wrapped;
 }
 
-interface StreamAccumulator {
+interface CandidateAccumulator {
   textParts: string[];
+  thinkingParts: string[];
   toolCalls: Array<{ id: string; name: string; arguments: string }>;
   finishReason: string;
+}
+
+interface StreamAccumulator {
+  candidates: Map<number, CandidateAccumulator>;
   usage: any;
   mediaCount: number;
   capturedBytes: number;
@@ -484,31 +487,47 @@ interface StreamAccumulator {
   incompleteReasons: Set<string>;
 }
 
+function candidateBucket(accumulated: StreamAccumulator, index: number): CandidateAccumulator {
+  let bucket = accumulated.candidates.get(index);
+  if (!bucket) {
+    bucket = { textParts: [], thinkingParts: [], toolCalls: [], finishReason: '' };
+    accumulated.candidates.set(index, bucket);
+  }
+  return bucket;
+}
+
 function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any): void {
-  for (const candidate of chunk?.candidates ?? []) {
+  const chunkCandidates = chunk?.candidates ?? [];
+  for (let position = 0; position < chunkCandidates.length; position++) {
+    const candidate = chunkCandidates[position];
+    const candidateIndex = typeof candidate?.index === 'number' ? candidate.index : position;
+    const bucket = candidateBucket(accumulated, candidateIndex);
     for (const part of candidate?.content?.parts ?? []) {
       if (part?.text && !part?.thought) {
         retainStreamString(accumulated, String(part.text), (value) => {
-          accumulated.textParts.push(value);
+          bucket.textParts.push(value);
         });
-      }
-      if (part?.functionCall) {
+      } else if (part?.thought && part?.text) {
+        retainStreamString(accumulated, String(part.text), (value) => {
+          bucket.thinkingParts.push(value);
+        });
+      } else if (part?.functionCall) {
         const captured = captureMediaWithIndex(
           span,
-          'neatlogs.llm.output_messages.0',
+          `neatlogs.llm.output_messages.${candidateIndex}`,
           part.functionCall.args,
           'output',
           accumulated.mediaCount,
         );
         accumulated.mediaCount += captured.count;
-        retainStreamToolCall(accumulated, {
+        retainStreamToolCall(accumulated, bucket, {
           ...part.functionCall,
           args: captured.value,
         });
       } else if (!part?.text) {
         const captured = captureMediaWithIndex(
           span,
-          'neatlogs.llm.output_messages.0',
+          `neatlogs.llm.output_messages.${candidateIndex}`,
           part,
           'output',
           accumulated.mediaCount,
@@ -517,26 +536,43 @@ function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any):
       }
     }
     if (candidate?.finishReason) {
-      accumulated.finishReason = candidate.finishReason;
+      bucket.finishReason = String(candidate.finishReason);
     }
   }
   if (chunk?.usageMetadata) accumulated.usage = chunk.usageMetadata;
 }
 
 function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void {
-  const fullText = accumulated.textParts.join('');
-  if (fullText) {
-    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', fullText);
-  }
-  if (accumulated.finishReason) {
-    span.setAttribute('neatlogs.llm.finish_reason', String(accumulated.finishReason));
-  }
-  for (let i = 0; i < accumulated.toolCalls.length; i++) {
-    const tool = accumulated.toolCalls[i];
-    if (tool.id) span.setAttribute(`neatlogs.llm.tool_calls.${i}.id`, tool.id);
-    span.setAttribute(`neatlogs.llm.tool_calls.${i}.name`, tool.name);
-    span.setAttribute(`neatlogs.llm.tool_calls.${i}.arguments`, tool.arguments);
+  const indexes = [...accumulated.candidates.keys()].sort((a, b) => a - b);
+  let flattenedToolIndex = 0;
+  for (const candidateIndex of indexes) {
+    const bucket = accumulated.candidates.get(candidateIndex)!;
+    const prefix = `neatlogs.llm.output_messages.${candidateIndex}`;
+    const fullText = bucket.textParts.join('');
+    const fullThinking = bucket.thinkingParts.join('');
+    if (fullText) {
+      span.setAttribute(`${prefix}.role`, 'assistant');
+      span.setAttribute(`${prefix}.content`, fullText);
+    }
+    if (fullThinking) {
+      span.setAttribute(`${prefix}.thinking`, fullThinking);
+    }
+    if (bucket.finishReason) {
+      span.setAttribute(`neatlogs.llm.choices.${candidateIndex}.finish_reason`, bucket.finishReason);
+      if (candidateIndex === indexes[0]) {
+        span.setAttribute('neatlogs.llm.finish_reason', bucket.finishReason);
+      }
+    }
+    for (let toolIndex = 0; toolIndex < bucket.toolCalls.length; toolIndex++) {
+      const tool = bucket.toolCalls[toolIndex];
+      const toolPrefix = `neatlogs.llm.tool_calls.${flattenedToolIndex}`;
+      if (tool.id) span.setAttribute(`${toolPrefix}.id`, tool.id);
+      span.setAttribute(`${toolPrefix}.name`, tool.name);
+      span.setAttribute(`${toolPrefix}.arguments`, tool.arguments);
+      span.setAttribute(`${toolPrefix}.choice_index`, candidateIndex);
+      span.setAttribute(`${toolPrefix}.tool_call_index`, toolIndex);
+      flattenedToolIndex++;
+    }
   }
   setUsage(span, accumulated.usage);
   applyStreamDiagnostics(span, accumulated);
@@ -550,35 +586,50 @@ function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void 
 // ---------------------------------------------------------------------------
 
 function finalizeResponse(span: Span, response: any): void {
-  const captured = captureMedia(
-    span,
-    'neatlogs.llm.output_messages.0',
-    response?.candidates,
-    'output',
-  );
-  const capturedCandidates = Array.isArray(captured) ? captured : [];
-  const textParts: string[] = [];
-  let toolIdx = 0;
+  const candidates = response?.candidates ?? [];
+  let flattenedToolIndex = 0;
+  let firstCandidateIndex: number | null = null;
 
-  for (const candidate of capturedCandidates ?? []) {
+  for (let position = 0; position < candidates.length; position++) {
+    const candidate = candidates[position];
+    const candidateIndex = typeof candidate?.index === 'number' ? candidate.index : position;
+    if (firstCandidateIndex === null) firstCandidateIndex = candidateIndex;
+    const prefix = `neatlogs.llm.output_messages.${candidateIndex}`;
+    captureMedia(span, prefix, [candidate], 'output');
+
+    const textParts: string[] = [];
+    const thinkingParts: string[] = [];
+    let toolIndex = 0;
     for (const part of candidate?.content?.parts ?? []) {
       if (part?.text && !part?.thought) {
         textParts.push(part.text);
       } else if (part?.thought && part?.text) {
-        span.setAttribute('neatlogs.llm.output_messages.0.thinking', part.text);
+        thinkingParts.push(part.text);
       } else if (part?.functionCall) {
         const fc = part.functionCall;
-        span.setAttribute(`neatlogs.llm.tool_calls.${toolIdx}.name`, fc?.name ?? '');
-        span.setAttribute(`neatlogs.llm.tool_calls.${toolIdx}.arguments`, safeStringify(fc?.args ?? {}));
-        toolIdx++;
+        const toolPrefix = `neatlogs.llm.tool_calls.${flattenedToolIndex}`;
+        if (fc?.id) span.setAttribute(`${toolPrefix}.id`, String(fc.id));
+        span.setAttribute(`${toolPrefix}.name`, fc?.name ?? '');
+        span.setAttribute(`${toolPrefix}.arguments`, safeStringify(fc?.args ?? {}));
+        span.setAttribute(`${toolPrefix}.choice_index`, candidateIndex);
+        span.setAttribute(`${toolPrefix}.tool_call_index`, toolIndex);
+        flattenedToolIndex++;
+        toolIndex++;
       }
     }
-    if (candidate?.finishReason) span.setAttribute('neatlogs.llm.finish_reason', String(candidate.finishReason));
-  }
-
-  if (textParts.length) {
-    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', textParts.join(''));
+    if (textParts.length) {
+      span.setAttribute(`${prefix}.role`, 'assistant');
+      span.setAttribute(`${prefix}.content`, textParts.join(''));
+    }
+    if (thinkingParts.length) {
+      span.setAttribute(`${prefix}.thinking`, thinkingParts.join(''));
+    }
+    if (candidate?.finishReason) {
+      span.setAttribute(`neatlogs.llm.choices.${candidateIndex}.finish_reason`, String(candidate.finishReason));
+      if (candidateIndex === firstCandidateIndex) {
+        span.setAttribute('neatlogs.llm.finish_reason', String(candidate.finishReason));
+      }
+    }
   }
 
   setUsage(span, response?.usageMetadata);
@@ -632,14 +683,18 @@ function retainStreamString(
   return true;
 }
 
-function retainStreamToolCall(accumulated: StreamAccumulator, functionCall: any): void {
+function retainStreamToolCall(
+  accumulated: StreamAccumulator,
+  bucket: CandidateAccumulator,
+  functionCall: any,
+): void {
   const id = String(functionCall?.id ?? '');
   const name = String(functionCall?.name ?? '');
   const args = safeStringify(functionCall?.args ?? {});
   const retained = retainStreamString(
     accumulated,
     `${id}\0${name}\0${args}`,
-    () => accumulated.toolCalls.push({ id, name, arguments: args }),
+    () => bucket.toolCalls.push({ id, name, arguments: args }),
   );
   if (!retained) markStreamIncomplete(accumulated, 'tool_call_omitted');
 }
