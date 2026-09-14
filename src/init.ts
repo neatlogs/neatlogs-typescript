@@ -32,6 +32,7 @@ import {
   NeatlogsSpanProcessor,
 } from "./core/span-processor.js";
 import { addVerificationMarkerResourceAttribute } from "./core/resource.js";
+import { spanLimitsForCaptureEverything } from "./constants.js";
 import { getRegisteredClients } from "./core/client-registry.js";
 import { FilteringExporter } from "./core/filtering-exporter.js";
 import { capturePreparedSpans, clearDoctorCapture } from "./core/doctor-capture.js";
@@ -577,7 +578,7 @@ async function _performInit(options: InitOptions): Promise<void> {
     options.tracerProvider ??
     new NodeTracerProvider({
       resource,
-      spanLimits: { attributeCountLimit: 10_000 },
+      spanLimits: spanLimitsForCaptureEverything(),
       sampler: new ParentBasedSampler({
         root: new TraceIdRatioBasedSampler(sampleRate),
       }),
