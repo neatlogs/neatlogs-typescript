@@ -61,6 +61,7 @@ interface V7TelemetryIntegration {
 }
 
 const NEATLOGS_V7_INTEGRATION = Symbol('neatlogs.ai-sdk.v7-integration');
+const AI_SDK_OTEL_MODULE = '@ai-sdk/otel';
 
 /**
  * AI SDK v7 moved OpenTelemetry support into `@ai-sdk/otel` and now invokes a
@@ -78,7 +79,10 @@ class LazyV7OpenTelemetryIntegration {
   ) {}
 
   private getDelegate(): Promise<Record<string, any>> {
-    return (this.delegatePromise ??= import('@ai-sdk/otel')
+    // Keep the v7-only adapter out of TypeScript's eager module resolution.
+    // npm skips this optional dependency on Node 18/20 because AI SDK v7 and
+    // @ai-sdk/otel require Node 22; v6 consumers must still be able to build.
+    return (this.delegatePromise ??= import(AI_SDK_OTEL_MODULE)
       .then(({ OpenTelemetry }) =>
         new OpenTelemetry({
           tracer: this.tracer,

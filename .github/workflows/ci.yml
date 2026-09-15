@@ -23,7 +23,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # AI SDK v7 and @ai-sdk/otel require Node 22. The packed-package
+          # compatibility job below remains on Node 20.
+          node-version: 22
           cache: npm
 
       - name: Install locked dependencies
