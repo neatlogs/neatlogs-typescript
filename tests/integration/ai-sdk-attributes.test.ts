@@ -66,6 +66,26 @@ describe('Vercel AI SDK attribute extraction', () => {
     expect(out['neatlogs.llm.input_messages.1.content']).toBe('Hello');
   });
 
+  it('retains background context between the system prompt and current user turn', () => {
+    const backgroundContext =
+      '<background_context>You are assisting Tanisha from Neatlogs.</background_context>';
+    const out = processSpan(
+      makeAiSdkSpan('ai.generateText.doGenerate', {
+        'ai.model.id': 'gpt-4o-mini',
+        'ai.prompt.messages': JSON.stringify([
+          { role: 'system', content: 'You are helpful.' },
+          { role: 'user', content: backgroundContext },
+          { role: 'user', content: 'Help me draft a campaign.' },
+        ]),
+      }),
+    );
+    expect(out['neatlogs.llm.input_messages.1.role']).toBe('user');
+    expect(out['neatlogs.llm.input_messages.1.content']).toBe(backgroundContext);
+    expect(out['neatlogs.llm.input_messages.2.content']).toBe(
+      'Help me draft a campaign.',
+    );
+  });
+
   it('captures ai.response.text as output message 0 with assistant role', () => {
     const out = processSpan(
       makeAiSdkSpan('ai.generateText.doGenerate', {
@@ -75,6 +95,37 @@ describe('Vercel AI SDK attribute extraction', () => {
     );
     expect(out['neatlogs.llm.output_messages.0.role']).toBe('assistant');
     expect(out['neatlogs.llm.output_messages.0.content']).toBe('Hi there!');
+  });
+
+  it('captures ai.response.reasoning as output message thinking', () => {
+    const out = processSpan(
+      makeAiSdkSpan('ai.streamText.doStream', {
+        'ai.model.id': 'claude-opus-4-5',
+        'ai.response.reasoning': 'The partner name in context is Tanisha.',
+      }),
+    );
+    expect(out['neatlogs.llm.output_messages.0.thinking']).toBe(
+      'The partner name in context is Tanisha.',
+    );
+    expect(out['neatlogs.llm.thinking']).toBe(
+      'The partner name in context is Tanisha.',
+    );
+    expect(out['neatlogs.llm.has_thinking']).toBe('true');
+  });
+
+  it('does not overwrite provider-native thinking with AI SDK reasoning', () => {
+    const out = processSpan(
+      makeAiSdkSpan('ai.streamText.doStream', {
+        'ai.model.id': 'claude-opus-4-5',
+        'ai.response.reasoning': 'AI SDK reasoning',
+        'neatlogs.llm.output_messages.0.thinking': 'Provider-native thinking',
+      }),
+    );
+    expect(out['neatlogs.llm.output_messages.0.thinking']).toBe(
+      'Provider-native thinking',
+    );
+    expect(out['neatlogs.llm.thinking']).toBe('Provider-native thinking');
+    expect(out['neatlogs.llm.has_thinking']).toBe('true');
   });
 
   it('captures ai.response.object (generateObject) as output message 0', () => {
@@ -120,6 +171,38 @@ describe('Vercel AI SDK attribute extraction', () => {
     expect(out['neatlogs.tool.name']).toBe('getWeather');
     expect(out['neatlogs.tool.input']).toContain('SF');
     expect(out['neatlogs.tool.output']).toContain('72');
+  });
+
+  it('preserves the complete nested input for interactive render tool calls', () => {
+    const renderInput = {
+      title: 'Inquiry to 57 creators',
+      surfaceId: 'zest-broadcast-inquiry',
+      components: [
+        {
+          id: 'root',
+          component: 'BroadcastMessage',
+          actions: [{ name: 'send_broadcast_inquiry', label: 'Send to all' }],
+        },
+      ],
+      initialDataModel: {
+        form: '<p>Full outreach body</p>',
+        creators: [{ id: 'creator-1', name: 'Ada' }],
+      },
+    };
+
+    const out = processSpan(
+      makeAiSdkSpan('ai.toolCall', {
+        'ai.toolCall.name': 'render_interactive_block',
+        'ai.toolCall.args': JSON.stringify(renderInput),
+        'ai.toolCall.result': JSON.stringify({ ok: true, artefactId: 'iblock_1' }),
+      }),
+    );
+
+    expect(JSON.parse(String(out['neatlogs.tool.input']))).toEqual(renderInput);
+    expect(JSON.parse(String(out['neatlogs.tool.output']))).toEqual({
+      ok: true,
+      artefactId: 'iblock_1',
+    });
   });
 
   it('maps ai.settings.* to gen_ai.request.*', () => {

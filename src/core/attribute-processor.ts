@@ -819,6 +819,28 @@ export class UnifiedAttributeProcessor {
         typeof obj === 'string' ? obj : JSON.stringify(obj);
     }
 
+    // Vercel AI SDK emits model reasoning separately from response text.
+    // Keep the indexed output-message form for lossless message parity, and
+    // also populate the canonical fields consumed by the trace UI.
+    const responseReasoning = attrs['ai.response.reasoning'];
+    if (
+      typeof responseReasoning === 'string' &&
+      responseReasoning.length > 0 &&
+      !('neatlogs.llm.output_messages.0.thinking' in attrs)
+    ) {
+      attrs['neatlogs.llm.output_messages.0.thinking'] = responseReasoning;
+    }
+
+    const thinking = attrs['neatlogs.llm.output_messages.0.thinking'];
+    if (typeof thinking === 'string' && thinking.length > 0) {
+      if (!('neatlogs.llm.thinking' in attrs)) {
+        attrs['neatlogs.llm.thinking'] = thinking;
+      }
+      if (!('neatlogs.llm.has_thinking' in attrs)) {
+        attrs['neatlogs.llm.has_thinking'] = 'true';
+      }
+    }
+
     // Response finish reason / id
     if ('ai.response.finishReason' in attrs && !('llm.response.finish_reason' in attrs)) {
       attrs['llm.response.finish_reason'] = attrs['ai.response.finishReason'];

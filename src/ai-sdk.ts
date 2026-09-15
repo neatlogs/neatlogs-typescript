@@ -61,6 +61,7 @@ interface V7TelemetryIntegration {
 }
 
 const NEATLOGS_V7_INTEGRATION = Symbol('neatlogs.ai-sdk.v7-integration');
+const AI_SDK_OTEL_MODULE = '@ai-sdk/otel';
 
 /**
  * AI SDK v7 moved OpenTelemetry support into `@ai-sdk/otel` and now invokes a
@@ -78,7 +79,10 @@ class LazyV7OpenTelemetryIntegration {
   ) {}
 
   private getDelegate(): Promise<Record<string, any>> {
-    return (this.delegatePromise ??= import('@ai-sdk/otel')
+    // Keep the v7-only adapter out of TypeScript's eager module resolution.
+    // npm skips this optional dependency on Node 18/20 because AI SDK v7 and
+    // @ai-sdk/otel require Node 22; v6 consumers must still be able to build.
+    return (this.delegatePromise ??= import(AI_SDK_OTEL_MODULE)
       .then(({ OpenTelemetry }) =>
         new OpenTelemetry({
           tracer: this.tracer,
@@ -282,6 +286,36 @@ const WRAPPED_FUNCTIONS: readonly WrappedFunctionName[] = [
 
 type WrappedAgentConstructorName = 'ToolLoopAgent' | 'Experimental_Agent';
 
+type CompatibleAITelemetryConfig = CreateAITelemetryOptions & {
+  isEnabled?: boolean;
+  recordInputs?: boolean;
+  recordOutputs?: boolean;
+  integrations?: V7TelemetryIntegration[];
+};
+
+type TelemetryField<Options, Key extends PropertyKey> = Key extends keyof Options
+  ? Options[Key]
+  : never;
+
+type CompatibleWrappedFunction<Fn> = Fn extends (...args: any[]) => any
+  ? Fn &
+      ((options: Omit<
+        Parameters<Fn>[0],
+        'experimental_telemetry' | 'telemetry'
+      > & {
+        experimental_telemetry?:
+          | TelemetryField<Parameters<Fn>[0], 'experimental_telemetry'>
+          | CompatibleAITelemetryConfig;
+        telemetry?:
+          | TelemetryField<Parameters<Fn>[0], 'telemetry'>
+          | CompatibleAITelemetryConfig;
+      }) => ReturnType<Fn>)
+  : Fn;
+
+export type WrappedAISDK<T extends Record<string, unknown>> = T & {
+  [Name in Extract<keyof T, WrappedFunctionName>]: CompatibleWrappedFunction<T[Name]>;
+};
+
 const WRAPPED_AGENT_CONSTRUCTORS: readonly WrappedAgentConstructorName[] = [
   'ToolLoopAgent',
   'Experimental_Agent',
@@ -304,7 +338,9 @@ const wrapperByOriginal = new WeakMap<Function, Function>();
  * construction time so its internal model and tool calls receive the same native
  * telemetry configuration. Other exports pass through unchanged.
  */
-export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
+export function wrapAISDK<T extends Record<string, unknown>>(
+  aiModule: T,
+): WrappedAISDK<T> {
   const wrapped: Record<string, unknown> = { ...aiModule };
   // Vitest and some bundlers expose module namespaces through proxies which
   // throw when a missing export is read. Check membership before accessing the
@@ -355,7 +391,7 @@ export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
       );
   }
 
-  return wrapped as T;
+  return wrapped as WrappedAISDK<T>;
 }
 
 function getExistingWrapper(original: Function): Function | undefined {
