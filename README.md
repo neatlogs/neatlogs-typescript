@@ -536,7 +536,7 @@ matrix; API-shaped rows deliberately make no blanket semver claim.
 | Google GenAI | `@google/genai` 1.34.x | `wrapGoogleGenAI(client)` / `wrapGoogleGenAIChat(chat)` | `neatlogs/google-genai` |
 | Vertex AI through `@google/genai` | `@google/genai` 1.34.x | `wrapVertexAI(client)` / `wrapVertexAIChat(chat)` | `neatlogs/vertex-ai` |
 | OpenRouter Agent | `@openrouter/agent` 0.7.x | `wrapOpenRouterAgent(client)` / `wrapCallModel(fn)` | `neatlogs/openrouter-agent` |
-| Vercel AI SDK | `ai` 6.x | `wrapAISDK(ai)` | `neatlogs/ai` |
+| Vercel AI SDK | `ai` 6.x and 7.x | `wrapAISDK(ai)` | `neatlogs/ai` |
 | Mastra | `@mastra/core` 1.32.x | `wrapMastra(entity)` / `wrapMastraRerank(fn)` | `neatlogs/mastra` |
 | Claude Agent SDK | documented `query()` API | `wrapClaudeAgentSDK(sdk)` | `neatlogs/claude-agent-sdk` |
 | LangChain / LangGraph | `@langchain/core` 0.3.x | `langchainHandler()` callback | `neatlogs` or `neatlogs/langchain` |
@@ -565,22 +565,25 @@ const { text } = await generateText({
   prompt: 'What is TypeScript?',
 });
 
-// AI SDK v6 agents are supported too. The wrapper injects telemetry into the
-// constructor settings, including calls returned from a custom prepareCall.
+// Agents are supported in both versions. The wrapper selects `telemetry` for
+// AI SDK v7 and `experimental_telemetry` for AI SDK v6 automatically.
 const agent = new ToolLoopAgent({
   id: 'support-agent',
   model: openai('gpt-4o-mini'),
-  experimental_telemetry: { functionId: 'support-agent' },
+  telemetry: { functionId: 'support-agent' }, // use experimental_telemetry on v6
 });
 await agent.generate({ prompt: 'Help me debug my order' });
 
 await shutdown();
 ```
 
-If a call already supplies an `experimental_telemetry.tracer` (for example,
-Laminar), the wrapper mirrors the AI SDK's native spans to both that tracer and
-Neatlogs. The caller-owned tracer remains the global context owner; Neatlogs
-keeps separate parent context and export state in its private provider.
+AI SDK v7 users must also install the telemetry adapter with
+`npm install @ai-sdk/otel`. AI SDK v6 users do not need that package.
+
+If a call supplies a tracer through `createAITelemetry` (for example, Laminar),
+the wrapper mirrors the AI SDK's native spans to both that tracer and Neatlogs.
+The caller-owned tracer remains the global context owner; Neatlogs keeps
+separate parent context and export state in its private provider.
 
 The same coexistence is available without the wrapper by passing the existing
 tracer to `createAITelemetry`:
@@ -593,7 +596,7 @@ import { createAITelemetry } from 'neatlogs/ai';
 await streamText({
   model,
   prompt,
-  experimental_telemetry: createAITelemetry({
+  telemetry: createAITelemetry({ // use experimental_telemetry on AI SDK v6
     tracer: getTracer(),
     functionId: 'progress-narration',
   }),
