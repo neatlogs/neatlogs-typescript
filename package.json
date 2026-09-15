@@ -1,6 +1,6 @@
 {
   "name": "neatlogs",
-  "version": "1.1.21",
+  "version": "1.1.22",
   "description": "AI agent debugging, collaboration, and trace observability. Built for teams using CrewAI, OpenAI, and more.",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -239,6 +239,7 @@
     "protobufjs": "^7.5.5"
   },
   "devDependencies": {
+    "@ai-sdk/otel": "^1.0.100",
     "@ai-sdk/azure": "^3.0.66",
     "@ai-sdk/openai": "^3.0.64",
     "@anthropic-ai/bedrock-sdk": "^0.29.1",
@@ -255,7 +256,8 @@
     "@mariozechner/pi-ai": "^0.73.1",
     "@openrouter/agent": "^0.7.1",
     "@types/node": "^20.0.0",
-    "ai": "^6.0.190",
+    "ai": "^7.0.100",
+    "ai-v6": "npm:ai@^6.0.283",
     "dotenv": "^17.4.2",
     "openai": "^6.34.0",
     "tsup": "^8.0.0",
@@ -266,11 +268,16 @@
     "zod-to-json-schema": "^3.24.6"
   },
   "peerDependencies": {
+    "@ai-sdk/otel": ">=1 <2",
     "@google/genai": ">=0.1.0",
     "@mastra/core": "^1.32.1",
-    "@mastra/observability": "^1.11.1"
+    "@mastra/observability": "^1.11.1",
+    "ai": ">=6 <8"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/otel": {
+      "optional": true
+    },
     "@google/genai": {
       "optional": true
     },
@@ -278,6 +285,9 @@
       "optional": true
     },
     "@mastra/observability": {
+      "optional": true
+    },
+    "ai": {
       "optional": true
     }
   }

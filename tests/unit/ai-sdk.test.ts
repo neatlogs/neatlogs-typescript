@@ -1,8 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import * as ai from 'ai';
-import type { TelemetrySettings } from 'ai';
+import * as aiV7 from 'ai';
+import * as aiV6 from 'ai-v6';
+import type { TelemetrySettings } from 'ai-v6';
+import { MockLanguageModelV4 } from 'ai/test';
 import type { Span, Tracer } from '@opentelemetry/api';
-import { wrapAISDK, createAITelemetry } from '../../src/ai-sdk.js';
+import {
+  wrapAISDK,
+  createAITelemetry,
+  type AITelemetryConfig,
+} from '../../src/ai-sdk.js';
 import type { TraceOptions } from '../../src/types.js';
 
 function createRecordingTracer() {
@@ -40,12 +46,19 @@ function createRecordingTracer() {
     recordException() {},
   };
   const tracer: Tracer = {
-    startSpan(name) {
+    startSpan(name, options) {
       calls.push(name);
+      Object.assign(attributes, options?.attributes);
       return span;
     },
     startActiveSpan(name, arg2?: unknown, arg3?: unknown, arg4?: unknown) {
       calls.push(name);
+      if (typeof arg2 === 'object' && arg2 !== null && 'attributes' in arg2) {
+        Object.assign(
+          attributes,
+          (arg2 as { attributes?: Record<string, unknown> }).attributes,
+        );
+      }
       const fn = [arg2, arg3, arg4].find((arg) => typeof arg === 'function') as (
         activeSpan: Span,
       ) => unknown;
@@ -102,6 +115,89 @@ describe('wrapAISDK', () => {
     expect(receivedOpts.experimental_telemetry.metadata.neatlogsWrapped).toBe(
       true,
     );
+  });
+
+  it('uses the stable telemetry option for AI SDK v7 without changing the wrapper API', async () => {
+    let receivedOpts: any;
+    const aiModule = {
+      registerTelemetry() {},
+      generateText: async (opts: any) => {
+        receivedOpts = opts;
+        return { text: 'hello from v7', finishReason: 'stop' };
+      },
+    };
+
+    const wrapped = wrapAISDK(aiModule);
+    const result = await (wrapped.generateText as any)({ prompt: 'hi' });
+
+    expect(result.text).toBe('hello from v7');
+    expect(receivedOpts.experimental_telemetry).toBeUndefined();
+    expect(receivedOpts.telemetry).toMatchObject({
+      isEnabled: true,
+      recordInputs: true,
+      recordOutputs: true,
+      metadata: { neatlogsWrapped: true },
+    });
+    expect(receivedOpts.telemetry.integrations).toHaveLength(1);
+  });
+
+  it('reuses telemetry created by createAITelemetry without nesting its tracer', async () => {
+    let receivedTelemetry: AITelemetryConfig | undefined;
+    const aiModule = {
+      registerTelemetry() {},
+      generateText: async (opts: { telemetry: AITelemetryConfig }) => {
+        receivedTelemetry = opts.telemetry;
+        return { text: 'hello from v7', finishReason: 'stop' };
+      },
+    };
+    const suppliedTelemetry = createAITelemetry({
+      functionId: 'preconfigured-v7',
+    });
+
+    const wrapped = wrapAISDK(aiModule);
+    await (wrapped.generateText as any)({
+      prompt: 'hi',
+      telemetry: suppliedTelemetry,
+    });
+
+    expect(receivedTelemetry?.tracer).toBe(suppliedTelemetry.tracer);
+    expect(receivedTelemetry?.integrations).toHaveLength(1);
+  });
+
+  it('records a real AI SDK v7 generateText call through @ai-sdk/otel', async () => {
+    const caller = createRecordingTracer();
+    const model = new MockLanguageModelV4({
+      provider: 'test-provider',
+      modelId: 'test-model-v7',
+      doGenerate: {
+        content: [{ type: 'text', text: 'hello from v7' }],
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage: {
+          inputTokens: { total: 4, noCache: 4, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 3, text: 3, reasoning: 0 },
+        },
+        warnings: [],
+        response: { id: 'response-v7', modelId: 'test-model-v7' },
+      },
+    });
+    const wrapped = wrapAISDK(aiV7);
+
+    const result = await wrapped.generateText({
+      model,
+      prompt: 'Say hello',
+      telemetry: createAITelemetry({
+        tracer: caller.tracer,
+        functionId: 'v7-smoke-test',
+        metadata: { sessionId: 'session-v7' },
+      }),
+    });
+
+    expect(result.text).toBe('hello from v7');
+    expect(caller.calls.some((call) => call.includes('test-model-v7'))).toBe(true);
+    expect(caller.attributes).toMatchObject({
+      'gen_ai.response.finish_reasons': ['stop'],
+    });
+    expect(caller.attributes.sessionId).toBe('session-v7');
   });
 
   it('preserves and merges caller-supplied telemetry metadata', () => {
@@ -259,7 +355,7 @@ describe('wrapAISDK', () => {
   });
 
   it('wraps the installed AI SDK v6 ToolLoopAgent without breaking its class contract', () => {
-    const wrapped = wrapAISDK(ai);
+    const wrapped = wrapAISDK(aiV6);
     const agent = new wrapped.ToolLoopAgent({
       model: {} as any,
       experimental_telemetry: {
@@ -268,7 +364,7 @@ describe('wrapAISDK', () => {
       },
     });
 
-    expect(agent).toBeInstanceOf(ai.ToolLoopAgent);
+    expect(agent).toBeInstanceOf(aiV6.ToolLoopAgent);
     expect(agent.version).toBe('agent-v1');
     expect((agent as any).settings.experimental_telemetry).toMatchObject({
       isEnabled: true,
@@ -277,6 +373,25 @@ describe('wrapAISDK', () => {
       functionId: 'real-agent',
       metadata: { test: true, neatlogsWrapped: true },
     });
+  });
+
+  it('wraps the installed AI SDK v7 ToolLoopAgent with stable telemetry', () => {
+    const wrapped = wrapAISDK(aiV7);
+    const agent = new wrapped.ToolLoopAgent({
+      model: {} as any,
+      telemetry: {
+        functionId: 'real-agent-v7',
+      },
+    });
+
+    expect(agent).toBeInstanceOf(aiV7.ToolLoopAgent);
+    expect((agent as any).settings.telemetry).toMatchObject({
+      isEnabled: true,
+      recordInputs: true,
+      recordOutputs: true,
+      functionId: 'real-agent-v7',
+    });
+    expect((agent as any).settings.telemetry.integrations).toHaveLength(1);
   });
 
   it('does not stack wrappers when wrapAISDK is called again', () => {

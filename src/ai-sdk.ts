@@ -2,8 +2,8 @@
  * Vercel AI SDK wrapper — inline implementation.
  *
  * Wraps `generateText`, `streamText`, `generateObject`, `streamObject` from
- * the `ai` package with OTel parent spans + forced telemetry. Static export,
- * no dynamic imports — bundler-friendly (works with Turbopack, webpack, esbuild).
+ * the `ai` package with OTel parent spans + forced telemetry. AI SDK v7's
+ * optional OpenTelemetry adapter is loaded only when its integration runs.
  *
  * Usage:
  *   import { wrapAISDK } from 'neatlogs';
@@ -48,6 +48,109 @@ export interface AITelemetryConfig {
   tracer: Tracer;
   functionId?: string;
   metadata: Record<string, AttributeValue>;
+  /** AI SDK v7 telemetry integrations. Ignored by AI SDK v6. */
+  integrations: V7TelemetryIntegration[];
+}
+
+/**
+ * Small structural surface shared by the AI SDK v6 and v7 telemetry integration types.
+ * Keeping this local avoids making either AI SDK version part of Neatlogs' public type identity.
+ */
+interface V7TelemetryIntegration {
+  onStart(event: unknown): Promise<void>;
+}
+
+const NEATLOGS_V7_INTEGRATION = Symbol('neatlogs.ai-sdk.v7-integration');
+
+/**
+ * AI SDK v7 moved OpenTelemetry support into `@ai-sdk/otel` and now invokes a
+ * telemetry integration instead of accepting a tracer directly. Keep the
+ * package optional for AI SDK v6 users and load it only if v7 calls one of the
+ * integration hooks.
+ */
+class LazyV7OpenTelemetryIntegration {
+  readonly [NEATLOGS_V7_INTEGRATION] = true;
+  private delegatePromise?: Promise<Record<string, any>>;
+
+  constructor(
+    private readonly tracer: Tracer,
+    private readonly metadata: Record<string, AttributeValue>,
+  ) {}
+
+  private getDelegate(): Promise<Record<string, any>> {
+    return (this.delegatePromise ??= import('@ai-sdk/otel')
+      .then(({ OpenTelemetry }) =>
+        new OpenTelemetry({
+          tracer: this.tracer,
+          enrichSpan: () => this.metadata,
+        }) as unknown as Record<string, any>,
+      )
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? `: ${error.message}` : '';
+        throw new Error(
+          'Vercel AI SDK v7 telemetry requires the optional @ai-sdk/otel peer dependency' +
+            detail,
+        );
+      }));
+  }
+
+  private async notify(method: string, event: unknown): Promise<void> {
+    const delegate = await this.getDelegate();
+    const fn = delegate[method];
+    if (typeof fn === 'function') {
+      await Reflect.apply(fn, delegate, [event]);
+    }
+  }
+
+  onStart(event: unknown) { return this.notify('onStart', event); }
+  onStepStart(event: unknown) { return this.notify('onStepStart', event); }
+  onLanguageModelCallStart(event: unknown) {
+    return this.notify('onLanguageModelCallStart', event);
+  }
+  onLanguageModelCallEnd(event: unknown) {
+    return this.notify('onLanguageModelCallEnd', event);
+  }
+  onToolExecutionStart(event: unknown) {
+    return this.notify('onToolExecutionStart', event);
+  }
+  onToolExecutionEnd(event: unknown) {
+    return this.notify('onToolExecutionEnd', event);
+  }
+  onStepEnd(event: unknown) { return this.notify('onStepEnd', event); }
+  onStepFinish(event: unknown) { return this.notify('onStepFinish', event); }
+  onObjectStepStart(event: unknown) {
+    return this.notify('onObjectStepStart', event);
+  }
+  onObjectStepEnd(event: unknown) {
+    return this.notify('onObjectStepEnd', event);
+  }
+  onEmbedStart(event: unknown) { return this.notify('onEmbedStart', event); }
+  onEmbedEnd(event: unknown) { return this.notify('onEmbedEnd', event); }
+  onRerankStart(event: unknown) { return this.notify('onRerankStart', event); }
+  onRerankEnd(event: unknown) { return this.notify('onRerankEnd', event); }
+  onEnd(event: unknown) { return this.notify('onEnd', event); }
+  onAbort(event: unknown) { return this.notify('onAbort', event); }
+  onError(event: unknown) { return this.notify('onError', event); }
+
+  async executeLanguageModelCall<T>(options: {
+    execute: () => PromiseLike<T>;
+  } & Record<string, unknown>): Promise<T> {
+    const delegate = await this.getDelegate();
+    const fn = delegate.executeLanguageModelCall;
+    return typeof fn === 'function'
+      ? Reflect.apply(fn, delegate, [options])
+      : options.execute();
+  }
+
+  async executeTool<T>(options: {
+    execute: () => PromiseLike<T>;
+  } & Record<string, unknown>): Promise<T> {
+    const delegate = await this.getDelegate();
+    const fn = delegate.executeTool;
+    return typeof fn === 'function'
+      ? Reflect.apply(fn, delegate, [options])
+      : options.execute();
+  }
 }
 
 export function createAITelemetry(
@@ -56,6 +159,12 @@ export function createAITelemetry(
   const userMeta = opts.metadata ?? {};
   const neatlogsTracer = getRoutingNeatlogsTracer(TRACER_NAME);
   const callerTracer = opts.tracer;
+  const tracer = callerTracer
+    ? createMirroredTracer(callerTracer, neatlogsTracer)
+    : neatlogsTracer;
+  const metadata = callerTracer
+    ? { ...userMeta }
+    : { ...userMeta, neatlogsWrapped: true };
   return {
     isEnabled: true,
     recordInputs: true,
@@ -64,13 +173,12 @@ export function createAITelemetry(
     // internally, which would otherwise parent its native spans from the foreign
     // global context AND push them onto it (so a co-tenant's next span inherits
     // ours). The facade routes both through the private Neatlogs context.
-    tracer: callerTracer
-      ? createMirroredTracer(callerTracer, neatlogsTracer)
-      : neatlogsTracer,
+    tracer,
     ...(opts.functionId !== undefined ? { functionId: opts.functionId } : {}),
     // The marker is an implementation detail used only when Neatlogs owns the
     // telemetry stream. Do not leak it into caller-owned providers.
-    metadata: callerTracer ? { ...userMeta } : { ...userMeta, neatlogsWrapped: true },
+    metadata,
+    integrations: [new LazyV7OpenTelemetryIntegration(tracer, metadata)],
   };
 }
 
@@ -110,7 +218,7 @@ function setOutputValue(span: Span, result: unknown): void {
         span.setAttribute('output.value', text);
       }
       if (r.finishReason) {
-        span.setAttribute('gen_ai.finish_reason', String(r.finishReason));
+        span.setAttribute('neatlogs.llm.finish_reason', String(r.finishReason));
       }
       return;
     }
@@ -121,7 +229,7 @@ function setOutputValue(span: Span, result: unknown): void {
         span.setAttribute('output.value', safeStringify(r.object));
       }
       if (r.finishReason) {
-        span.setAttribute('gen_ai.finish_reason', String(r.finishReason));
+        span.setAttribute('neatlogs.llm.finish_reason', String(r.finishReason));
       }
       return;
     }
@@ -147,7 +255,7 @@ function setStreamOutputValue(span: Span, event: unknown): void {
     if (stringified) span.setAttribute('output.value', stringified);
   }
   if (e.finishReason) {
-    span.setAttribute('gen_ai.finish_reason', String(e.finishReason));
+    span.setAttribute('neatlogs.llm.finish_reason', String(e.finishReason));
   }
 }
 
@@ -189,15 +297,23 @@ const wrapperByOriginal = new WeakMap<Function, Function>();
  * and reranking call:
  *
  *   1. Opens a parent OTel span on the active TracerProvider.
- *   2. Forces `experimental_telemetry: { isEnabled: true }`, merging user metadata.
+ *   2. Forces the version-appropriate telemetry option, merging user metadata.
  *   3. Records input/output on the parent span and propagates errors.
  *
- * AI SDK v6's `ToolLoopAgent` (and its `Experimental_Agent` alias) is wrapped at
+ * `ToolLoopAgent` (and AI SDK v6's `Experimental_Agent` alias) is wrapped at
  * construction time so its internal model and tool calls receive the same native
  * telemetry configuration. Other exports pass through unchanged.
  */
 export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
   const wrapped: Record<string, unknown> = { ...aiModule };
+  // Vitest and some bundlers expose module namespaces through proxies which
+  // throw when a missing export is read. Check membership before accessing the
+  // v7-only registerTelemetry export so v6 and partial module mocks stay safe.
+  const hasRegisterTelemetry =
+    'registerTelemetry' in aiModule &&
+    typeof Reflect.get(aiModule, 'registerTelemetry') === 'function';
+  const telemetryKey: TelemetryKey =
+    hasRegisterTelemetry ? 'telemetry' : 'experimental_telemetry';
 
   for (const name of WRAPPED_FUNCTIONS) {
     const original = aiModule[name];
@@ -212,12 +328,16 @@ export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
     if (name === 'streamText' || name === 'streamObject') {
       wrapped[name] = cacheWrapper(
         original,
-        createStreamWrapper(name, original as (opts: any) => unknown),
+        createStreamWrapper(name, original as (opts: any) => unknown, telemetryKey),
       );
     } else {
       wrapped[name] = cacheWrapper(
         original,
-        createAsyncWrapper(name, original as (opts: any) => Promise<unknown>),
+        createAsyncWrapper(
+          name,
+          original as (opts: any) => Promise<unknown>,
+          telemetryKey,
+        ),
       );
     }
   }
@@ -231,7 +351,7 @@ export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
       existing ??
       cacheWrapper(
         original,
-        createAgentConstructorWrapper(original as AgentConstructor),
+        createAgentConstructorWrapper(original as AgentConstructor, telemetryKey),
       );
   }
 
@@ -251,6 +371,7 @@ function cacheWrapper(original: Function, wrapped: Function): Function {
 
 function createAgentConstructorWrapper(
   original: AgentConstructor,
+  telemetryKey: TelemetryKey,
 ): AgentConstructor {
   return new Proxy(original, {
     construct(target, args, newTarget) {
@@ -262,14 +383,14 @@ function createAgentConstructorWrapper(
         return Reflect.construct(target, args, newTarget);
       }
 
-      const settings = mergeAgentSettings(args[0]);
+      const settings = mergeAgentSettings(args[0], telemetryKey);
       return Reflect.construct(target, [settings, ...args.slice(1)], newTarget);
     },
   });
 }
 
-function mergeAgentSettings(settings: any): any {
-  const merged = mergeTelemetry(settings);
+function mergeAgentSettings(settings: any, telemetryKey: TelemetryKey): any {
+  const merged = mergeTelemetry(settings, telemetryKey);
   const userPrepareCall = settings.prepareCall;
   if (typeof userPrepareCall !== 'function') return merged;
 
@@ -282,7 +403,11 @@ function mergeAgentSettings(settings: any): any {
       const prepared = await Reflect.apply(userPrepareCall, this, args);
       return prepared == null
         ? prepared
-        : mergeTelemetry(prepared, settings.experimental_telemetry);
+        : mergeTelemetry(
+            prepared,
+            telemetryKey,
+            settings.telemetry ?? settings.experimental_telemetry,
+          );
     },
   };
 }
@@ -302,6 +427,7 @@ function getParentContext() {
 function createAsyncWrapper(
   name: WrappedFunctionName,
   original: (opts: any) => Promise<unknown>,
+  telemetryKey: TelemetryKey,
 ): (opts: any) => Promise<unknown> {
   return async function wrappedAsyncFn(opts: any): Promise<unknown> {
     const tracer = getNeatlogsTracer(TRACER_NAME);
@@ -328,7 +454,7 @@ function createAsyncWrapper(
           if (name === 'rerank' && opts?.query) {
             span.setAttribute('ai.rerank.query', String(opts.query));
           }
-          const merged = mergeTelemetry(opts);
+          const merged = mergeTelemetry(opts, telemetryKey);
           const result = await original(merged);
           if (!isEmbedOrRerank) {
             setOutputValue(span, result);
@@ -355,6 +481,7 @@ function createAsyncWrapper(
 function createStreamWrapper(
   name: WrappedFunctionName,
   original: (opts: any) => unknown,
+  telemetryKey: TelemetryKey,
 ): (opts: any) => unknown {
   return function wrappedStreamFn(opts: any): unknown {
     const tracer = getNeatlogsTracer(TRACER_NAME);
@@ -378,7 +505,7 @@ function createStreamWrapper(
         };
         try {
           setInputValue(span, opts);
-          const merged = mergeTelemetry(opts);
+          const merged = mergeTelemetry(opts, telemetryKey);
           const userOnFinish = opts?.onFinish;
           const userOnError = opts?.onError;
           const wrappedOpts = {
@@ -529,26 +656,73 @@ function createMirroredTracer(primary: Tracer, secondary: Tracer): Tracer {
   };
 }
 
-function mergeTelemetry(opts: any, fallbackTelemetry?: any): any {
+type TelemetryKey = 'telemetry' | 'experimental_telemetry';
+
+function isNeatlogsV7Integration(
+  integration: unknown,
+): integration is LazyV7OpenTelemetryIntegration {
+  return (
+    typeof integration === 'object' &&
+    integration !== null &&
+    NEATLOGS_V7_INTEGRATION in integration
+  );
+}
+
+function mergeTelemetry(
+  opts: any,
+  telemetryKey: TelemetryKey,
+  fallbackTelemetry?: any,
+): any {
+  const legacyTelemetry = opts?.experimental_telemetry ?? {};
+  const v7Telemetry = opts?.telemetry ?? {};
+  const preferredTelemetry =
+    telemetryKey === 'telemetry'
+      ? { ...legacyTelemetry, ...v7Telemetry }
+      : { ...v7Telemetry, ...legacyTelemetry };
   const requestedTelemetry = {
     ...fallbackTelemetry,
-    ...opts?.experimental_telemetry,
+    ...preferredTelemetry,
     metadata: {
       ...fallbackTelemetry?.metadata,
-      ...opts?.experimental_telemetry?.metadata,
+      ...legacyTelemetry.metadata,
+      ...v7Telemetry.metadata,
     },
   };
-  const baseTelemetry: AITelemetryConfig = createAITelemetry({
-    functionId: requestedTelemetry.functionId,
-    metadata: requestedTelemetry.metadata,
-    tracer: requestedTelemetry.tracer as Tracer | undefined,
-  });
+  const existingNeatlogsIntegration = Array.isArray(
+    requestedTelemetry.integrations,
+  )
+    ? requestedTelemetry.integrations.find(isNeatlogsV7Integration)
+    : undefined;
+  const baseTelemetry: AITelemetryConfig = existingNeatlogsIntegration
+    ? {
+        isEnabled: true,
+        recordInputs: true,
+        recordOutputs: true,
+        tracer: requestedTelemetry.tracer as Tracer,
+        ...(requestedTelemetry.functionId !== undefined
+          ? { functionId: requestedTelemetry.functionId }
+          : {}),
+        metadata: requestedTelemetry.metadata,
+        integrations: [existingNeatlogsIntegration],
+      }
+    : createAITelemetry({
+        functionId: requestedTelemetry.functionId,
+        metadata: requestedTelemetry.metadata,
+        tracer: requestedTelemetry.tracer as Tracer | undefined,
+      });
   const callerTracer = requestedTelemetry.tracer as Tracer | undefined;
   const hasCallerTracer = callerTracer !== undefined;
+  const requestedIntegrations = Array.isArray(requestedTelemetry.integrations)
+    ? requestedTelemetry.integrations.filter(
+        (integration: unknown) => !isNeatlogsV7Integration(integration),
+      )
+    : [];
+  const { telemetry: _telemetry, experimental_telemetry: _legacy, ...rest } =
+    opts ?? {};
 
   return {
-    ...opts,
-    experimental_telemetry: {
+    ...rest,
+    [telemetryKey]: {
       ...baseTelemetry,
       ...requestedTelemetry,
       isEnabled: true,
@@ -561,6 +735,7 @@ function mergeTelemetry(opts: any, fallbackTelemetry?: any): any {
       metadata: hasCallerTracer
         ? requestedTelemetry.metadata
         : baseTelemetry.metadata,
+      integrations: [...baseTelemetry.integrations, ...requestedIntegrations],
     },
   };
 }
