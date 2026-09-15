@@ -15,9 +15,24 @@ import { getActiveClient } from './active-client.js';
 
 const logger = getLogger();
 
-// Module-level reference to the OTel Logger, set during init()
-let _otelLogger: any = null;
-let _debugMode = false;
+// Entry points are bundled independently, so init() and log() can execute from
+// different copies of this module in the same process. Keep the logger state on
+// globalThis so every Neatlogs bundle resolves the logger configured by init().
+const LOG_RUNTIME_STATE_KEY = Symbol.for('neatlogs.log_runtime_state');
+interface LogRuntimeState {
+  otelLogger: any | null;
+  debugMode: boolean;
+}
+type NeatlogsGlobal = typeof globalThis & {
+  [LOG_RUNTIME_STATE_KEY]?: LogRuntimeState;
+};
+const neatlogsGlobal = globalThis as NeatlogsGlobal;
+const logRuntimeState =
+  neatlogsGlobal[LOG_RUNTIME_STATE_KEY] ??
+  (neatlogsGlobal[LOG_RUNTIME_STATE_KEY] = {
+    otelLogger: null,
+    debugMode: false,
+  });
 const stdoutCaptureContext = new AsyncLocalStorage<boolean>();
 let stdoutCaptureDepth = 0;
 let originalConsoleLog: typeof console.log | null = null;
@@ -27,7 +42,7 @@ function resolveOtelLogger(): any | null {
   const client = getActiveClient();
   // An active Client owns the whole context. `null` means logging is disabled
   // for that Client; it must never fall through to the process-global project.
-  return client ? client.getLogger() : _otelLogger;
+  return client ? client.getLogger() : logRuntimeState.otelLogger;
 }
 
 /**
@@ -35,8 +50,8 @@ function resolveOtelLogger(): any | null {
  * @internal
  */
 export function _setOtelLogger(otelLogger: any, debug: boolean): void {
-  _otelLogger = otelLogger;
-  _debugMode = debug;
+  logRuntimeState.otelLogger = otelLogger;
+  logRuntimeState.debugMode = debug;
 }
 
 /**
@@ -63,7 +78,7 @@ export function log(
   }
 
   // Echo to console in debug mode
-  if (_debugMode) {
+  if (logRuntimeState.debugMode) {
     console.log(`[neatlogs:log] ${rendered}`);
   }
 

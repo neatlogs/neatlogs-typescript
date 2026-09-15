@@ -49,10 +49,16 @@ export interface AITelemetryConfig {
   functionId?: string;
   metadata: Record<string, AttributeValue>;
   /** AI SDK v7 telemetry integrations. Ignored by AI SDK v6. */
-  integrations: readonly V7TelemetryIntegration[];
+  integrations: V7TelemetryIntegration[];
 }
 
-type V7TelemetryIntegration = object;
+/**
+ * Small structural surface shared by the AI SDK v6 and v7 telemetry integration types.
+ * Keeping this local avoids making either AI SDK version part of Neatlogs' public type identity.
+ */
+interface V7TelemetryIntegration {
+  onStart(event: unknown): Promise<void>;
+}
 
 const NEATLOGS_V7_INTEGRATION = Symbol('neatlogs.ai-sdk.v7-integration');
 
@@ -300,10 +306,14 @@ const wrapperByOriginal = new WeakMap<Function, Function>();
  */
 export function wrapAISDK<T extends Record<string, unknown>>(aiModule: T): T {
   const wrapped: Record<string, unknown> = { ...aiModule };
+  // Vitest and some bundlers expose module namespaces through proxies which
+  // throw when a missing export is read. Check membership before accessing the
+  // v7-only registerTelemetry export so v6 and partial module mocks stay safe.
+  const hasRegisterTelemetry =
+    'registerTelemetry' in aiModule &&
+    typeof Reflect.get(aiModule, 'registerTelemetry') === 'function';
   const telemetryKey: TelemetryKey =
-    typeof aiModule.registerTelemetry === 'function'
-      ? 'telemetry'
-      : 'experimental_telemetry';
+    hasRegisterTelemetry ? 'telemetry' : 'experimental_telemetry';
 
   for (const name of WRAPPED_FUNCTIONS) {
     const original = aiModule[name];
