@@ -30,3 +30,19 @@ export function utf8ByteLength(
 export function exportQueueCapacity(batchSize: number): number {
   return Math.max(DEFAULT_MAX_QUEUE_ITEMS, batchSize * 4);
 }
+
+export const DEFAULT_MAX_SPAN_ATTRIBUTES = 10_000;
+
+/**
+ * OpenTelemetry defaults to 128 span attributes, which can silently drop
+ * semantic attributes in LLM apps (retrieval docs, tool IO, etc). If the user
+ * explicitly sets OTel limits via env vars, respect that by leaving
+ * attributeCountLimit unset so the SDK's env-driven defaults apply. Otherwise
+ * raise the budget. Mirrors the Python SDK's _span_limits_for_capture_everything.
+ */
+export function spanLimitsForCaptureEverything(): { attributeCountLimit?: number } {
+  const spanLimit = (process.env.OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT ?? '').trim();
+  const generalLimit = (process.env.OTEL_ATTRIBUTE_COUNT_LIMIT ?? '').trim();
+  if (spanLimit || generalLimit) return {};
+  return { attributeCountLimit: DEFAULT_MAX_SPAN_ATTRIBUTES };
+}

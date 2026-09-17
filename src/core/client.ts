@@ -1,3 +1,4 @@
+import { spanLimitsForCaptureEverything } from '../constants.js';
 import {
   INVALID_SPAN_CONTEXT,
   trace as otelTrace,
@@ -184,7 +185,7 @@ export class Client {
 
     this.tracerProvider = new NodeTracerProvider({
       resource,
-      spanLimits: { attributeCountLimit: 10_000 },
+      spanLimits: spanLimitsForCaptureEverything(),
       sampler: new ParentBasedSampler({
         root: new TraceIdRatioBasedSampler(sampleRate),
       }),
