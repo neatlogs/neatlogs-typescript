@@ -173,6 +173,22 @@ describe('Vercel AI SDK attribute extraction', () => {
     expect(out['neatlogs.tool.output']).toContain('72');
   });
 
+  it('maps AI SDK v7 execute_tool spans to tool I/O', () => {
+    const out = processSpan(
+      makeAiSdkSpan('execute_tool example_tool', {
+        'gen_ai.operation.name': 'execute_tool',
+        'gen_ai.tool.name': 'example_tool',
+        'gen_ai.tool.call.id': 'call_123',
+        'gen_ai.tool.call.arguments': JSON.stringify({ query: 'US AI creators' }),
+        'gen_ai.tool.call.result': JSON.stringify({ creators: [{ id: 'creator_1' }] }),
+      }),
+    );
+    expect(out['neatlogs.span.kind']).toBe('tool');
+    expect(out['neatlogs.tool.name']).toBe('example_tool');
+    expect(out['neatlogs.tool.input']).toContain('US AI creators');
+    expect(out['neatlogs.tool.output']).toContain('creator_1');
+  });
+
   it('preserves the complete nested input for interactive render tool calls', () => {
     const renderInput = {
       title: 'Inquiry to 57 creators',

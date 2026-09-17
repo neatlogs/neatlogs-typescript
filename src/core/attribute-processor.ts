@@ -710,16 +710,20 @@ export class UnifiedAttributeProcessor {
    */
   private extractVercelAiSdkAttrs(attrs: Record<string, any>): void {
     const spanName: string = attrs['_span_name'] ?? '';
+    const isToolExecution =
+      spanName === 'ai.toolCall' ||
+      attrs['gen_ai.operation.name'] === 'execute_tool';
     const isAiSdkSpan =
       spanName.startsWith('ai.') ||
       'ai.model.id' in attrs ||
-      'ai.toolCall.name' in attrs;
+      'ai.toolCall.name' in attrs ||
+      isToolExecution;
 
     if (!isAiSdkSpan) return;
 
     // Span-kind inference (only when not already set)
     if (!('openinference.span.kind' in attrs)) {
-      if (spanName === 'ai.toolCall') {
+      if (isToolExecution) {
         attrs['openinference.span.kind'] = 'TOOL';
       } else if (spanName.startsWith('ai.embed')) {
         attrs['openinference.span.kind'] = 'EMBEDDING';
@@ -912,9 +916,10 @@ export class UnifiedAttributeProcessor {
     }
 
     // Tool span attributes
-    if (spanName === 'ai.toolCall') {
-      if ('ai.toolCall.name' in attrs && !('tool.name' in attrs)) {
-        attrs['tool.name'] = attrs['ai.toolCall.name'];
+    if (isToolExecution) {
+      const toolName = attrs['ai.toolCall.name'] ?? attrs['gen_ai.tool.name'];
+      if (toolName !== undefined && !('tool.name' in attrs)) {
+        attrs['tool.name'] = toolName;
       }
       // Normalize args/result to JSON strings so downstream parsers
       // (e.g. extractToolCallIdFromOutput) can JSON.parse them safely.
@@ -924,6 +929,14 @@ export class UnifiedAttributeProcessor {
       }
       if ('ai.toolCall.result' in attrs && !('output.value' in attrs)) {
         const raw = attrs['ai.toolCall.result'];
+        attrs['output.value'] = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      }
+      if ('gen_ai.tool.call.arguments' in attrs && !('input.value' in attrs)) {
+        const raw = attrs['gen_ai.tool.call.arguments'];
+        attrs['input.value'] = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      }
+      if ('gen_ai.tool.call.result' in attrs && !('output.value' in attrs)) {
+        const raw = attrs['gen_ai.tool.call.result'];
         attrs['output.value'] = typeof raw === 'string' ? raw : JSON.stringify(raw);
       }
     }

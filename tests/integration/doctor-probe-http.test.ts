@@ -26,8 +26,8 @@ function persistedTrace(traceId: string, envelope: DiagnosticEnvelope | null) {
       const materializedIo: Record<string, Readonly<{ input: unknown; output: unknown }>> = {
         'doctor.probe.root': { input: 'generated diagnostic input', output: 'Value: 2' },
         'doctor.probe.agent': {
-          input: 'Prompt: generated diagnostic input',
-          output: JSON.stringify({ text: 'generated diagnostic output' }),
+          input: 'generated diagnostic input',
+          output: 'Text: generated diagnostic output',
         },
         'doctor.probe.llm': {
           input: { prompt: 'generated diagnostic input' },
