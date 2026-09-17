@@ -65,7 +65,7 @@ const EXPECTED_PERSISTED_IO = new Map<string, Readonly<{
   }],
   ['doctor.probe.agent', {
     inputs: [{ prompt: 'generated diagnostic input' }, 'Prompt: generated diagnostic input'],
-    outputs: [{ text: 'generated diagnostic output' }],
+    outputs: [{ text: 'generated diagnostic output' }, 'Text: generated diagnostic output'],
   }],
   ['doctor.probe.llm', {
     inputs: [
