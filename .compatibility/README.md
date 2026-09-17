@@ -12,6 +12,10 @@ coding-agent integration implemented by this package. Claude Code and Codex
 are intentionally excluded because they are maintained in separate
 repositories. Unsupported/rejection-only stubs are not release-watch targets.
 
+These workflows analyze real published package contents, APIs, dependency
+graphs, and the relevant adapter source. They never initialize Neatlogs, call a
+live model provider, export traces, or query a Neatlogs backend.
+
 ## Pull requests
 
 The pull-request workflow is deterministic and does not receive external
