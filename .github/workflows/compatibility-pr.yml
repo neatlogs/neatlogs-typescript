@@ -28,3 +28,22 @@ jobs:
         run: node scripts/compatibility/discover-releases.mjs --validate-only
       - name: Test compatibility automation
         run: node --test scripts/compatibility/*.test.mjs
+  consumer-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        manager: [npm, pnpm, yarn]
+        ai-version: ["6.0.283", "7.0.100"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: corepack enable
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Verify installed package consumer
+        run: npm run compatibility:consumer -- --manager=${{ matrix.manager }} --ai-version=${{ matrix.ai-version }}
