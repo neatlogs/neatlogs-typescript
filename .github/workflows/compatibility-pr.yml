@@ -1,0 +1,30 @@
+name: Compatibility configuration
+
+on:
+  pull_request:
+    paths:
+      - ".compatibility/**"
+      - "scripts/compatibility/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/compatibility-*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate compatibility inventory
+        run: node scripts/compatibility/discover-releases.mjs --validate-only
+      - name: Test compatibility automation
+        run: node --test scripts/compatibility/*.test.mjs
