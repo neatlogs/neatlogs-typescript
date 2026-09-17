@@ -124,6 +124,32 @@ describe('provider tool media safety', () => {
   it.each([
     ['google', wrapGoogleGenAI],
     ['vertex', wrapVertexAI],
+  ] as const)('%s sanitizes non-streamed function-call arguments', async (_name, wrap) => {
+    const data = Buffer.alloc(120_000, 0x43).toString('base64');
+    const credentialUrl = 'https://user:password@example.com/file?token=secret#fragment';
+    const response = {
+      candidates: [{
+        content: { parts: [{ functionCall: {
+          id: 'unsafe',
+          name: 'inspect',
+          args: { image: { inlineData: { mimeType: 'image/png', data } }, credentialUrl },
+        } }] },
+      }],
+    };
+    const wrapped = wrap({ models: { generateContent: async () => response } } as any);
+
+    expect(await (wrapped as any).models.generateContent({ model: 'gemini-test', contents: 'go' })).toBe(response);
+
+    const readable = span();
+    const args = String(readable.attributes['neatlogs.llm.tool_calls.0.arguments']);
+    expect(args).toContain('neatlogs_media');
+    expect(args).not.toContain(data.slice(0, 256));
+    discardPendingMedia(readable as object);
+  });
+
+  it.each([
+    ['google', wrapGoogleGenAI],
+    ['vertex', wrapVertexAI],
   ] as const)('%s keeps multiple streamed function calls in order without raw media', async (_name, wrap) => {
     const image = {
       inlineData: {

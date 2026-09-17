@@ -598,12 +598,13 @@ function finalizeResponse(span: Span, response: any): void {
     const candidateIndex = typeof candidate?.index === 'number' ? candidate.index : position;
     if (firstCandidateIndex === null) firstCandidateIndex = candidateIndex;
     const prefix = `neatlogs.llm.output_messages.${candidateIndex}`;
-    captureMedia(span, prefix, [candidate], 'output');
+    const captured = captureMedia(span, prefix, [candidate], 'output');
+    const sanitizedCandidate = Array.isArray(captured) ? captured[0] : candidate;
 
     const textParts: string[] = [];
     const thinkingParts: string[] = [];
     let toolIndex = 0;
-    for (const part of candidate?.content?.parts ?? []) {
+    for (const part of sanitizedCandidate?.content?.parts ?? []) {
       if (part?.text && !part?.thought) {
         textParts.push(part.text);
       } else if (part?.thought && part?.text) {
