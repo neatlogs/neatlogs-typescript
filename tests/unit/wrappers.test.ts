@@ -468,7 +468,10 @@ describe('openaiAgentsProcessor', () => {
     processor.onTraceStart({ traceId: 'trace-x', name: 'Agent workflow' });
     processor.onSpanStart({ spanId: 'a1', traceId: 'trace-x', spanData: { type: 'agent', name: 'Weather Assistant', tools: ['get_weather'] } });
     processor.onSpanStart({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response' } });
-    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response', _response: {
+    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response', _input: [
+      { role: 'system', content: 'Be concise' },
+      { role: 'user', content: 'Where is order 42?' },
+    ], _response: {
       model: 'gpt-4o-mini-2024-07-18',
       usage: { input_tokens: 57, output_tokens: 15, total_tokens: 72 },
       output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Sunny' }] }],
@@ -486,6 +489,13 @@ describe('openaiAgentsProcessor', () => {
     expect(attr(llm, 'neatlogs.llm.model_name')).toBe('gpt-4o-mini-2024-07-18');
     expect(attr(llm, 'neatlogs.llm.token_count.total')).toBe(72);
     expect(attr(llm, 'neatlogs.llm.output_messages.0.content')).toBe('Sunny');
+
+    const workflow = spans.find(s => s.attributes['neatlogs.span.kind'] === 'WORKFLOW')!;
+    expect(attr(workflow, 'input.value')).toBe('Where is order 42?');
+    expect(attr(workflow, 'output.value')).toBe('Sunny');
+    expect(attr(llm, 'neatlogs.llm.input_messages.0.role')).toBe('system');
+    expect(attr(llm, 'neatlogs.llm.input_messages.1.role')).toBe('user');
+    expect(attr(llm, 'neatlogs.llm.input_messages.1.content')).toBe('Where is order 42?');
 
     const tool = spans.find(s => s.attributes['neatlogs.span.kind'] === 'TOOL')!;
     expect(attr(tool, 'neatlogs.tool.name')).toBe('get_weather');
