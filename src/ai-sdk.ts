@@ -748,11 +748,14 @@ function mergeTelemetry(
       });
   const callerTracer = requestedTelemetry.tracer as Tracer | undefined;
   const hasCallerTracer = callerTracer !== undefined;
-  const requestedIntegrations = Array.isArray(requestedTelemetry.integrations)
-    ? requestedTelemetry.integrations.filter(
-        (integration: unknown) => !isNeatlogsV7Integration(integration),
-      )
-    : [];
+  const rawRequestedIntegrations = requestedTelemetry.integrations;
+  const requestedIntegrations = (
+    Array.isArray(rawRequestedIntegrations)
+      ? rawRequestedIntegrations
+      : rawRequestedIntegrations == null
+        ? []
+        : [rawRequestedIntegrations]
+  ).filter((integration: unknown) => !isNeatlogsV7Integration(integration));
   const { telemetry: _telemetry, experimental_telemetry: _legacy, ...rest } =
     opts ?? {};
 

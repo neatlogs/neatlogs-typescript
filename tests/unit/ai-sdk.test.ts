@@ -141,6 +141,30 @@ describe('wrapAISDK', () => {
     expect(receivedOpts.telemetry.integrations).toHaveLength(1);
   });
 
+  it.each([
+    ['single object', (integration: object) => integration],
+    ['array', (integration: object) => [integration]],
+  ])('preserves caller telemetry integrations supplied as a %s', async (_label, wrap) => {
+    const callerIntegration = { onStart() {} };
+    let receivedTelemetry: any;
+    const aiModule = {
+      registerTelemetry() {},
+      generateText: async (opts: any) => {
+        receivedTelemetry = opts.telemetry;
+        return { text: 'hello from v7', finishReason: 'stop' };
+      },
+    };
+
+    const wrapped = wrapAISDK(aiModule);
+    await (wrapped.generateText as any)({
+      prompt: 'hi',
+      telemetry: { integrations: wrap(callerIntegration) },
+    });
+
+    expect(receivedTelemetry.integrations).toHaveLength(2);
+    expect(receivedTelemetry.integrations).toContain(callerIntegration);
+  });
+
   it('reuses telemetry created by createAITelemetry without nesting its tracer', async () => {
     let receivedTelemetry: AITelemetryConfig | undefined;
     const aiModule = {
