@@ -4,6 +4,14 @@ This directory defines the integrations, package-manager matrix, supported
 versions, and cross-integration contracts exercised by the compatibility
 workflows.
 
+## Scope source of truth
+
+The inventory is limited to integrations documented for the TypeScript SDK in
+`neatlogs-docs`. The opencode entry is included because it is a documented
+coding-agent integration implemented by this package. Claude Code and Codex
+are intentionally excluded because they are maintained in separate
+repositories. Unsupported/rejection-only stubs are not release-watch targets.
+
 ## Pull requests
 
 The pull-request workflow is deterministic and does not receive external

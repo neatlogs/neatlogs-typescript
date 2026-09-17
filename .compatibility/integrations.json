@@ -142,15 +142,6 @@
       "watchedSurfaces": ["browser exports", "transport", "streaming", "masking"],
       "contracts": ["browser-contract", "streaming"],
       "releaseMonitoring": false
-    },
-    {
-      "id": "strands-negative-contract",
-      "displayName": "Strands negative contract",
-      "packages": [],
-      "adapterPaths": ["src/strands.ts"],
-      "watchedSurfaces": ["global-context hook rejection"],
-      "contracts": ["negative-contract"],
-      "releaseMonitoring": false
     }
   ]
 }
