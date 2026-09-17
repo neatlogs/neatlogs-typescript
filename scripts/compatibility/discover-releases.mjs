@@ -18,6 +18,9 @@ export function validateConfiguration(config, lock) {
     if (!integration.id || !integration.displayName || !Array.isArray(integration.packages)) {
       throw new Error('every integration requires id, displayName, and packages[]');
     }
+    if (!Array.isArray(integration.documentationUrls) || integration.documentationUrls.length === 0) {
+      throw new Error(`every integration requires documentationUrls[]: ${integration.id}`);
+    }
     if (ids.has(integration.id)) throw new Error(`duplicate integration id: ${integration.id}`);
     ids.add(integration.id);
     for (const packageName of integration.packages) {

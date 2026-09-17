@@ -6,6 +6,7 @@
       "id": "openai",
       "displayName": "OpenAI",
       "packages": ["openai"],
+      "documentationUrls": ["https://platform.openai.com/docs/api-reference"],
       "adapterPaths": ["src/openai.ts", "src/core/**"],
       "watchedSurfaces": ["responses", "chat completions", "streaming", "usage", "tool calls"],
       "contracts": ["common-llm", "streaming", "tool-calls"]
@@ -14,6 +15,7 @@
       "id": "anthropic",
       "displayName": "Anthropic",
       "packages": ["@anthropic-ai/sdk"],
+      "documentationUrls": ["https://docs.anthropic.com/en/api/client-sdks"],
       "adapterPaths": ["src/anthropic.ts", "src/core/**"],
       "watchedSurfaces": ["messages", "streaming", "usage", "tool calls"],
       "contracts": ["common-llm", "streaming", "tool-calls"]
@@ -22,6 +24,7 @@
       "id": "azure-openai",
       "displayName": "Azure OpenAI",
       "packages": ["openai"],
+      "documentationUrls": ["https://learn.microsoft.com/en-us/azure/ai-foundry/openai/"],
       "adapterPaths": ["src/azure-openai.ts", "src/core/**"],
       "watchedSurfaces": ["AzureOpenAI client", "responses", "chat completions", "streaming"],
       "contracts": ["common-llm", "streaming"]
@@ -30,6 +33,7 @@
       "id": "aws-bedrock-runtime",
       "displayName": "AWS Bedrock Runtime",
       "packages": ["@aws-sdk/client-bedrock-runtime"],
+      "documentationUrls": ["https://docs.aws.amazon.com/bedrock/latest/userguide/"],
       "adapterPaths": ["src/bedrock.ts", "src/core/**"],
       "watchedSurfaces": ["commands", "streaming", "usage", "model metadata"],
       "contracts": ["common-llm", "streaming"]
@@ -38,6 +42,7 @@
       "id": "google-genai",
       "displayName": "Google GenAI",
       "packages": ["@google/genai"],
+      "documentationUrls": ["https://ai.google.dev/gemini-api/docs"],
       "adapterPaths": ["src/google-genai.ts", "src/core/**"],
       "watchedSurfaces": ["generateContent", "chat", "streaming", "usage"],
       "contracts": ["common-llm", "streaming", "tool-calls"]
@@ -46,6 +51,7 @@
       "id": "vertex-google-genai",
       "displayName": "Vertex through Google GenAI",
       "packages": ["@google/genai"],
+      "documentationUrls": ["https://cloud.google.com/vertex-ai/generative-ai/docs/sdks/overview"],
       "adapterPaths": ["src/vertex-ai.ts", "src/google-genai.ts", "src/core/**"],
       "watchedSurfaces": ["Vertex mode", "generateContent", "chat", "streaming"],
       "contracts": ["common-llm", "streaming"]
@@ -54,6 +60,7 @@
       "id": "openrouter-agent",
       "displayName": "OpenRouter Agent",
       "packages": ["@openrouter/agent"],
+      "documentationUrls": ["https://openrouter.ai/docs"],
       "adapterPaths": ["src/openrouter-agent.ts", "src/core/**"],
       "watchedSurfaces": ["agent calls", "model calls", "streaming"],
       "contracts": ["common-agent", "common-llm"]
@@ -62,6 +69,7 @@
       "id": "vercel-ai-sdk",
       "displayName": "Vercel AI SDK",
       "packages": ["ai", "@ai-sdk/otel"],
+      "documentationUrls": ["https://ai-sdk.dev/docs"],
       "versionLines": ["6.x", "7.x"],
       "adapterPaths": ["src/ai-sdk.ts", "src/core/instrumentation-scope-parser.ts"],
       "watchedSurfaces": [
@@ -82,6 +90,7 @@
       "id": "mastra",
       "displayName": "Mastra",
       "packages": ["@mastra/core", "@mastra/observability"],
+      "documentationUrls": ["https://mastra.ai/docs"],
       "adapterPaths": ["src/mastra-wrap.ts", "src/core/**"],
       "watchedSurfaces": ["entity wrappers", "rerank wrappers", "observability lifecycle"],
       "contracts": ["common-agent", "retrieval"]
@@ -90,6 +99,7 @@
       "id": "claude-agent-sdk",
       "displayName": "Claude Agent SDK",
       "packages": ["@anthropic-ai/claude-agent-sdk"],
+      "documentationUrls": ["https://docs.anthropic.com/en/docs/claude-code/sdk/sdk-overview"],
       "adapterPaths": ["src/claude-agent-sdk.ts", "src/core/**"],
       "watchedSurfaces": ["query", "messages", "tools", "streaming"],
       "contracts": ["common-agent", "tool-calls", "streaming"]
@@ -98,6 +108,7 @@
       "id": "langchain",
       "displayName": "LangChain",
       "packages": ["@langchain/core", "@langchain/openai", "@langchain/anthropic", "@langchain/google-genai"],
+      "documentationUrls": ["https://docs.langchain.com/oss/javascript/langchain/overview"],
       "adapterPaths": ["src/langchain.ts", "src/core/**"],
       "watchedSurfaces": ["callback handler", "chains", "LLMs", "tools", "retrievers"],
       "contracts": ["common-llm", "tool-calls", "retrieval", "context-propagation"]
@@ -106,6 +117,7 @@
       "id": "langgraph",
       "displayName": "LangGraph",
       "packages": ["@langchain/langgraph", "@langchain/core"],
+      "documentationUrls": ["https://docs.langchain.com/oss/javascript/langgraph/overview"],
       "adapterPaths": ["src/langchain.ts", "src/core/**"],
       "watchedSurfaces": ["callback propagation", "graph lifecycle", "tools"],
       "contracts": ["common-agent", "tool-calls", "context-propagation"]
@@ -114,6 +126,7 @@
       "id": "openai-agents",
       "displayName": "OpenAI Agents SDK",
       "packages": ["@openai/agents"],
+      "documentationUrls": ["https://openai.github.io/openai-agents-js/"],
       "adapterPaths": ["src/openai-agents.ts", "src/core/**"],
       "watchedSurfaces": ["trace processor", "agent lifecycle", "tools", "handoffs"],
       "contracts": ["common-agent", "common-llm", "tool-calls"]
@@ -122,6 +135,7 @@
       "id": "pi-agent",
       "displayName": "Pi Agent",
       "packages": ["@mariozechner/pi-agent-core", "@earendil-works/pi-agent-core"],
+      "documentationUrls": ["https://github.com/badlogic/pi-mono/tree/main/packages/agent"],
       "adapterPaths": ["src/pi-agent.ts", "src/core/**"],
       "watchedSurfaces": ["hooks", "events", "streaming"],
       "contracts": ["common-agent", "streaming", "tool-calls"]
@@ -130,6 +144,7 @@
       "id": "opencode",
       "displayName": "OpenCode",
       "packages": ["@opencode-ai/plugin"],
+      "documentationUrls": ["https://opencode.ai/docs/plugins/"],
       "adapterPaths": ["src/opencode-plugin.ts", "src/core/**"],
       "watchedSurfaces": ["plugin API", "configuration", "tool lifecycle"],
       "contracts": ["plugin-contract", "tool-calls"]
@@ -138,6 +153,7 @@
       "id": "browser-client",
       "displayName": "Browser client",
       "packages": [],
+      "documentationUrls": ["https://docs.neatlogs.com/"],
       "adapterPaths": ["src/browser.ts", "src/edge.ts", "src/core/**"],
       "watchedSurfaces": ["browser exports", "transport", "streaming", "masking"],
       "contracts": ["browser-contract", "streaming"],

@@ -5,9 +5,9 @@ import { compareVersions, validateConfiguration, watchedPackages } from './disco
 const config = {
   schemaVersion: 1,
   integrations: [
-    { id: 'one', displayName: 'One', packages: ['one', 'shared'] },
-    { id: 'two', displayName: 'Two', packages: ['shared'] },
-    { id: 'local', displayName: 'Local', packages: [], releaseMonitoring: false },
+    { id: 'one', displayName: 'One', packages: ['one', 'shared'], documentationUrls: ['https://one.example/docs'] },
+    { id: 'two', displayName: 'Two', packages: ['shared'], documentationUrls: ['https://two.example/docs'] },
+    { id: 'local', displayName: 'Local', packages: [], documentationUrls: ['https://local.example/docs'], releaseMonitoring: false },
   ],
 };
 const lock = { schemaVersion: 1, packages: { one: '1.0.0', shared: '2.0.0' } };

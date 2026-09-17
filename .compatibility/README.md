@@ -12,8 +12,10 @@ coding-agent integration implemented by this package. Claude Code and Codex
 are intentionally excluded because they are maintained in separate
 repositories. Unsupported/rejection-only stubs are not release-watch targets.
 
-These workflows analyze real published package contents, APIs, dependency
-graphs, and the relevant adapter source. They never initialize Neatlogs, call a
+These workflows analyze real published package contents, exported APIs,
+dependency graphs, changed source excerpts, the relevant adapter source, and
+the official project documentation URLs declared for every integration.
+Documentation fetch failures are retained as evidence gaps. They never initialize Neatlogs, call a
 live model provider, export traces, or query a Neatlogs backend.
 
 ## Pull requests
@@ -28,7 +30,8 @@ SDK instrumentation interface against the supported AI SDK v6 and v7 lines.
 Twice a day, the scheduled workflow:
 
 1. compares the analyzed version lock with the npm registry;
-2. records package metadata and packed-file changes as deterministic evidence;
+2. records dependency, exported API, source-content, adapter-source, and
+   official project-documentation evidence;
 3. optionally asks Gemini for an advisory impact assessment;
 4. updates a GitHub issue and optionally alerts Slack when review is needed.
 
