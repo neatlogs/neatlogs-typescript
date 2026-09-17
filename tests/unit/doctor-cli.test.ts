@@ -38,7 +38,7 @@ function successfulProbeFixture() {
             output: 'Value: 2',
           },
           'doctor.probe.agent': {
-            input: 'Prompt: generated diagnostic input',
+            input: 'generated diagnostic input',
             output: 'Text: generated diagnostic output',
           },
           'doctor.probe.llm': {
