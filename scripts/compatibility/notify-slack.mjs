@@ -16,7 +16,7 @@ function workflowURL() {
   return server && repository && runID ? `${server}/${repository}/actions/runs/${runID}` : null;
 }
 
-export function slackMessage({ status, report, analysis, url }) {
+export function slackMessage({ status, report, analysis, url, upstreamIssue = null }) {
   const changes = report?.changes ?? [];
   const risk = analysis?.riskLevel ? ` Advisory risk: *${analysis.riskLevel}*.` : '';
   const link = url ? ` <${url}|Open workflow run>.` : '';
@@ -25,7 +25,10 @@ export function slackMessage({ status, report, analysis, url }) {
   }
   const packages = changes.slice(0, 8).map((item) => `${item.package} ${item.previouslyAnalyzed ?? 'untracked'} → ${item.latest}`).join(', ');
   const remaining = changes.length > 8 ? `, +${changes.length - 8} more` : '';
-  return `:warning: *TypeScript SDK compatibility review required:* ${changes.length} upstream release(s). ${packages}${remaining}.${risk}${link}`;
+  const issue = upstreamIssue?.url
+    ? ` Reproduced upstream issue: <${upstreamIssue.url}|${upstreamIssue.title ?? upstreamIssue.url}>.`
+    : '';
+  return `:warning: *TypeScript SDK compatibility review required:* ${changes.length} upstream release(s). ${packages}${remaining}.${risk}${issue}${link}`;
 }
 
 async function main() {
@@ -38,10 +41,11 @@ async function main() {
   if (status === 'success' && process.env.COMPAT_CHANGES_FOUND !== 'true') return;
   const report = await optionalJSON('compatibility-release-report.json');
   const analysis = await optionalJSON('compatibility-llm-analysis.json');
+  const upstreamIssue = await optionalJSON(process.env.COMPAT_UPSTREAM_ISSUE_FILE ?? 'compatibility-upstream-issue.json');
   const response = await fetch(webhook, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text: slackMessage({ status, report, analysis, url: workflowURL() }) }),
+    body: JSON.stringify({ text: slackMessage({ status, report, analysis, upstreamIssue, url: workflowURL() }) }),
   });
   if (!response.ok) throw new Error(`Slack webhook returned ${response.status}`);
   console.log('Slack compatibility alert sent');
