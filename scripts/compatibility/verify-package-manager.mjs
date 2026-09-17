@@ -85,7 +85,12 @@ export async function verifyConsumer(manager, aiVersion) {
     } else {
       await writeFile(resolve(directory, '.yarnrc.yml'), 'nodeLinker: pnp\nenableTelemetry: false\n');
       await run('corepack', ['yarn', 'set', 'version', 'stable'], { cwd: directory });
-      await run('corepack', ['yarn', 'install'], { cwd: directory });
+      await run('corepack', ['yarn', 'install'], {
+        cwd: directory,
+        // This is a newly generated isolated consumer, so no lockfile exists
+        // before the install. Yarn defaults immutable installs on CI.
+        env: { ...process.env, YARN_ENABLE_IMMUTABLE_INSTALLS: 'false' },
+      });
       await run('corepack', ['yarn', 'node', 'verify.mjs'], { cwd: directory });
     }
   } finally {
