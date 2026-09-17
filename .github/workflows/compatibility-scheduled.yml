@@ -18,6 +18,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
       - name: Discover npm releases
         id: discovery
         run: node scripts/compatibility/discover-releases.mjs --report=compatibility-release-report.json

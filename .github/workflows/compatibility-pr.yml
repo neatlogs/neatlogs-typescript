@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
       - name: Validate compatibility inventory
         run: node scripts/compatibility/discover-releases.mjs --validate-only
       - name: Test compatibility automation
