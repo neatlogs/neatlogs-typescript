@@ -26,7 +26,7 @@ export function slackMessage({ status, report, analysis, url, upstreamIssue = nu
   const packages = changes.slice(0, 8).map((item) => `${item.package} ${item.previouslyAnalyzed ?? 'untracked'} → ${item.latest}`).join(', ');
   const remaining = changes.length > 8 ? `, +${changes.length - 8} more` : '';
   const issue = upstreamIssue?.url
-    ? ` Reproduced upstream issue: <${upstreamIssue.url}|${upstreamIssue.title ?? upstreamIssue.url}>.`
+    ? ` Referenced upstream issue: <${upstreamIssue.url}|${upstreamIssue.title ?? upstreamIssue.url}>.`
     : '';
   return `:warning: *TypeScript SDK compatibility review required:* ${changes.length} upstream release(s). ${packages}${remaining}.${risk}${issue}${link}`;
 }
