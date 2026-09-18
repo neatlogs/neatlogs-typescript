@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "requiredChecks": [
+    "published-package-resolves",
+    "sdk-builds-with-version",
+    "referenced-exports-exist",
+    "referenced-types-remain-compatible",
+    "peer-dependencies-resolve",
+    "adapter-option-fields-remain-compatible",
+    "supported-major-lines-compile"
+  ],
+  "prohibitedChecks": [
+    "live-model-call",
+    "trace-export",
+    "backend-readback"
+  ]
+}
