@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "runtime": "node",
+  "required": ["npm", "pnpm", "yarn-berry"],
+  "advisory": ["bun", "yarn-classic"],
+  "runtimeTargets": ["minimum-declared", "repository-ci", "current-lts"]
+}
