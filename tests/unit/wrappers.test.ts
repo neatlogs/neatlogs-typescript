@@ -20,6 +20,7 @@ import { strandsHooks } from '../../src/strands.js';
 import { openaiAgentsProcessor } from '../../src/openai-agents.js';
 import { wrapMastra } from '../../src/mastra-wrap.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
+import { discardPendingMedia } from '../../src/core/media.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
@@ -512,6 +513,31 @@ describe('openaiAgentsProcessor', () => {
     const spans = getSpans();
     expect(spans.length).toBe(1);
     expect(spans[0].status.code).toBe(2); // ERROR
+  });
+  it('keeps inline media out of response and root text attributes', () => {
+    const processor = openaiAgentsProcessor();
+    const data = Buffer.alloc(120_000, 0x41).toString('base64');
+    processor.onTraceStart({ traceId: 'trace-m', name: 'Agent workflow' });
+    processor.onSpanStart({ spanId: 'r1', traceId: 'trace-m', spanData: { type: 'response' } });
+    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-m', spanData: { type: 'response', _input: [
+      { role: 'user', content: [
+        { type: 'input_text', text: 'What is in this image?' },
+        { type: 'input_image', image_url: `data:image/png;base64,${data}` },
+      ] },
+    ], _response: {
+      model: 'gpt-4o-mini',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'A cat' }] }],
+    } } });
+    processor.onTraceEnd({ traceId: 'trace-m' });
+
+    const spans = exporter.getFinishedSpans();
+    expect(JSON.stringify(spans.map(s => s.attributes))).not.toContain(data.slice(0, 256));
+    const llm = spans.find(s => s.attributes['neatlogs.span.kind'] === 'LLM')!;
+    const workflow = spans.find(s => s.attributes['neatlogs.span.kind'] === 'WORKFLOW')!;
+    expect(attr(llm, 'neatlogs.llm.input_messages.0.content')).toBe('What is in this image?');
+    expect(attr(llm, 'neatlogs.llm.input_messages.0.media.0.mime_type')).toBe('image/png');
+    expect(attr(workflow, 'input.value')).toBe('What is in this image?');
+    for (const span of spans) discardPendingMedia(span as object);
   });
 });
 

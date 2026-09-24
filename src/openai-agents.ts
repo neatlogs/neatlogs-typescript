@@ -11,6 +11,7 @@
 
 import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
+import { captureMedia } from './core/media.js';
 
 const TRACER_NAME = 'neatlogs.openai_agents';
 
@@ -277,7 +278,10 @@ function captureInputMessages(span: Span, input: any): void {
     const message = messages[i];
     const role = typeof message === 'object' && message ? String(message.role ?? '') : '';
     const content = typeof message === 'object' && message ? message.content : message;
-    const text = contentText(content);
+    // Route media through typed capture first, then read text parts only, so
+    // inline bytes never reach text attributes.
+    const safeContent = captureMedia(span, `neatlogs.llm.input_messages.${i}`, content, 'input');
+    const text = contentText(safeContent);
     if (role) span.setAttribute(`neatlogs.llm.input_messages.${i}.role`, role);
     if (text) span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, text.slice(0, 10000));
   }
@@ -302,12 +306,15 @@ function assistantOutputText(output: any): string {
     .join('');
 }
 
+// Text only: media parts are captured by captureMedia, never stringified here.
 function contentText(content: any): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.map((part: any) => typeof part === 'string' ? part : part?.text ?? safeStringify(part)).join('');
+    return content
+      .map((part: any) => (typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : ''))
+      .join('');
   }
-  return content == null ? '' : safeStringify(content);
+  return typeof content?.text === 'string' ? content.text : '';
 }
 
 function safeStringify(value: unknown): string {
