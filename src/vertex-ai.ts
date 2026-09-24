@@ -596,7 +596,14 @@ function finalizeResponse(span: Span, response: any): void {
     if (firstCandidateIndex === null) firstCandidateIndex = candidateIndex;
     const prefix = `neatlogs.llm.output_messages.${candidateIndex}`;
     const captured = captureMedia(span, prefix, [candidate], 'output');
-    const sanitizedCandidate = Array.isArray(captured) ? captured[0] : candidate;
+    // Never fall back to the raw candidate: if sanitization failed or hit its
+    // media limit, keep the typed media records already written and mark the
+    // candidate as incomplete instead of serializing provider bytes.
+    const sanitizedCandidate = Array.isArray(captured) ? captured[0] : undefined;
+    if (!Array.isArray(captured)) {
+      span.setAttribute(`${prefix}.media.incomplete`, true);
+      span.setAttribute(`${prefix}.content`, String(captured));
+    }
 
     const textParts: string[] = [];
     const thinkingParts: string[] = [];

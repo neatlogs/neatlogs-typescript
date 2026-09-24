@@ -124,6 +124,47 @@ describe('provider tool media safety', () => {
   it.each([
     ['google', wrapGoogleGenAI],
     ['vertex', wrapVertexAI],
+  ] as const)('%s never falls back to the raw candidate past the media limit', async (_name, wrap) => {
+    // Match the SDK's 10,000-attribute span limit so the media records fit on the span.
+    const limitedExporter = new InMemorySpanExporter();
+    const limitedProvider = new NodeTracerProvider({ spanLimits: { attributeCountLimit: 10_000 } });
+    limitedProvider.addSpanProcessor(new SimpleSpanProcessor(limitedExporter));
+    _setNeatlogsProvider(limitedProvider);
+    try {
+      const images = Array.from({ length: 65 }, (_, index) =>
+        Buffer.alloc(2_000, index + 1).toString('base64'),
+      );
+      const response = {
+        candidates: [{
+          content: { parts: [{ functionCall: {
+            id: 'many',
+            name: 'inspect',
+            args: { images: images.map((data) => ({ inlineData: { mimeType: 'image/png', data } })) },
+          } }] },
+        }],
+      };
+      const wrapped = wrap({ models: { generateContent: async () => response } } as any);
+
+      await (wrapped as any).models.generateContent({ model: 'gemini-test', contents: 'go' });
+
+      const spans = limitedExporter.getFinishedSpans();
+      expect(spans).toHaveLength(1);
+      const readable = spans[0];
+      const attributes = JSON.stringify(readable.attributes);
+      for (const data of images) expect(attributes).not.toContain(data.slice(0, 256));
+      expect(readable.attributes['neatlogs.llm.output_messages.0.media.incomplete']).toBe(true);
+      expect(readable.attributes['neatlogs.llm.output_messages.0.media.63.type']).toBeDefined();
+      expect(readable.attributes['neatlogs.llm.tool_calls.0.arguments']).toBeUndefined();
+      discardPendingMedia(readable as object);
+    } finally {
+      _setNeatlogsProvider(provider);
+      await limitedProvider.shutdown();
+    }
+  });
+
+  it.each([
+    ['google', wrapGoogleGenAI],
+    ['vertex', wrapVertexAI],
   ] as const)('%s sanitizes non-streamed function-call arguments', async (_name, wrap) => {
     const data = Buffer.alloc(120_000, 0x43).toString('base64');
     const credentialUrl = 'https://user:password@example.com/file?token=secret#fragment';
