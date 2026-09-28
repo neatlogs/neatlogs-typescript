@@ -336,8 +336,8 @@ function setInputAttributes(span: Span, opts: any): void {
   if (typeof contents === 'string') {
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'user');
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, contents);
-  } else if (Array.isArray(contents)) {
-    for (const item of contents) {
+  } else if (Array.isArray(contents) || (contents && typeof contents === 'object' && Array.isArray(contents.parts))) {
+    for (const item of Array.isArray(contents) ? contents : [contents]) {
       if (typeof item === 'string') {
         span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'user');
         span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, item);
