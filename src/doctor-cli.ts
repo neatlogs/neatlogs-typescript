@@ -129,6 +129,35 @@ type PersistedTrace = Readonly<{
   spans?: unknown;
 }>;
 
+const EXPECTED_PERSISTED_IO = new Map<string, Readonly<{
+  inputs: readonly unknown[];
+  outputs: readonly unknown[];
+}>>([
+  ['doctor.probe.root', {
+    inputs: [{ prompt: 'generated diagnostic input' }, 'generated diagnostic input'],
+    outputs: [{ result: { value: 2 } }, 'Value: 2'],
+  }],
+  ['doctor.probe.agent', {
+    inputs: [
+      { prompt: 'generated diagnostic input' },
+      'Prompt: generated diagnostic input',
+      'generated diagnostic input',
+    ],
+    outputs: [{ text: 'generated diagnostic output' }, 'Text: generated diagnostic output'],
+  }],
+  ['doctor.probe.llm', {
+    inputs: [
+      { messages: [{ role: 'user', content: 'generated diagnostic input' }] },
+      { prompt: 'generated diagnostic input' },
+    ],
+    outputs: [{ text: 'generated diagnostic output' }, 'Text: generated diagnostic output'],
+  }],
+  ['doctor.probe.tool', {
+    inputs: [{ value: 1 }, 'Value: 1'],
+    outputs: [{ value: 2 }, 'Value: 2'],
+  }],
+]);
+
 class ProbeReadError extends Error {
   constructor(readonly reasonCode: string, message: string) {
     super(message);
@@ -139,6 +168,41 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function canonicalize(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        return canonicalize(JSON.parse(trimmed) as unknown);
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalize(item)]),
+    );
+  }
+  return value;
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+}
+
+function matchesMaterializedValue(
+  value: unknown,
+  expected: readonly unknown[],
+): boolean {
+  return value !== null && value !== undefined &&
+    expected.some((candidate) => sameValue(value, candidate));
 }
 
 function persistedProbeResult(
@@ -171,9 +235,10 @@ function persistedProbeResult(
   }));
   const attributesValid = [...expectedTypes].every(([name, type]) =>
     normalized.some((item) => item.name === name && item.type === type));
-  const inputOutputValid = [...expectedTypes.keys()].every((name) => {
+  const inputOutputValid = [...EXPECTED_PERSISTED_IO].every(([name, expected]) => {
     const data = normalized.find((item) => item.name === name)?.data ?? {};
-    return data.input_value !== undefined && data.output_value !== undefined;
+    return matchesMaterializedValue(data.input_value, expected.inputs) &&
+      matchesMaterializedValue(data.output_value, expected.outputs);
   });
   const expectedSpans = normalized.filter((item) => expectedTypes.has(item.name));
   const metadataValid = expectedSpans.length === expectedTypes.size && expectedSpans.every((item) =>
@@ -186,7 +251,11 @@ function persistedProbeResult(
   const readbackSpanCount = typeof trace.spanCount === 'number'
     ? trace.spanCount
     : spans.length;
-  const visible = trace._id === local.capture?.trace_id;
+  const persistedTraceId = typeof trace._id === 'string' && /^[0-9a-f]{32}$/.test(trace._id)
+    ? trace._id
+    : local.capture?.trace_id ?? '';
+  const visible = typeof trace._id === 'string' && trace._id === local.capture?.trace_id;
+  const duplicateSpanCount = spans.length - idSet.size;
 
   const validations = [
     ['probe_visibility', visible && readbackSpanCount >= (local.capture?.span_count ?? 0), 'TRACE_VISIBLE', 'WAIT_FOR_TRACE', 'The exact Doctor trace is visible through the authenticated trace API'],
@@ -214,7 +283,11 @@ function persistedProbeResult(
       marker_header: 'x-neatlogs-doctor',
       marker_version: 'v1',
       visible,
+      readback_trace_id: persistedTraceId,
+      finalized: true,
       readback_span_count: readbackSpanCount,
+      meaningful_root_count: roots.length,
+      duplicate_span_count: duplicateSpanCount,
       hierarchy_valid: hierarchyValid,
       attributes_valid: attributesValid,
       input_output_valid: inputOutputValid,

@@ -18,6 +18,12 @@ function successfulProbeFixture() {
     const kindToType: Record<string, string> = {
       WORKFLOW: 'workflow', AGENT: 'agent_action', LLM: 'llm', TOOL: 'tool_call',
     };
+    const materializedIo: Record<string, Readonly<{ input: unknown; output: unknown }>> = {
+      'doctor.probe.root': { input: 'generated diagnostic input', output: 'Value: 2' },
+      'doctor.probe.agent': { input: 'generated diagnostic input', output: 'Text: generated diagnostic output' },
+      'doctor.probe.llm': { input: { prompt: 'generated diagnostic input' }, output: 'Text: generated diagnostic output' },
+      'doctor.probe.tool': { input: 'Value: 1', output: 'Value: 2' },
+    };
     return {
       _id: spans[0]!.spanContext().traceId,
       workflowName: 'neatlogs.doctor.v2',
@@ -28,14 +34,15 @@ function successfulProbeFixture() {
       spans: spans.map((item) => {
         const rawKind = String(item.attributes['openinference.span.kind'] ?? item.attributes['neatlogs.span.kind'] ?? '');
         const kind = rawKind.replace(/^Neatlogs\./, '').toUpperCase();
+        const io = materializedIo[item.name]!;
         return {
           span_id: item.spanContext().spanId,
           ...(item.parentSpanId ? { parent_span_id: item.parentSpanId } : {}),
           node_name: item.name,
           node_type: kindToType[kind],
           data: {
-            input_value: item.attributes['input.value'] ?? item.attributes['neatlogs.input'] ?? '{}',
-            output_value: item.attributes['output.value'] ?? item.attributes['neatlogs.output'] ?? '{}',
+            input_value: io.input,
+            output_value: io.output,
           },
           span_metadata: {
             'neatlogs.doctor': item.attributes['neatlogs.doctor'],
@@ -125,7 +132,9 @@ describe('doctor CLI', () => {
       capture: { span_count: 4 },
       probe: {
         ingest_route: '/v1/traces', marker_header: 'x-neatlogs-doctor', marker_version: 'v1',
-        visible: true, readback_span_count: 4, hierarchy_valid: true,
+        visible: true, readback_trace_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+        finalized: true, readback_span_count: 4, meaningful_root_count: 1,
+        duplicate_span_count: 0, hierarchy_valid: true,
         attributes_valid: true, input_output_valid: true, metadata_valid: true,
         typed_tokens_valid: true,
       },
@@ -168,6 +177,32 @@ describe('doctor CLI', () => {
       status: 'fail',
       first_failure: 'TYPED_TOKENS_VALID_FAILED',
       probe: { typed_tokens_valid: false },
+    });
+  });
+
+  it('accepts the UI-facing materialized input and output representations', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn(async () => {
+      const response = fixture.response();
+      const agent = response.spans.find((item) => item.node_name === 'doctor.probe.agent')!;
+      const llm = response.spans.find((item) => item.node_name === 'doctor.probe.llm')!;
+      agent.data.input_value = 'generated diagnostic input';
+      agent.data.output_value = '{"text":"generated diagnostic output"}';
+      llm.data.input_value = '{\n  "prompt": "generated diagnostic input"\n}';
+      return new Response(JSON.stringify(response), { status: 200 });
+    });
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      sleep: async () => undefined,
+      probeExporter: fixture.probeExporter,
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(value.output[0]!)).toMatchObject({
+      status: 'pass',
+      first_failure: null,
+      probe: { input_output_valid: true },
     });
   });
 
