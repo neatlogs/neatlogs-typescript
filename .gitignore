@@ -8,6 +8,9 @@ logs/
 *.log
 *.tgz
 .DS_Store
+compatibility-release-report.json
+compatibility-evidence.json
+compatibility-llm-analysis.json
 
 # Next.js / build output from example apps (e.g. examples/sdk_examples/gemini-chatbot)
 **/.next/
