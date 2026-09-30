@@ -15,8 +15,11 @@ repositories. Unsupported/rejection-only stubs are not release-watch targets.
 These workflows analyze real published package contents, exported APIs,
 dependency graphs, changed source excerpts, the relevant adapter source, and
 the official project documentation URLs declared for every integration.
-Documentation fetch failures are retained as evidence gaps. They never initialize Neatlogs, call a
-live model provider, export traces, or query a Neatlogs backend.
+Documentation fetch failures are retained as evidence gaps. The scheduled
+workflow also installs a tarball built from the current SDK checkout with
+exact upstream package versions in isolated consumers and runs bounded smoke
+probes. These probes do not call a live model provider, export traces, or
+query a Neatlogs backend.
 
 ## Pull requests
 
@@ -30,10 +33,28 @@ SDK instrumentation interface against the supported AI SDK v6 and v7 lines.
 Twice a day, the scheduled workflow:
 
 1. compares the analyzed version lock with the npm registry;
-2. records dependency, exported API, source-content, adapter-source, and
+2. builds the SDK and runs isolated consumer smoke probes against each
+   recorded baseline and detected version, verifying the exact installed
+   version; the machine-readable report records pass, candidate regression,
+   blocked, or not-tested and names the probe scope for every package;
+3. records dependency, exported API, source-content, adapter-source, and
    official project-documentation evidence;
-3. optionally asks Gemini for an advisory impact assessment;
-4. updates a GitHub issue and optionally alerts Slack when review is needed.
+4. optionally asks Gemini for an advisory impact assessment;
+5. updates a GitHub issue and optionally alerts Slack when review is needed.
+
+The smoke probes import the real upstream package and packed SDK adapter. The
+OpenAI, Anthropic, Bedrock, Google GenAI, and AI SDK probes also construct or
+wrap the upstream client or SDK. Passing one of these probes demonstrates only
+that limited operation; it does not establish full integration compatibility.
+Only a latest-version runtime failure after the same baseline probe passes is
+reported as a candidate regression. Installation or version-resolution
+problems, and failures present at baseline, are marked blocked. They require
+triage before compatibility can be judged. A candidate regression fails the
+workflow after the issue and Slack alert are written.
+
+The recorded version lock does not advance automatically. Until it is updated,
+the same package versions can appear in successive scheduled alerts; the
+discovery issue is updated in place.
 
 The Gemini assessment is advisory only. It cannot change a compatibility
 verdict or make a workflow pass.
@@ -50,5 +71,6 @@ Configure these GitHub Actions settings:
 
 Organization-level secrets scoped only to the SDK repositories are preferred.
 The credentials are used only by the scheduled/default-branch workflow and are
-never passed to pull-request jobs. Slack failures are non-blocking; alerts are
-sent only for newly discovered releases or workflow failures.
+never passed to pull-request jobs. Slack delivery failures are non-blocking;
+alerts are sent when detected versions are newer than the recorded baseline
+or the workflow fails.

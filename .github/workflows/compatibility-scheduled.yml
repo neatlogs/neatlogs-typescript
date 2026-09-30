@@ -21,7 +21,7 @@ permissions:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,6 +32,14 @@ jobs:
       - name: Discover npm releases
         id: discovery
         run: node scripts/compatibility/discover-releases.mjs --report=compatibility-release-report.json
+      - name: Build SDK for isolated consumer checks
+        if: steps.discovery.outputs.changes_found == 'true'
+        run: npm run build
+      - name: Verify detected versions against recorded baselines
+        id: verify_releases
+        if: steps.discovery.outputs.changes_found == 'true'
+        continue-on-error: true
+        run: node scripts/compatibility/verify-releases.mjs
       - name: Capture upstream issue evidence
         if: inputs.upstream_issue_url != ''
         env:
@@ -61,6 +69,7 @@ jobs:
           COMPAT_GEMINI_MODEL: ${{ vars.COMPAT_GEMINI_MODEL || 'gemini-2.5-flash' }}
         run: npm run compatibility:llm
       - name: Upload discovery report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: typescript-compatibility-release-report
@@ -68,32 +77,43 @@ jobs:
             compatibility-release-report.json
             compatibility-evidence.json
             compatibility-llm-analysis.json
+            compatibility-verification.json
             compatibility-upstream-issue.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Create or update discovery issue
         id: discovery_issue
-        if: steps.discovery.outputs.changes_found == 'true'
+        if: always() && steps.discovery.outputs.changes_found == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('node:fs');
             const report = JSON.parse(fs.readFileSync('compatibility-release-report.json', 'utf8'));
-            const analysis = JSON.parse(fs.readFileSync('compatibility-llm-analysis.json', 'utf8'));
+            const analysis = fs.existsSync('compatibility-llm-analysis.json')
+              ? JSON.parse(fs.readFileSync('compatibility-llm-analysis.json', 'utf8'))
+              : { unavailable: true };
+            const verification = fs.existsSync('compatibility-verification.json')
+              ? JSON.parse(fs.readFileSync('compatibility-verification.json', 'utf8'))
+              : { counts: { passed: 0, failed: 0, blocked: 0, 'not-tested': report.changes.length }, packages: [] };
             const title = '[compatibility] New TypeScript integration releases detected';
-            const rows = report.changes.map((change) =>
-              `| ${change.package} | ${change.previouslyAnalyzed ?? 'not recorded'} | ${change.latest} | ${change.integrations.join(', ')} |`
+            const rows = report.changes.map((change) => {
+              const result = verification.packages.find((item) => item.package === change.package);
+              return `| ${change.package} | ${change.previouslyAnalyzed ?? 'not recorded'} | ${change.latest} | ${result?.status ?? 'not-tested'} | ${result?.scope ?? 'check did not run'} |`;
+            }
             ).join('\n');
             const body = [
               'The scheduled compatibility monitor found upstream releases newer than the recorded-version lockfile.',
               '',
-              'Gemini provides an advisory assessment from upstream package evidence and the current adapter source. Its risk rating and findings are unverified; this scheduled workflow does not run compatibility tests against the new versions. Review the evidence and test affected integrations before treating a finding as a confirmed regression.',
+              'Deterministic checks install a tarball built from this Neatlogs checkout with each exact recorded baseline and detected version in isolated npm consumers. The reported scope is a bounded runtime smoke probe, not complete SDK compatibility. A failed latest probe after a passing baseline is a candidate regression requiring triage. Blocked and not-tested mean compatibility is unknown.',
               '',
-              '| Package | Previously analyzed | Latest | Integrations |',
-              '| --- | --- | --- | --- |',
+              `Smoke checks: ${verification.counts.passed} passed, ${verification.counts.failed} candidate regressions, ${verification.counts.blocked} blocked, ${verification.counts['not-tested']} not tested. See the workflow artifact for the baseline/latest result and any failure detail.`,
+              '',
+              '| Package | Recorded baseline | Detected version | Smoke result | Check scope |',
+              '| --- | --- | --- | --- | --- |',
               rows,
               '',
               '### Unverified Gemini advisory analysis',
+              'Gemini provides an advisory assessment from upstream package evidence and adapter source. Its findings are separate from the deterministic smoke results and require review.',
               '',
               '```json',
               JSON.stringify(analysis, null, 2),
@@ -123,5 +143,10 @@ jobs:
           COMPAT_JOB_STATUS: ${{ job.status }}
           COMPAT_CHANGES_FOUND: ${{ steps.discovery.outputs.changes_found }}
           COMPAT_DISCOVERY_ISSUE_URL: ${{ steps.discovery_issue.outputs.issue_url }}
+          COMPAT_VERIFICATION_FILE: compatibility-verification.json
+          COMPAT_VERIFICATION_OUTCOME: ${{ steps.verify_releases.outcome }}
           COMPAT_UPSTREAM_ISSUE_FILE: compatibility-upstream-issue.json
         run: node scripts/compatibility/notify-slack.mjs
+      - name: Fail run for candidate regression found by version checks
+        if: always() && steps.verify_releases.outcome == 'failure'
+        run: exit 1
