@@ -72,6 +72,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Create or update discovery issue
+        id: discovery_issue
         if: steps.discovery.outputs.changes_found == 'true'
         uses: actions/github-script@v7
         with:
@@ -84,13 +85,15 @@ jobs:
               `| ${change.package} | ${change.previouslyAnalyzed ?? 'not recorded'} | ${change.latest} | ${change.integrations.join(', ')} |`
             ).join('\n');
             const body = [
-              'The scheduled compatibility monitor found releases that have not been analyzed.',
+              'The scheduled compatibility monitor found upstream releases newer than the recorded-version lockfile.',
+              '',
+              'Gemini provides an advisory assessment from upstream package evidence and the current adapter source. Its risk rating and findings are unverified; this scheduled workflow does not run compatibility tests against the new versions. Review the evidence and test affected integrations before treating a finding as a confirmed regression.',
               '',
               '| Package | Previously analyzed | Latest | Integrations |',
               '| --- | --- | --- | --- |',
               rows,
               '',
-              '### Advisory impact analysis',
+              '### Unverified Gemini advisory analysis',
               '',
               '```json',
               JSON.stringify(analysis, null, 2),
@@ -105,11 +108,13 @@ jobs:
               per_page: 100,
             });
             const existing = issues.data.find((issue) => issue.title === title && !issue.pull_request);
+            let issue;
             if (existing) {
-              await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
+              issue = await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
             } else {
-              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+              issue = await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
             }
+            core.setOutput('issue_url', issue.data.html_url);
       - name: Notify Slack of releases or workflow failure
         if: always()
         continue-on-error: true
@@ -117,5 +122,6 @@ jobs:
           COMPAT_SLACK_WEBHOOK_URL: ${{ secrets.COMPAT_SLACK_WEBHOOK_URL }}
           COMPAT_JOB_STATUS: ${{ job.status }}
           COMPAT_CHANGES_FOUND: ${{ steps.discovery.outputs.changes_found }}
+          COMPAT_DISCOVERY_ISSUE_URL: ${{ steps.discovery_issue.outputs.issue_url }}
           COMPAT_UPSTREAM_ISSUE_FILE: compatibility-upstream-issue.json
         run: node scripts/compatibility/notify-slack.mjs

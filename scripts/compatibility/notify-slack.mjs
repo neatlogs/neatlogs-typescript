@@ -16,19 +16,26 @@ function workflowURL() {
   return server && repository && runID ? `${server}/${repository}/actions/runs/${runID}` : null;
 }
 
-export function slackMessage({ status, report, analysis, url, upstreamIssue = null }) {
+export function slackMessage({ status, report, analysis, url, issueUrl = null, upstreamIssue = null }) {
   const changes = report?.changes ?? [];
-  const risk = analysis?.riskLevel ? ` Advisory risk: *${analysis.riskLevel}*.` : '';
+  const risk = analysis?.riskLevel
+    ? ` Gemini flagged *${analysis.riskLevel} potential compatibility risk* (unverified).`
+    : ' Gemini impact analysis unavailable.';
   const link = url ? ` <${url}|Open workflow run>.` : '';
   if (status !== 'success') {
-    return `:red_circle: *TypeScript SDK compatibility workflow failed.*${link}`;
+    return `:red_circle: *TypeScript SDK compatibility workflow failed.* Check the failed step in the run.${link}`;
   }
-  const packages = changes.slice(0, 8).map((item) => `${item.package} ${item.previouslyAnalyzed ?? 'untracked'} → ${item.latest}`).join(', ');
-  const remaining = changes.length > 8 ? `, +${changes.length - 8} more` : '';
+  const packages = changes.slice(0, 3).map((item) => `${item.package} ${item.previouslyAnalyzed ?? 'untracked'} → ${item.latest}`).join(', ');
+  const remaining = changes.length > 3 ? `, +${changes.length - 3} more` : '';
+  const examples = packages ? ` Examples: ${packages}${remaining}.` : '';
+  const packageCount = changes.length === 1
+    ? '1 watched package has a version'
+    : `${changes.length} watched packages have versions`;
   const issue = upstreamIssue?.url
     ? ` Referenced upstream issue: <${upstreamIssue.url}|${upstreamIssue.title ?? upstreamIssue.url}>.`
     : '';
-  return `:warning: *TypeScript SDK compatibility review required:* ${changes.length} upstream release(s). ${packages}${remaining}.${risk}${issue}${link}`;
+  const reviewLink = issueUrl ? ` <${issueUrl}|Review discovery issue and analysis>.` : '';
+  return `:warning: *TypeScript SDK: ${packageCount} newer than the recorded baseline.*${risk} This workflow did not test the SDK against these versions; no regression is confirmed.${examples}${issue}${reviewLink}${link}`;
 }
 
 async function main() {
@@ -45,7 +52,7 @@ async function main() {
   const response = await fetch(webhook, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text: slackMessage({ status, report, analysis, upstreamIssue, url: workflowURL() }) }),
+    body: JSON.stringify({ text: slackMessage({ status, report, analysis, upstreamIssue, issueUrl: process.env.COMPAT_DISCOVERY_ISSUE_URL, url: workflowURL() }) }),
   });
   if (!response.ok) throw new Error(`Slack webhook returned ${response.status}`);
   console.log('Slack compatibility alert sent');
