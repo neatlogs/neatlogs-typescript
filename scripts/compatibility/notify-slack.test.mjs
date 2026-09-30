@@ -68,3 +68,36 @@ test('Slack marks a verifier crash as a workflow failure even before the final f
   assert.match(message, /^:red_circle:/);
   assert.match(message, /failed before producing a report/);
 });
+
+test('Slack distinguishes validated draft PR from fix automation failure', () => {
+  const base = {
+    status: 'success',
+    report: { changes: [{ package: 'openai', previouslyAnalyzed: '6', latest: '7' }] },
+    verification: { counts: { passed: 1, failed: 0, blocked: 0, 'not-tested': 0 } },
+    analysis: { riskLevel: 'high' },
+    url: 'https://example.test/run',
+  };
+  const published = slackMessage({ ...base, validation: { status: 'validated' }, publication: { status: 'created', url: 'https://github.com/neatlogs/neatlogs-typescript/pull/50' } });
+  assert.match(published, /review draft PR/);
+  assert.match(published, /pull\/50/);
+  const rejected = slackMessage({ ...base, validation: { status: 'rejected' }, validationOutcome: 'failure' });
+  assert.match(rejected, /^:red_circle:/);
+  assert.match(rejected, /failed patch validation or tests/);
+  const unpublished = slackMessage({ ...base, validation: { status: 'validated' }, publicationOutcome: 'failure' });
+  assert.match(unpublished, /draft PR creation failed/);
+  assert.doesNotMatch(unpublished, /candidate regressions, 1 blocked/);
+});
+
+test('Slack reports prior PR lookup failure without implying an SDK regression', () => {
+  const message = slackMessage({
+    status: 'success',
+    report: { changes: [{ package: 'openai', previouslyAnalyzed: '6', latest: '7' }] },
+    analysis: { riskLevel: 'high' },
+    verification: { counts: { passed: 1, failed: 0, blocked: 0, 'not-tested': 0 } },
+    priorPrsOutcome: 'failure',
+    url: null,
+  });
+  assert.match(message, /^:red_circle:/);
+  assert.match(message, /Prior compatibility PR lookup failed/);
+  assert.match(message, /0 candidate regressions/);
+});
