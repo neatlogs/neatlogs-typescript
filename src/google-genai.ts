@@ -459,10 +459,15 @@ function wrapStream(stream: any, span: Span): any {
       async return(value?: any): Promise<IteratorResult<any>> {
         markStreamIncomplete(accumulated, 'consumer_cancelled');
         span.setAttribute('neatlogs.stream.cancelled', true);
-        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-        if (result.done) finalizeStreamChunks(span, accumulated);
-        else addStreamChunk(span, accumulated, result.value);
-        return result;
+        try {
+          const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+          if (result.done) finalizeStreamChunks(span, accumulated);
+          else addStreamChunk(span, accumulated, result.value);
+          return result;
+        } catch (err) {
+          recordError(span, err);
+          throw err;
+        }
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
         recordError(span, err);
