@@ -50,9 +50,10 @@ async function main() {
     await writeFile(patchFile, proposal.patch);
     await run('git', ['apply', '--check', '--whitespace=error', patchFile]);
     const branch = proposalBranch(change.package, change.latest);
+    const provenance = `<!-- neatlogs-compat-autofix v1 base=${proposal.baseSha} patch=${digest} -->`;
     result.branch = branch;
     const repository = process.env.GITHUB_REPOSITORY;
-    const { stdout: existingJSON } = await run('gh', ['pr', 'list', '--repo', repository, '--state', 'all', '--head', branch, '--json', 'url,state']);
+    const { stdout: existingJSON } = await run('gh', ['pr', 'list', '--repo', repository, '--state', 'all', '--head', branch, '--json', 'url,state,isDraft,headRefOid,body']);
     const existing = JSON.parse(existingJSON)?.[0];
     if (existing) {
       if (existing.state !== 'OPEN') {
@@ -60,8 +61,37 @@ async function main() {
         result.priorPrUrl = existing.url;
         result.reason = 'A maintainer closed the prior fix PR; no new PR was opened automatically';
       } else {
-        result.status = 'existing';
-        result.url = existing.url;
+        result.priorPrUrl = existing.url;
+        result.existingWasDraft = Boolean(existing.isDraft);
+        await run('git', ['fetch', '--no-tags', 'origin', `refs/heads/${branch}`]);
+        const { stdout: fetchedHead } = await run('git', ['rev-parse', 'FETCH_HEAD']);
+        if (fetchedHead.trim() !== existing.headRefOid) {
+          throw new Error('Existing fix PR changed during validation; refusing to mark it ready');
+        }
+        const { stdout: commitAuthor } = await run('git', ['show', '-s', '--format=%ae', 'FETCH_HEAD']);
+        if (!existing.body?.includes(provenance) || commitAuthor.trim() !== '41898282+github-actions[bot]@users.noreply.github.com') {
+          result.status = 'existing_unverified';
+          result.priorPrUrl = existing.url;
+          result.reason = 'Existing PR lacks generated-fix provenance; it was left unchanged for human review';
+        } else {
+          await run('git', ['merge-base', '--is-ancestor', proposal.baseSha, 'FETCH_HEAD']);
+          const { stdout: remoteFiles } = await run('git', ['diff', '--name-only', proposal.baseSha, 'FETCH_HEAD']);
+          const actual = remoteFiles.trim().split('\n').filter(Boolean);
+          if (actual.length !== files.length || actual.some((path) => !files.includes(path))) {
+            throw new Error('Existing fix PR changes differ from validated patch paths');
+          }
+          await run('git', ['apply', '--whitespace=error', patchFile]);
+          for (const path of files) {
+            const { stdout: localHash } = await run('git', ['hash-object', path]);
+            const { stdout: remoteHash } = await run('git', ['rev-parse', `FETCH_HEAD:${path}`]);
+            if (localHash.trim() !== remoteHash.trim()) {
+              throw new Error('Existing fix PR content differs from validated patch');
+            }
+          }
+          if (existing.isDraft) await run('gh', ['pr', 'ready', existing.url]);
+          result.status = 'existing';
+          result.url = existing.url;
+        }
       }
     } else {
       const { stdout: remote } = await run('git', ['ls-remote', '--heads', 'origin', branch]);
@@ -82,13 +112,15 @@ async function main() {
       const issueUrl = process.env.COMPAT_DISCOVERY_ISSUE_URL;
       const runUrl = `${process.env.GITHUB_SERVER_URL}/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}`;
       const body = [
+        provenance,
+        '',
         '## Gemini proposed compatibility fix',
         '',
         `Upstream package: ${change.package} ${change.previouslyAnalyzed ?? 'unrecorded'} → ${change.latest}`,
         `Reason: ${proposal.reason}`,
         `Evidence cited by Gemini: ${proposal.evidence}`,
         '',
-        'This is a draft for human code review. The Gemini reasoning is advisory; the bounded baseline/latest smoke probes and repository tests do not establish complete integration compatibility.',
+        'This PR is ready for human code review; it is not approved or merged automatically. The Gemini reasoning is advisory; the bounded baseline/latest smoke probes and repository tests do not establish complete integration compatibility.',
         '',
         `Targeted changed test on the original SDK: ${validation.baselineTargetedTest ?? 'not run'}. A failure here may reproduce the issue, but still needs human review.`,
         `Validated files: ${validation.files.join(', ')}`,
@@ -99,7 +131,7 @@ async function main() {
       const bodyFile = resolve(repositoryRoot, 'compatibility-fix-pr-body.md');
       await writeFile(bodyFile, `${body}\n`);
       const { stdout: url } = await run('gh', [
-        'pr', 'create', '--repo', repository, '--draft', '--base', process.env.COMPAT_BASE_BRANCH || 'main',
+        'pr', 'create', '--repo', repository, '--base', process.env.COMPAT_BASE_BRANCH || 'main',
         '--head', branch, '--title', `fix(compat): review ${change.package}@${change.latest} TypeScript adapter`,
         '--body-file', bodyFile,
       ]);

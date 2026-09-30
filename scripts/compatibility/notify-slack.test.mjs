@@ -17,7 +17,7 @@ test('Slack release message distinguishes advisory risk from a confirmed regress
   assert.match(message, /ai 6 → 7/);
   assert.match(message, /high/);
   assert.match(message, /1 passed, 0 candidate regressions/);
-  assert.match(message, /high potential compatibility risk\* \(unverified\)/);
+  assert.match(message, /Gemini advisory: \*high potential risk\* \(unverified/);
   assert.match(message, /not full SDK compatibility/);
   assert.match(message, /github\.com\/neatlogs\/neatlogs-typescript\/issues\/46/);
   assert.match(message, /stream spans stay open/);
@@ -26,12 +26,15 @@ test('Slack release message distinguishes advisory risk from a confirmed regress
 });
 
 test('Slack failure message does not require a release report', () => {
-  assert.match(slackMessage({ status: 'failure', report: null, analysis: null, url: null }), /workflow failed/);
+  const message = slackMessage({ status: 'failure', report: null, analysis: null, url: 'https://github.com/neatlogs/neatlogs-typescript/actions/runs/36571240360' });
+  assert.match(message, /workflow failed/);
+  assert.match(message, /github\.com\/neatlogs\/neatlogs-typescript\/actions\/runs\/36571240360/);
+  assert.doesNotMatch(message, /github\.com\/neatlogs\/neatlogs-typescript\/36571240360>/);
 });
 
 test('Slack release message says when the Gemini analysis is unavailable', () => {
   const message = slackMessage({ status: 'success', report: { changes: [] }, analysis: { skipped: true }, url: null });
-  assert.match(message, /Gemini impact analysis unavailable/);
+  assert.match(message, /Gemini advisory: unavailable/);
   assert.doesNotMatch(message, /Advisory risk: \*undefined\*/);
 });
 
@@ -53,8 +56,9 @@ test('Slack calls a baseline-pass latest-fail smoke probe a candidate regression
     url: null,
   });
   assert.match(message, /^:red_circle:/);
-  assert.match(message, /1 candidate regressions/);
-  assert.match(message, /low potential compatibility risk/);
+  assert.match(message, /Deterministic smoke check: 1 candidate SDK regression/);
+  assert.match(message, /recorded baseline passed; detected version failed/);
+  assert.match(message, /low potential risk/);
 });
 
 test('Slack marks a verifier crash as a workflow failure even before the final failure step', () => {
@@ -69,7 +73,7 @@ test('Slack marks a verifier crash as a workflow failure even before the final f
   assert.match(message, /failed before producing a report/);
 });
 
-test('Slack distinguishes validated draft PR from fix automation failure', () => {
+test('Slack distinguishes validated review PR from validation and publication failures', () => {
   const base = {
     status: 'success',
     report: { changes: [{ package: 'openai', previouslyAnalyzed: '6', latest: '7' }] },
@@ -78,14 +82,42 @@ test('Slack distinguishes validated draft PR from fix automation failure', () =>
     url: 'https://example.test/run',
   };
   const published = slackMessage({ ...base, validation: { status: 'validated' }, publication: { status: 'created', url: 'https://github.com/neatlogs/neatlogs-typescript/pull/50' } });
-  assert.match(published, /review draft PR/);
+  assert.match(published, /patch passed local patch and test validation/);
+  assert.match(published, /open ready-for-review PR/);
   assert.match(published, /pull\/50/);
+  assert.match(published, /https:\/\/example\.test\/run/);
+  assert.doesNotMatch(published, /draft PR/);
   const rejected = slackMessage({ ...base, validation: { status: 'rejected' }, validationOutcome: 'failure' });
   assert.match(rejected, /^:red_circle:/);
-  assert.match(rejected, /failed patch validation or tests/);
+  assert.match(rejected, /patch failed validation or tests/);
   const unpublished = slackMessage({ ...base, validation: { status: 'validated' }, publicationOutcome: 'failure' });
-  assert.match(unpublished, /draft PR creation failed/);
+  assert.match(unpublished, /PR publication failed after patch validation/);
+  assert.match(unpublished, /https:\/\/example\.test\/run/);
   assert.doesNotMatch(unpublished, /candidate regressions, 1 blocked/);
+  const unverifiedExisting = slackMessage({
+    ...base,
+    validation: { status: 'validated' },
+    publication: { status: 'existing_unverified', priorPrUrl: 'https://github.com/neatlogs/neatlogs-typescript/pull/51', existingWasDraft: true },
+  });
+  assert.match(unverifiedExisting, /existing PR> lacks verified bot provenance/);
+  assert.match(unverifiedExisting, /left unchanged as a draft/);
+  assert.doesNotMatch(unverifiedExisting, /Validated SDK fix:/);
+});
+
+test('Slack reports a failed Gemini proposal and skipped patch validation as automation failures', () => {
+  const base = {
+    status: 'success',
+    report: { changes: [{ package: 'openai', previouslyAnalyzed: '6', latest: '7' }] },
+    verification: { counts: { passed: 1, failed: 0, blocked: 0, 'not-tested': 0 } },
+    url: 'https://github.com/neatlogs/neatlogs-typescript/actions/runs/123',
+  };
+  const proposalFailed = slackMessage({ ...base, proposal: { decision: 'review_only' }, proposalOutcome: 'failure' });
+  assert.match(proposalFailed, /^:red_circle:/);
+  assert.match(proposalFailed, /Gemini fix proposal failed/);
+  assert.match(proposalFailed, /actions\/runs\/123/);
+  const validationSkipped = slackMessage({ ...base, proposalReady: 'true', validationJobStatus: 'skipped' });
+  assert.match(validationSkipped, /^:red_circle:/);
+  assert.match(validationSkipped, /patch validation was unexpectedly skipped/);
 });
 
 test('Slack reports prior PR lookup failure without implying an SDK regression', () => {
@@ -98,6 +130,6 @@ test('Slack reports prior PR lookup failure without implying an SDK regression',
     url: null,
   });
   assert.match(message, /^:red_circle:/);
-  assert.match(message, /Prior compatibility PR lookup failed/);
+  assert.match(message, /Fix automation failed to look up prior PRs/);
   assert.match(message, /0 candidate regressions/);
 });

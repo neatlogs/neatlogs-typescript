@@ -132,9 +132,9 @@ jobs:
               '### Automated fix proposal',
               `Decision: ${proposal.decision}. ${proposal.reason ?? ''}`,
               'Validation: pending or not run.',
-              'Draft PR: pending or not created.',
+              'Review PR: pending or not created.',
               `Candidates deferred or not proposed: ${(proposal.unproposedCandidates ?? []).join(', ') || 'none'}.`,
-              'A draft PR is opened only for a specific SDK source and test patch that passes validation; no change is merged automatically.',
+              'A ready-for-review PR is opened only for a specific SDK source and test patch that passes validation; no change is approved or merged automatically.',
               '',
               '### Unverified Gemini advisory analysis',
               'Gemini provides an advisory assessment from upstream package evidence and adapter source. Its findings are separate from the deterministic smoke results and require review.',
@@ -240,7 +240,7 @@ jobs:
         with:
           name: typescript-compatibility-fix-validation
           path: validation-report
-      - name: Recheck patch and open or reuse draft PR
+      - name: Recheck patch and open or reuse review PR
         id: publish
         continue-on-error: true
         env:
@@ -295,6 +295,8 @@ jobs:
         env:
           COMPAT_DISCOVERY_ISSUE_URL: ${{ needs.discover.outputs.issue_url }}
           COMPAT_PR_URL: ${{ needs.publish_fix.outputs.pr_url }}
+          COMPAT_VALIDATION_JOB_STATUS: ${{ needs.validate_fix.result }}
+          COMPAT_PUBLICATION_JOB_STATUS: ${{ needs.publish_fix.result }}
         with:
           script: |
             const fs = require('node:fs');
@@ -305,8 +307,8 @@ jobs:
               ? JSON.parse(fs.readFileSync('compatibility-fix-publication.json', 'utf8')) : null;
             const current = await github.rest.issues.get({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber });
             const body = current.data.body
-              .replace(/^Validation:.*$/m, `Validation: ${validation?.status ?? 'not run'}${validation?.reason ? ` (${validation.reason})` : ''}. Targeted test on original SDK: ${validation?.baselineTargetedTest ?? 'not run'}.`)
-              .replace(/^Draft PR:.*$/m, `Draft PR: ${publication?.url || process.env.COMPAT_PR_URL || publication?.reason || 'not created'}.`);
+              .replace(/^Validation:.*$/m, `Validation: ${validation?.status ?? (process.env.COMPAT_VALIDATION_JOB_STATUS === 'failure' ? 'failed before report' : 'not run')}${validation?.reason ? ` (${validation.reason})` : ''}. Targeted test on original SDK: ${validation?.baselineTargetedTest ?? 'not run'}.`)
+              .replace(/^Review PR:.*$/m, `Review PR: ${publication?.url || process.env.COMPAT_PR_URL || (publication?.priorPrUrl ? `${publication.priorPrUrl} (left unchanged: ${publication.reason})` : publication?.reason) || (process.env.COMPAT_PUBLICATION_JOB_STATUS === 'failure' ? 'publication failed before report' : 'not created')}.`);
             await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body });
       - name: Notify Slack of release and fix outcome
         continue-on-error: true
@@ -317,6 +319,7 @@ jobs:
           COMPAT_DISCOVERY_ISSUE_URL: ${{ needs.discover.outputs.issue_url }}
           COMPAT_VERIFICATION_OUTCOME: ${{ needs.discover.outputs.verify_outcome }}
           COMPAT_PROPOSAL_OUTCOME: ${{ needs.discover.outputs.proposal_outcome }}
+          COMPAT_PROPOSAL_READY: ${{ needs.discover.outputs.proposal_ready }}
           COMPAT_PRIOR_PRS_OUTCOME: ${{ needs.discover.outputs.prior_prs_outcome }}
           COMPAT_VALIDATION_OUTCOME: ${{ needs.validate_fix.outputs.validation_outcome }}
           COMPAT_PUBLICATION_OUTCOME: ${{ needs.publish_fix.outputs.publish_outcome }}
@@ -325,5 +328,5 @@ jobs:
           COMPAT_PR_URL: ${{ needs.publish_fix.outputs.pr_url }}
         run: node scripts/compatibility/notify-slack.mjs
       - name: Fail run for candidate regression or fix automation failure
-        if: always() && (needs.discover.outputs.verify_outcome == 'failure' || needs.discover.outputs.proposal_outcome == 'failure' || needs.discover.outputs.prior_prs_outcome == 'failure' || needs.validate_fix.result == 'failure' || needs.validate_fix.outputs.validation_outcome == 'failure' || needs.publish_fix.result == 'failure' || needs.publish_fix.outputs.publish_outcome == 'failure' || (needs.validate_fix.outputs.validated == 'true' && needs.publish_fix.result == 'skipped'))
+        if: always() && (needs.discover.outputs.verify_outcome == 'failure' || needs.discover.outputs.proposal_outcome == 'failure' || needs.discover.outputs.prior_prs_outcome == 'failure' || needs.validate_fix.result == 'failure' || needs.validate_fix.outputs.validation_outcome == 'failure' || (needs.discover.outputs.proposal_ready == 'true' && needs.validate_fix.result == 'skipped') || needs.publish_fix.result == 'failure' || needs.publish_fix.outputs.publish_outcome == 'failure' || (needs.validate_fix.outputs.validated == 'true' && needs.publish_fix.result == 'skipped'))
         run: exit 1

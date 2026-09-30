@@ -61,17 +61,18 @@ discovery issue is updated in place.
 The Gemini assessment is advisory only. It cannot change a compatibility
 verdict or make a workflow pass.
 
-An aggregate `high` risk rating does not open a PR. For a draft PR, Gemini
+An aggregate `high` risk rating does not open a PR. For a review PR, Gemini
 must provide a specific upstream-to-adapter rationale and a patch that changes
 an affected existing adapter and an existing test. A separate read-only job
 checks paths and patch size, runs the changed test against the original SDK,
 then applies the patch and runs TypeScript lint and the full test suite. The
 test result on the original SDK is recorded in the PR. A passing smoke probe
 or patched test suite does not prove that the proposed fix is necessary; the
-PR remains a draft for human review. No PR is merged automatically. If no
-safe patch is produced, the issue records that outcome and the remaining
-candidates. Future schedules rotate through candidates and skip packages
-already covered by any prior automated compatibility PR, including one closed
+PR is opened ready for human code review. No review is approved and no PR is
+merged automatically. If no safe patch is produced, the issue records that
+outcome and the remaining candidates. Future schedules rotate through
+candidates and skip packages already covered by any prior automated
+compatibility PR, including one closed
 by a maintainer.
 
 The PR publishing job has write permission only after validation. It checks
@@ -82,6 +83,12 @@ pull requests; otherwise publication is reported as a failure. The optional
 contents and pull-request write access when organization policy blocks PR
 creation with `GITHUB_TOKEN`. It is used only in the publishing job. PR checks
 started by `GITHUB_TOKEN` can require maintainer approval before running.
+An existing generated draft PR is marked ready only when its provenance
+marker, bot commit author, base commit, changed files, and file contents match
+the newly validated patch. Other existing PRs are left unchanged and reported.
+Slack distinguishes deterministic smoke regressions from unverified Gemini
+advice, patch validation, PR publication, and workflow failures. Every sent
+alert links the actual workflow run, and a published fix links its review PR.
 
 Configure these GitHub Actions settings:
 
@@ -93,7 +100,7 @@ Configure these GitHub Actions settings:
 - Secret `COMPAT_SLACK_WEBHOOK_URL` (optional): a channel-specific Slack
   Incoming Webhook. Without it, Slack notification is skipped.
 - Secret `COMPAT_PR_TOKEN` (optional): a GitHub App token or PAT authorized to
-  push fix branches and create draft PRs when `GITHUB_TOKEN` cannot do so.
+  push fix branches and create review PRs when `GITHUB_TOKEN` cannot do so.
 
 Organization-level secrets scoped only to the SDK repositories are preferred.
 The credentials are used only by the scheduled/default-branch workflow and are

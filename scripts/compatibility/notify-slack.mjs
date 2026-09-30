@@ -16,50 +16,64 @@ function workflowURL() {
   return server && repository && runID ? `${server}/${repository}/actions/runs/${runID}` : null;
 }
 
-export function slackMessage({ status, report, analysis, verification = null, verificationOutcome = null, proposal = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null }) {
+export function slackMessage({ status, report, analysis, verification = null, verificationOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null }) {
   const changes = report?.changes ?? [];
   const risk = analysis?.riskLevel
-    ? ` Gemini flagged *${analysis.riskLevel} potential compatibility risk* (unverified).`
-    : ' Gemini impact analysis unavailable.';
-  const link = url ? ` <${url}|Open workflow run>.` : '';
-  const reviewLink = issueUrl ? ` <${issueUrl}|Review discovery issue and analysis>.` : '';
+    ? `Gemini advisory: *${analysis.riskLevel} potential risk* (unverified; this does not establish an SDK regression).`
+    : 'Gemini advisory: unavailable.';
   const counts = verification?.counts;
-  const checks = counts
-    ? ` Limited smoke checks: ${counts.passed} passed, ${counts.failed} candidate regressions, ${counts.blocked} blocked, ${counts['not-tested']} not tested. A pass covers only the stated probe scope, not full SDK compatibility.`
-    : verificationOutcome === 'failure'
-      ? ' Version smoke checks failed before producing a report; compatibility remains unknown.'
-      : ' Published-version checks did not complete; compatibility remains unknown.';
+  const regressionPackages = verification?.packages?.filter((item) => item.status === 'failed') ?? [];
+  const examples = regressionPackages.slice(0, 3).map((item) => `${item.package}@${item.latestVersion}`).join(', ');
+  const checks = counts?.failed
+    ? `Deterministic smoke check: ${counts.failed} candidate SDK regression${counts.failed === 1 ? '' : 's'} (recorded baseline passed; detected version failed)${examples ? `: ${examples}` : ''}. This bounded probe needs triage; it does not establish full SDK behavior. Other results: ${counts.passed} passed, ${counts.blocked} blocked, ${counts['not-tested']} not tested.`
+    : counts
+      ? `Deterministic smoke checks: ${counts.passed} passed, 0 candidate regressions, ${counts.blocked} blocked, ${counts['not-tested']} not tested. Passes cover only the stated probes, not full SDK compatibility.`
+      : verificationOutcome === 'failure'
+        ? 'Deterministic smoke checks failed before producing a report; compatibility remains unknown.'
+        : 'Deterministic smoke checks did not complete; compatibility remains unknown.';
+  const validationText = validation?.status === 'validated'
+    ? 'Gemini-proposed SDK patch passed local patch and test validation.'
+    : validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure'
+      ? 'Gemini-proposed SDK patch failed validation or tests; no PR was opened.'
+      : proposalReady === 'true' && validationJobStatus === 'skipped'
+        ? 'Gemini-proposed SDK patch validation was unexpectedly skipped; no PR was opened.'
+        : '';
   const fix = publication?.url || prUrl
-    ? ` Gemini-proposed fix: <${publication?.url || prUrl}|review draft PR>.`
+    ? `Validated SDK fix: <${publication?.url || prUrl}|open ready-for-review PR>. No approval or merge was automated.`
     : publication?.status === 'skipped_closed'
-      ? ' A maintainer closed the prior fix PR; no new PR was opened.'
+      ? 'A maintainer closed the prior fix PR; no new PR was opened.'
+    : publication?.status === 'existing_unverified'
+      ? `An <${publication.priorPrUrl}|existing PR> lacks verified bot provenance; it was left unchanged${publication.existingWasDraft ? ' as a draft' : ''}. No new PR was opened.`
     : priorPrsOutcome === 'failure'
-      ? ' Prior compatibility PR lookup failed; no new fix was proposed.'
+      ? 'Fix automation failed to look up prior PRs; no new fix was proposed.'
     : publicationOutcome === 'failure' || publicationJobStatus === 'failure'
-      ? ' Gemini-proposed fix passed local validation, but draft PR creation failed; review the run.'
+      ? `PR publication failed after patch validation${publication?.priorPrUrl ? `; <${publication.priorPrUrl}|existing PR> was left unchanged` : ''}; review the workflow run.`
       : validation?.status === 'validated' && !publication
-        ? ' Gemini-proposed fix passed validation, but PR publication did not complete; review the run.'
-      : validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure'
-        ? ' Gemini-proposed fix failed patch validation or tests; no PR was opened.'
-        : proposal?.decision === 'review_only'
-          ? ' Gemini produced no safe, code-specific fix to propose; review the issue.'
-          : proposalOutcome === 'failure'
-            ? ' Gemini fix proposal failed; review the run.'
+        ? 'PR publication did not complete after patch validation; review the workflow run.'
+        : proposalOutcome === 'failure'
+          ? 'Gemini fix proposal failed; review the workflow run.'
+          : proposal?.decision === 'review_only'
+            ? 'Gemini produced no safe, code-specific fix to propose; review the issue.'
             : '';
-  if (status !== 'success') {
-    return `:red_circle: *TypeScript SDK compatibility workflow failed.*${checks}${fix} Check the failed step in the run.${reviewLink}${link}`;
-  }
   const packages = changes.slice(0, 3).map((item) => `${item.package} ${item.previouslyAnalyzed ?? 'untracked'} → ${item.latest}`).join(', ');
   const remaining = changes.length > 3 ? `, +${changes.length - 3} more` : '';
-  const examples = packages ? ` Examples: ${packages}${remaining}.` : '';
+  const packageExamples = packages ? ` Examples: ${packages}${remaining}.` : '';
   const packageCount = changes.length === 1
     ? '1 watched package has a version'
     : `${changes.length} watched packages have versions`;
   const issue = upstreamIssue?.url
-    ? ` Referenced upstream issue: <${upstreamIssue.url}|${upstreamIssue.title ?? upstreamIssue.url}>.`
+    ? `Referenced upstream issue: <${upstreamIssue.url}|${upstreamIssue.title ?? upstreamIssue.url}>.`
     : '';
-  const marker = counts?.failed || verificationOutcome === 'failure' || priorPrsOutcome === 'failure' || validationOutcome === 'failure' || publicationOutcome === 'failure' || validationJobStatus === 'failure' || publicationJobStatus === 'failure' || (validation?.status === 'validated' && !publication) ? ':red_circle:' : ':warning:';
-  return `${marker} *TypeScript SDK: ${packageCount} newer than the recorded baseline.*${checks}${risk}${fix}${examples}${issue}${reviewLink}${link}`;
+  const automationFailed = status !== 'success' || (verificationOutcome === 'failure' && !counts?.failed) || proposalOutcome === 'failure' || priorPrsOutcome === 'failure' || validationOutcome === 'failure' || publicationOutcome === 'failure' || validationJobStatus === 'failure' || publicationJobStatus === 'failure' || (proposalReady === 'true' && validationJobStatus === 'skipped') || (validation?.status === 'validated' && !publication && !prUrl);
+  const marker = counts?.failed || automationFailed ? ':red_circle:' : ':warning:';
+  const heading = status !== 'success'
+    ? '*TypeScript SDK compatibility workflow failed.*'
+    : `*TypeScript SDK: ${packageCount} newer than the recorded baseline.*`;
+  const parts = [heading, checks, risk, validationText, fix, packageExamples.trim(), issue,
+    issueUrl ? `<${issueUrl}|Review discovery issue and analysis>.` : '',
+    automationFailed ? 'Automation failure requires attention.' : '',
+    url ? `<${url}|Open workflow run>.` : ''];
+  return `${marker} ${parts.filter(Boolean).join(' ')}`;
 }
 
 async function main() {
@@ -84,6 +98,7 @@ async function main() {
       status, report, analysis, verification, proposal, validation, publication,
       verificationOutcome: process.env.COMPAT_VERIFICATION_OUTCOME,
       proposalOutcome: process.env.COMPAT_PROPOSAL_OUTCOME,
+      proposalReady: process.env.COMPAT_PROPOSAL_READY,
       priorPrsOutcome: process.env.COMPAT_PRIOR_PRS_OUTCOME,
       validationOutcome: process.env.COMPAT_VALIDATION_OUTCOME,
       publicationOutcome: process.env.COMPAT_PUBLICATION_OUTCOME,
