@@ -8,6 +8,7 @@ import { span } from './decorators/orchestration.js';
 import {
   doctorCapturedLocalV2,
   DOCTOR_V2_FORMAT_VERSION,
+  summarizeDoctorChecks,
   type DoctorV2Result,
 } from './doctor-v2.js';
 import { flush, init, shutdown } from './init.js';
@@ -569,14 +570,13 @@ function persistedProbeResult(
     check('probe_metadata', exactMetadata, 'METADATA_VALID', 'METADATA_INVALID', 'CHECK_METADATA_FINALIZATION', 'All versioned Doctor SDK metadata survived finalization'),
     check('probe_typed_tokens', exactTokens, 'TYPED_TOKENS_VALID', 'TYPED_TOKENS_INVALID', 'CHECK_TOKEN_MAPPING', 'Persisted token totals remain exact numeric values'),
   ];
-  const firstFailure = probeChecks.find((item) => item.status === 'fail');
+  const checks = [...local.checks, ...probeChecks];
+  const summary = summarizeDoctorChecks(checks);
 
   return {
     ...local,
     mode: 'probe',
-    status: firstFailure || local.status !== 'pass' ? 'fail' : 'pass',
-    first_failure: firstFailure?.reason_code ??
-      (local.status === 'fail' ? local.first_failure : null),
+    ...summary,
     probe: {
       ingest_route: '/v1/traces',
       marker_header: 'x-neatlogs-doctor',
@@ -593,7 +593,7 @@ function persistedProbeResult(
       metadata_valid: exactMetadata,
       typed_tokens_valid: exactTokens,
     },
-    checks: [...local.checks, ...probeChecks],
+    checks,
   } as const;
 }
 
