@@ -217,7 +217,7 @@ class NeatlogsCallbackHandler {
         const msg = gen[j]?.message ?? gen[j];
         const content = msg?.content ?? msg?.text ?? '';
         span.setAttribute(`neatlogs.llm.output_messages.${i}.role`, 'assistant');
-        span.setAttribute(`neatlogs.llm.output_messages.${i}.content`, String(content));
+        span.setAttribute(`neatlogs.llm.output_messages.${i}.content`, typeof content === 'string' ? content : safeStringify(content));
 
         const toolCalls = msg?.tool_calls ?? msg?.additional_kwargs?.tool_calls;
         if (toolCalls && Array.isArray(toolCalls)) {
