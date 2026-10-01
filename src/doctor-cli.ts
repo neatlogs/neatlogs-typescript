@@ -999,10 +999,11 @@ export async function runDoctorCli(
         }
       } else {
         await discardResponseBody(response);
+        const diagnosticDetails = response.status >= 500 ? lastDiagnostics : undefined;
         throw new ProbeReadError(
           'BACKEND_HTTP_ERROR',
           `Trace read-back failed with HTTP ${response.status}`,
-          response.status >= 500 ? lastDiagnostics : undefined,
+          { http_status: response.status, ...diagnosticDetails },
         );
       }
       const delay = Math.min(io.pollIntervalMs, Math.max(0, deadline - Date.now()));

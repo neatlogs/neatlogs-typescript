@@ -422,12 +422,18 @@ describe('doctor CLI', () => {
         redirect: 'BACKEND_HTTP_ERROR',
         client: 'BACKEND_HTTP_ERROR',
       }[terminal]);
-      expect(failure?.details).toEqual(['network', 'server'].includes(terminal) ? {
-        ingestion_state: 'processing',
-        current_stage: 'pii_dispatch',
-        last_successful_stage: 'kafka_published',
-        retryable: false,
-      } : undefined);
+      const expectedDetails = terminal === 'auth' ? undefined : {
+        ...(['network', 'server'].includes(terminal) ? {
+          ingestion_state: 'processing',
+          current_stage: 'pii_dispatch',
+          last_successful_stage: 'kafka_published',
+          retryable: false,
+        } : {}),
+        ...(terminal === 'redirect' ? { http_status: 302 } : {}),
+        ...(terminal === 'client' ? { http_status: 418 } : {}),
+        ...(terminal === 'server' ? { http_status: 503 } : {}),
+      };
+      expect(failure?.details).toEqual(expectedDetails);
     }
   });
 
