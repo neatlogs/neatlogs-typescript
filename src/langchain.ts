@@ -312,7 +312,7 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    span.setAttribute('output.value', String(output));
+    span.setAttribute('output.value', toolOutputToString(output));
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
@@ -416,6 +416,20 @@ function mapRole(role: string): string {
   if (r === 'function' || r === 'functionmessage') return 'function';
   if (r === 'tool' || r === 'toolmessage') return 'tool';
   return role;
+}
+
+/**
+ * LangChain passes handleToolEnd a ToolMessage when the tool was called with a
+ * ToolCall (the agent/LangGraph path) and the raw return value otherwise, so
+ * String() would record "[object ToolMessage]" or "[object Object]".
+ */
+function toolOutputToString(output: unknown): string {
+  if (output == null) return '';
+  if (typeof output === 'string') return output;
+  const content = (output as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (typeof output === 'object') return safeStringify(content !== undefined ? content : output);
+  return String(output);
 }
 
 function safeStringify(value: unknown): string {
