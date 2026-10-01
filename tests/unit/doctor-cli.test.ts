@@ -170,6 +170,34 @@ describe('doctor CLI', () => {
     });
   });
 
+  it('keeps the earliest local failure when the backend probe also fails', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const probeExporter: SpanExporter = {
+      export(_spans, callback) {
+        callback({ code: ExportResultCode.FAILED });
+      },
+      async forceFlush() {},
+      async shutdown() {},
+    };
+    const fetch = vi.fn(async () => new Response(null, { status: 403 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      requestTimeoutMs: 100,
+      probeExporter,
+    });
+
+    expect(code).toBe(3);
+    const result = JSON.parse(value.output[0]!);
+    const firstFailure = result.checks.find((item: { status: string }) => item.status === 'fail');
+    expect(firstFailure?.reason_code).toBe('FLUSH_TIMEOUT');
+    expect(result.first_failure).toBe(firstFailure?.reason_code);
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'probe_transport', reason_code: 'AUTH_FAILED' }),
+    ]));
+  });
+
   it('reports an invalid endpoint without throwing or contacting the backend', async () => {
     const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'not-a-url' });
     const fetch = vi.fn();
