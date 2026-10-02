@@ -67,6 +67,11 @@ export function slackMessage(context) {
       : proposalReady === 'true' && validationJobStatus === 'skipped'
         ? 'Gemini-proposed SDK patch validation was unexpectedly skipped; no PR was opened.'
         : '';
+  const postPatchSmoke = validation?.postPatchSmoke
+    ? validation.postPatchSmoke.latestStatus === 'passed'
+      ? `Patched SDK passed the bounded ${validation.postPatchSmoke.scope ?? 'runtime'} smoke probe against ${validation.postPatchSmoke.package}@${validation.postPatchSmoke.latestVersion}; this does not prove full compatibility.`
+      : `Patched SDK latest-version smoke probe was ${validation.postPatchSmoke.latestStatus}; compatibility remains unknown and the recorded baseline was not advanced.`
+    : '';
   const fix = publication?.url || prUrl
     ? `Validated SDK fix: <${publication?.url || prUrl}|open ready-for-review PR>. No approval or merge was automated.`
     : publication?.status === 'skipped_closed'
@@ -105,7 +110,9 @@ export function slackMessage(context) {
           : signals.checksIncomplete || signals.advisoryFailed
             ? '*TypeScript SDK compatibility scan incomplete.*'
             : `*TypeScript SDK: ${packageCount} newer than the recorded baseline.*`;
-  const parts = [heading, checks, risk, validationText, fix, packageExamples.trim(), issue,
+  const parts = [heading, checks, risk, validationText, postPatchSmoke, fix,
+    proposalOutcome === 'failure' && (publication?.url || prUrl) ? 'Gemini proposal requests for other candidates were incomplete; review the workflow run.' : '',
+    packageExamples.trim(), issue,
     issueUrl ? `<${issueUrl}|Review discovery issue and analysis>.` : '',
     signals.automationFailed ? 'Automation failure requires attention.' : '',
     signals.checksIncomplete ? 'Some compatibility checks are incomplete; review the report before judging these versions.' : '',

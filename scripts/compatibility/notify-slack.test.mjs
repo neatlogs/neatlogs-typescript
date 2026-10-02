@@ -104,15 +104,24 @@ test('Slack distinguishes validated review PR from validation and publication fa
     analysis: { riskLevel: 'high' },
     url: 'https://example.test/run',
   };
-  const publishedContext = { ...base, validation: { status: 'validated' }, publication: { status: 'created', url: 'https://github.com/neatlogs/neatlogs-typescript/pull/50' } };
+  const publishedContext = { ...base, validation: { status: 'validated', postPatchSmoke: {
+    package: 'openai', latestVersion: '7', latestStatus: 'passed', scope: 'client construction and SDK wrapping',
+  } }, publication: { status: 'created', url: 'https://github.com/neatlogs/neatlogs-typescript/pull/50' } };
   assert.equal(shouldNotifySlack(publishedContext), true);
   const published = slackMessage(publishedContext);
   assert.match(published, /fix ready for code review/);
   assert.match(published, /patch passed local patch and test validation/);
   assert.match(published, /open ready-for-review PR/);
+  assert.match(published, /bounded client construction and SDK wrapping smoke probe against openai@7/);
   assert.match(published, /pull\/50/);
   assert.match(published, /https:\/\/example\.test\/run/);
   assert.doesNotMatch(published, /draft PR/);
+  const partialProposal = slackMessage({ ...publishedContext, proposalOutcome: 'failure' });
+  assert.match(partialProposal, /proposal requests for other candidates were incomplete/);
+  const blockedSmoke = slackMessage({ ...publishedContext, validation: { status: 'validated', postPatchSmoke: {
+    package: 'openai', latestVersion: '7', latestStatus: 'blocked', scope: 'client construction and SDK wrapping',
+  } } });
+  assert.match(blockedSmoke, /recorded baseline was not advanced/);
   const rejectedContext = { ...base, validation: { status: 'rejected' }, validationOutcome: 'failure' };
   assert.equal(shouldNotifySlack(rejectedContext), true);
   const rejected = slackMessage(rejectedContext);

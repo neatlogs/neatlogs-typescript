@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -12,7 +12,7 @@ function command(cwd, executable, args, env = process.env) {
   return execFileSync(executable, args, { cwd, env, encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 }).trim();
 }
 
-test('a focused regression fixture validates a patch and reaches regular PR publication', { timeout: 90_000 }, () => {
+test('a focused regression fixture validates a patch, checks the published version, and recovers PR publication', { timeout: 90_000 }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'neatlogs-compat-fix-fixture-')));
   const repo = join(root, 'repo');
   const remote = join(root, 'remote.git');
@@ -33,15 +33,26 @@ test('a focused regression fixture validates a patch and reaches regular PR publ
   try {
     mkdirSync(join(repo, 'src'), { recursive: true });
     mkdirSync(join(repo, 'tests/unit'), { recursive: true });
+    mkdirSync(join(repo, '.compatibility'), { recursive: true });
     mkdirSync(scripts, { recursive: true });
     mkdirSync(bin);
     for (const name of ['validate-fix.mjs', 'publish-fix.mjs']) {
       copyFileSync(join(sourceRoot, 'scripts/compatibility', name), join(scripts, name));
     }
+    writeFileSync(join(scripts, 'verify-releases.mjs'), [
+      "import { readFileSync, writeFileSync } from 'node:fs';",
+      "const report = JSON.parse(readFileSync('compatibility-fix-release-report.json', 'utf8'));",
+      "if (report.changes.length !== 1 || report.changes[0].package !== 'openai') process.exit(1);",
+      "if (!readFileSync('dist/openai.js', 'utf8').includes(\"value === 'new'\")) process.exit(1);",
+      "const change = report.changes[0];",
+      "writeFileSync('compatibility-fix-verification.json', JSON.stringify({ packages: [{ package: change.package, latestVersion: change.latest, status: 'passed', latest: { status: 'passed' }, scope: 'fixture runtime response mapping' }] }));",
+      '',
+    ].join('\n'));
     symlinkSync(join(sourceRoot, 'node_modules'), join(repo, 'node_modules'));
     writeFileSync(join(repo, 'package.json'), JSON.stringify({
       name: 'compat-fix-fixture', private: true, type: 'module',
       scripts: {
+        build: 'tsc --moduleResolution bundler --module esnext --target es2022 --outDir dist src/openai.ts',
         lint: 'tsc --noEmit --skipLibCheck --moduleResolution bundler --module esnext --target es2022 src/openai.ts tests/unit/openai.test.ts',
         test: 'vitest run',
       },
@@ -55,11 +66,12 @@ test('a focused regression fixture validates a patch and reaches regular PR publ
       "test('preserves old response', () => expect(mapResponse('old')).toBe('old'));",
       '',
     ].join('\n'));
+    writeFileSync(join(repo, '.compatibility/versions.lock.json'), `${JSON.stringify({ schemaVersion: 1, packages: { openai: '1.0.0' } }, null, 2)}\n`);
     command(root, 'git', ['init', '--bare', remote], env);
     command(repo, 'git', ['init', '--initial-branch=main'], env);
     command(repo, 'git', ['config', 'user.name', 'Fixture'], env);
     command(repo, 'git', ['config', 'user.email', 'fixture@example.test'], env);
-    command(repo, 'git', ['add', 'package.json', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    command(repo, 'git', ['add', 'package.json', 'src/openai.ts', 'tests/unit/openai.test.ts', '.compatibility/versions.lock.json'], env);
     command(repo, 'git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'fixture baseline'], env);
     command(repo, 'git', ['remote', 'add', 'origin', remote], env);
     const baseSha = command(repo, 'git', ['rev-parse', 'HEAD'], env);
@@ -95,7 +107,9 @@ test('a focused regression fixture validates a patch and reaches regular PR publ
     const validation = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
     assert.equal(validation.status, 'validated');
     assert.equal(validation.baselineTargetedTest, 'failed');
-    assert.deepEqual(validation.checks, ['lint', 'targeted-test', 'test']);
+    assert.deepEqual(validation.checks, ['lint', 'targeted-test', 'test', 'post-patch-build', 'post-patch-published-version-smoke']);
+    assert.equal(validation.postPatchSmoke.latestStatus, 'passed');
+    assert.equal(validation.postPatchSmoke.latestVersion, '2.0.0');
 
     const gh = join(bin, 'gh');
     writeFileSync(gh, [
@@ -103,18 +117,29 @@ test('a focused regression fixture validates a patch and reaches regular PR publ
       'case "$1 $2" in',
       '  "pr list") printf "[]\\n" ;;',
       '  "auth setup-git") exit 0 ;;',
-      '  "pr create") printf "https://github.test/neatlogs/fixture/pull/2\\n" ;;',
+      '  "pr create") if [ "$COMPAT_FIXTURE_FAIL_PR_CREATE" = 1 ]; then exit 1; fi; printf "https://github.test/neatlogs/fixture/pull/2\\n" ;;',
       '  *) exit 1 ;;',
       'esac',
       '',
     ].join('\n'));
     chmodSync(gh, 0o755);
     command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    const failedPublication = spawnSync(process.execPath, [join(scripts, 'publish-fix.mjs')], {
+      cwd: repo, encoding: 'utf8', env: { ...env, COMPAT_FIXTURE_FAIL_PR_CREATE: '1' },
+    });
+    assert.equal(failedPublication.status, 1, failedPublication.stderr);
+    const firstPublication = JSON.parse(readFileSync(join(repo, 'compatibility-fix-publication.json'), 'utf8'));
+    assert.equal(firstPublication.status, 'failed');
+    assert.equal(command(root, 'git', ['--git-dir', remote, 'rev-parse', 'refs/heads/compat/ts-openai-2-0-0'], env).length, 40);
+    command(repo, 'git', ['switch', '--quiet', 'main'], env);
     command(repo, process.execPath, [join(scripts, 'publish-fix.mjs')], env);
     const publication = JSON.parse(readFileSync(join(repo, 'compatibility-fix-publication.json'), 'utf8'));
     assert.equal(publication.status, 'created');
+    assert.equal(publication.recoveredBranch, true);
     assert.equal(publication.url, 'https://github.test/neatlogs/fixture/pull/2');
     assert.equal(command(root, 'git', ['--git-dir', remote, 'rev-parse', 'refs/heads/compat/ts-openai-2-0-0'], env).length, 40);
+    const publishedLock = JSON.parse(command(root, 'git', ['--git-dir', remote, 'show', 'refs/heads/compat/ts-openai-2-0-0:.compatibility/versions.lock.json'], env));
+    assert.equal(publishedLock.packages.openai, '2.0.0');
     assert.match(readFileSync(join(repo, 'compatibility-fix-pr-body.md'), 'utf8'), /ready for human code review/);
     assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /validated=true\npr_url=https:\/\/github\.test\/neatlogs\/fixture\/pull\/2\n/);
     assert.ok(existsSync(join(repo, 'compatibility-fix.patch')));

@@ -196,6 +196,9 @@ jobs:
               '',
               '### Automated fix proposal',
               `Decision: ${proposal.decision}. ${proposal.decision === 'propose_fix' ? 'Gemini proposed a patch; its rationale requires review.' : proposal.reason ?? ''}`,
+              (proposal.modelNotes ?? []).some((note) => note.error)
+                ? `Gemini proposal requests failed for ${(proposal.modelNotes ?? []).filter((note) => note.error).length} candidate(s); see the workflow artifact. The fix scan is incomplete.`
+                : '',
               proposal.decision === 'propose_fix' ? `Unverified Gemini rationale: ${proposal.reason ?? 'not supplied'}` : '',
               'Validation: pending or not run.',
               'Review PR: pending or not created.',
@@ -275,7 +278,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: typescript-compatibility-fix-validation
-          path: compatibility-fix-validation.json
+          path: |
+            compatibility-fix-validation.json
+            compatibility-fix-verification.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -373,7 +378,7 @@ jobs:
               ? JSON.parse(fs.readFileSync('compatibility-fix-publication.json', 'utf8')) : null;
             const current = await github.rest.issues.get({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber });
             const body = current.data.body
-              .replace(/^Validation:.*$/m, `Validation: ${validation?.status ?? (process.env.COMPAT_VALIDATION_JOB_STATUS === 'failure' ? 'failed before report' : 'not run')}${validation?.reason ? ` (${validation.reason})` : ''}. Targeted test on original SDK: ${validation?.baselineTargetedTest ?? 'not run'}.`)
+              .replace(/^Validation:.*$/m, `Validation: ${validation?.status ?? (process.env.COMPAT_VALIDATION_JOB_STATUS === 'failure' ? 'failed before report' : 'not run')}${validation?.reason ? ` (${validation.reason})` : ''}. Targeted test on original SDK: ${validation?.baselineTargetedTest ?? 'not run'}. Post-patch published-version smoke: ${validation?.postPatchSmoke?.latestStatus ?? 'not run'}${validation?.postPatchSmoke?.scope ? ` (${validation.postPatchSmoke.scope})` : ''}.`)
               .replace(/^Review PR:.*$/m, `Review PR: ${publication?.url || process.env.COMPAT_PR_URL || (publication?.priorPrUrl ? `${publication.priorPrUrl} (left unchanged: ${publication.reason})` : publication?.reason) || (process.env.COMPAT_PUBLICATION_JOB_STATUS === 'failure' ? 'publication failed before report' : 'not created')}.`);
             await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body });
       - name: Notify Slack of release and fix outcome

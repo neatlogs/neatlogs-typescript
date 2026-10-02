@@ -128,6 +128,43 @@ async function main() {
       await run('npm', args);
       result.checks.push(name);
     }
+    // The consumer probe packs dist/, so build again after applying the patch.
+    await run('npm', ['run', 'build']);
+    result.checks.push('post-patch-build');
+    const releases = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-release-report.json'), 'utf8'));
+    const change = (releases.changes ?? []).find((item) => item.package === proposal.package);
+    if (!change) throw new Error('Selected package is absent from the release report');
+    await writeFile(resolve(repositoryRoot, 'compatibility-fix-release-report.json'), `${JSON.stringify({
+      ...releases, changes: [change],
+    }, null, 2)}\n`);
+    try {
+      await run('node', [
+        resolve(repositoryRoot, 'scripts/compatibility/verify-releases.mjs'),
+        '--release-report=compatibility-fix-release-report.json',
+        '--output=compatibility-fix-verification.json',
+      ], 300_000);
+    } catch (error) {
+      if (!(await readFile(resolve(repositoryRoot, 'compatibility-fix-verification.json'), 'utf8').catch(() => null))) {
+        throw new Error(`Post-patch published-version smoke check did not produce a report: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`);
+      }
+    }
+    const postPatchReport = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-fix-verification.json'), 'utf8'));
+    const postPatch = postPatchReport.packages?.[0];
+    if (postPatch?.package !== proposal.package || postPatch.latestVersion !== change.latest) {
+      throw new Error('Post-patch smoke report does not match the selected published package');
+    }
+    result.postPatchSmoke = {
+      package: proposal.package,
+      status: postPatch.status,
+      latestStatus: postPatch.latest?.status ?? 'not-tested',
+      latestVersion: change.latest,
+      scope: postPatch.scope ?? null,
+      detail: postPatch.latest?.detail?.slice(0, 500) ?? null,
+    };
+    if (postPatch.latest?.status === 'failed') {
+      throw new Error(`Post-patch ${proposal.package}@${change.latest} runtime smoke check still fails`);
+    }
+    result.checks.push('post-patch-published-version-smoke');
     result.status = 'validated';
     if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, 'validated=true\n');
     console.log(`Validated Gemini fix in ${paths.join(', ')}`);

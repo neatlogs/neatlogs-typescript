@@ -8,6 +8,7 @@ import { patchPaths, validateAdapterPaths, validateProposalReferences } from './
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const VERSION_LOCK_PATH = '.compatibility/versions.lock.json';
 
 function slug(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
@@ -19,6 +20,49 @@ export function proposalBranch(packageName, version) {
 
 async function run(command, args) {
   return execFileAsync(command, args, { cwd: repositoryRoot, timeout: 60_000, maxBuffer: 2 * 1024 * 1024 });
+}
+
+export function updatedVersionLock(lock, change) {
+  if (lock?.schemaVersion !== 1 || !lock.packages || typeof lock.packages !== 'object'
+      || (lock.packages[change.package] ?? null) !== (change.previouslyAnalyzed ?? null)) {
+    throw new Error('Version lock differs from the recorded baseline; refusing to publish a stale fix');
+  }
+  return `${JSON.stringify({ ...lock, packages: { ...lock.packages, [change.package]: change.latest } }, null, 2)}\n`;
+}
+
+export function mayAdvanceVersionLock(validation, change) {
+  return Boolean(validation.postPatchSmoke?.status === 'passed'
+    && validation.postPatchSmoke.latestStatus === 'passed'
+    && validation.postPatchSmoke.package === change.package
+    && validation.postPatchSmoke.latestVersion === change.latest
+    && validation.checks?.includes('post-patch-published-version-smoke'));
+}
+
+async function verifyBotBranch(branch, expectedHead, baseSha, patchFile, files, lockText) {
+  await run('git', ['fetch', '--no-tags', 'origin', `refs/heads/${branch}`]);
+  const { stdout: fetchedHead } = await run('git', ['rev-parse', 'FETCH_HEAD']);
+  if (fetchedHead.trim() !== expectedHead) {
+    throw new Error('Existing fix branch changed during validation; refusing to reuse it');
+  }
+  const { stdout: commitAuthor } = await run('git', ['show', '-s', '--format=%ae', 'FETCH_HEAD']);
+  const { stdout: parent } = await run('git', ['rev-parse', 'FETCH_HEAD^']);
+  if (commitAuthor.trim() !== '41898282+github-actions[bot]@users.noreply.github.com' || parent.trim() !== baseSha) {
+    throw new Error('Existing fix branch is not one bot commit on the validated base');
+  }
+  const { stdout: remoteFiles } = await run('git', ['diff', '--name-only', baseSha, 'FETCH_HEAD']);
+  const actual = remoteFiles.trim().split('\n').filter(Boolean);
+  if (actual.length !== files.length || actual.some((path) => !files.includes(path))) {
+    throw new Error('Existing fix branch changes differ from validated patch paths');
+  }
+  await run('git', ['apply', '--whitespace=error', patchFile]);
+  if (lockText) await writeFile(resolve(repositoryRoot, VERSION_LOCK_PATH), lockText);
+  for (const path of files) {
+    const { stdout: localHash } = await run('git', ['hash-object', path]);
+    const { stdout: remoteHash } = await run('git', ['rev-parse', `FETCH_HEAD:${path}`]);
+    if (localHash.trim() !== remoteHash.trim()) {
+      throw new Error('Existing fix branch content differs from validated patch');
+    }
+  }
 }
 
 async function main() {
@@ -49,6 +93,18 @@ async function main() {
     const patchFile = resolve(repositoryRoot, 'compatibility-fix.patch');
     await writeFile(patchFile, proposal.patch);
     await run('git', ['apply', '--check', '--whitespace=error', patchFile]);
+    const advanceLock = mayAdvanceVersionLock(validation, change);
+    let lockText = null;
+    if (advanceLock) {
+      if ((await lstat(resolve(repositoryRoot, VERSION_LOCK_PATH))).isSymbolicLink()) {
+        throw new Error('Version lock is a symlink; refusing to publish');
+      }
+      lockText = updatedVersionLock(
+        JSON.parse(await readFile(resolve(repositoryRoot, VERSION_LOCK_PATH), 'utf8')),
+        change,
+      );
+    }
+    const publishedFiles = [...files, ...(advanceLock ? [VERSION_LOCK_PATH] : [])];
     const branch = proposalBranch(change.package, change.latest);
     const provenance = `<!-- neatlogs-compat-autofix v1 base=${proposal.baseSha} patch=${digest} -->`;
     result.branch = branch;
@@ -63,31 +119,12 @@ async function main() {
       } else {
         result.priorPrUrl = existing.url;
         result.existingWasDraft = Boolean(existing.isDraft);
-        await run('git', ['fetch', '--no-tags', 'origin', `refs/heads/${branch}`]);
-        const { stdout: fetchedHead } = await run('git', ['rev-parse', 'FETCH_HEAD']);
-        if (fetchedHead.trim() !== existing.headRefOid) {
-          throw new Error('Existing fix PR changed during validation; refusing to mark it ready');
-        }
-        const { stdout: commitAuthor } = await run('git', ['show', '-s', '--format=%ae', 'FETCH_HEAD']);
-        if (!existing.body?.includes(provenance) || commitAuthor.trim() !== '41898282+github-actions[bot]@users.noreply.github.com') {
+        if (!existing.body?.includes(provenance)) {
           result.status = 'existing_unverified';
           result.priorPrUrl = existing.url;
           result.reason = 'Existing PR lacks generated-fix provenance; it was left unchanged for human review';
         } else {
-          await run('git', ['merge-base', '--is-ancestor', proposal.baseSha, 'FETCH_HEAD']);
-          const { stdout: remoteFiles } = await run('git', ['diff', '--name-only', proposal.baseSha, 'FETCH_HEAD']);
-          const actual = remoteFiles.trim().split('\n').filter(Boolean);
-          if (actual.length !== files.length || actual.some((path) => !files.includes(path))) {
-            throw new Error('Existing fix PR changes differ from validated patch paths');
-          }
-          await run('git', ['apply', '--whitespace=error', patchFile]);
-          for (const path of files) {
-            const { stdout: localHash } = await run('git', ['hash-object', path]);
-            const { stdout: remoteHash } = await run('git', ['rev-parse', `FETCH_HEAD:${path}`]);
-            if (localHash.trim() !== remoteHash.trim()) {
-              throw new Error('Existing fix PR content differs from validated patch');
-            }
-          }
+          await verifyBotBranch(branch, existing.headRefOid, proposal.baseSha, patchFile, publishedFiles, lockText);
           if (existing.isDraft) await run('gh', ['pr', 'ready', existing.url]);
           result.status = 'existing';
           result.url = existing.url;
@@ -95,20 +132,25 @@ async function main() {
       }
     } else {
       const { stdout: remote } = await run('git', ['ls-remote', '--heads', 'origin', branch]);
-      if (remote.trim()) throw new Error(`Branch ${branch} exists without a PR; refusing to overwrite it`);
-      await run('git', ['switch', '-c', branch]);
-      await run('git', ['apply', '--whitespace=error', patchFile]);
-      const { stdout: changed } = await run('git', ['diff', '--name-only']);
-      const actual = changed.trim().split('\n').filter(Boolean);
-      if (actual.length !== files.length || actual.some((path) => !files.includes(path))) {
-        throw new Error('Applied changes differ from validated patch paths');
+      if (remote.trim()) {
+        await verifyBotBranch(branch, remote.trim().split(/\s+/)[0], proposal.baseSha, patchFile, publishedFiles, lockText);
+        result.recoveredBranch = true;
+      } else {
+        await run('git', ['switch', '-c', branch]);
+        await run('git', ['apply', '--whitespace=error', patchFile]);
+        if (lockText) await writeFile(resolve(repositoryRoot, VERSION_LOCK_PATH), lockText);
+        const { stdout: changed } = await run('git', ['diff', '--name-only']);
+        const actual = changed.trim().split('\n').filter(Boolean);
+        if (actual.length !== publishedFiles.length || actual.some((path) => !publishedFiles.includes(path))) {
+          throw new Error('Applied changes differ from validated patch paths');
+        }
+        await run('git', ['config', 'user.name', 'github-actions[bot]']);
+        await run('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
+        await run('git', ['add', '--', ...publishedFiles]);
+        await run('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', `fix(compat): adapt ${change.package} to ${change.latest}`]);
+        await run('gh', ['auth', 'setup-git']);
+        await run('git', ['-c', 'core.hooksPath=/dev/null', 'push', '--set-upstream', 'origin', branch]);
       }
-      await run('git', ['config', 'user.name', 'github-actions[bot]']);
-      await run('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
-      await run('git', ['add', '--', ...files]);
-      await run('git', ['-c', 'core.hooksPath=/dev/null', 'commit', '-m', `fix(compat): adapt ${change.package} to ${change.latest}`]);
-      await run('gh', ['auth', 'setup-git']);
-      await run('git', ['-c', 'core.hooksPath=/dev/null', 'push', '--set-upstream', 'origin', branch]);
       const issueUrl = process.env.COMPAT_DISCOVERY_ISSUE_URL;
       const runUrl = `${process.env.GITHUB_SERVER_URL}/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}`;
       const body = [
@@ -124,6 +166,10 @@ async function main() {
         '',
         `Targeted changed test on the original SDK: ${validation.baselineTargetedTest ?? 'not run'}. A failure here may reproduce the issue, but still needs human review.`,
         `Validated files: ${validation.files.join(', ')}`,
+        `Post-patch published-version smoke: ${validation.postPatchSmoke?.latestStatus ?? 'not run'} for ${change.package}@${change.latest}; scope: ${validation.postPatchSmoke?.scope ?? 'not tested'}. This is a bounded probe, not full integration compatibility.`,
+        advanceLock
+          ? `Recorded version baseline: ${VERSION_LOCK_PATH} advances only ${change.package} to ${change.latest} when this PR is merged.`
+          : `Recorded version baseline: ${VERSION_LOCK_PATH} stays unchanged because the post-patch latest-version smoke probe did not pass.`,
         `Validation completed: ${validation.checks.join(', ')}`,
         issueUrl ? `Discovery issue: ${issueUrl}` : 'Discovery issue: unavailable',
         `Workflow run and evidence artifact: ${runUrl}`,

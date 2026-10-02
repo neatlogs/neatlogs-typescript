@@ -63,9 +63,12 @@ the assessment job able to record an incomplete check and notify maintainers.
 The jobs do not share a writable npm cache, so code loaded by smoke probes or
 patch validation cannot leave cached files for a later secret-bearing job.
 
-The recorded version lock does not advance automatically. Until it is updated,
-the same package versions can appear in successive scheduled alerts; the
-discovery issue is updated in place.
+Scheduled runs do not change the recorded version lock. A validated fix PR
+includes a publisher-controlled update for its selected package only when the
+patched SDK passes the exact latest-version smoke probe. That version becomes
+the recorded baseline only if a maintainer merges the PR. Other packages can
+be rediscovered on successive schedules; the discovery issue is updated in
+place.
 
 The Gemini assessment is advisory only. It cannot change a compatibility
 verdict or make a workflow pass. The advisory request uses bounded excerpts
@@ -79,15 +82,20 @@ An aggregate `high` risk rating does not open a PR. For a review PR, Gemini
 must provide a specific upstream-to-adapter rationale and a patch that changes
 an affected existing adapter and an existing test. A separate read-only job
 checks paths and patch size, runs the changed test against the original SDK,
-then applies the patch and runs TypeScript lint and the full test suite. The
-test result on the original SDK is recorded in the PR. A passing smoke probe
+then applies the patch, runs TypeScript lint and the full test suite, rebuilds
+the SDK, and repeats the selected package's published-version smoke probe.
+The test result on the original SDK and post-patch probe scope are recorded in
+the PR. A passing smoke probe
 or patched test suite does not prove that the proposed fix is necessary; the
 PR is opened ready for human code review. No review is approved and no PR is
 merged automatically. If no safe patch is produced, the issue records that
-outcome and the remaining candidates. Future schedules rotate through
-candidates and skip packages already covered by any prior automated
+outcome and the remaining candidates. Confirmed smoke failures are considered
+first on every run; future schedules rotate through other candidates and skip
+packages already covered by any prior automated
 compatibility PR, including one closed
 by a maintainer.
+Gemini proposal request failures fail the run and alert maintainers instead
+of being silently treated as a no-fix decision.
 
 The PR publishing job has write permission only after validation. It checks
 the original proposal, base commit, patch digest, and affected adapter paths
@@ -97,6 +105,9 @@ pull requests; otherwise publication is reported as a failure. The optional
 contents and pull-request write access when organization policy blocks PR
 creation with `GITHUB_TOKEN`. It is used only in the publishing job. PR checks
 started by `GITHUB_TOKEN` can require maintainer approval before running.
+If a branch push succeeds but PR creation fails, a later run may create the PR
+from that branch only when its bot author, base commit, changed paths, and file
+contents exactly match the newly validated patch and mechanical lock update.
 An existing generated draft PR is marked ready only when its provenance
 marker, bot commit author, base commit, changed files, and file contents match
 the newly validated patch. Other existing PRs are left unchanged and reported.
