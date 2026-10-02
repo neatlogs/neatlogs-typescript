@@ -119,8 +119,6 @@ await init({
 |--------|------|---------|-------------|
 | `apiKey` | `string` | `process.env.NEATLOGS_API_KEY` | Neatlogs API key. Export disabled if not set. |
 | `workflowName` | `string` | Derived from `process.argv[1]` | Name of the workflow being traced. |
-| `sessionId` | `string` | — | Explicit session ID for grouping traces. |
-| `autoSession` | `boolean` | `false` | Auto-generate a session ID if none provided. |
 | `userId` | `string` | — | User identifier for the session. |
 | `tags` | `string[]` | — | Tags attached to all spans. |
 | `metadata` | `Record<string, any>` | — | Custom metadata attached to all spans. |
@@ -621,7 +619,6 @@ All configuration is passed via `init()` options. See the [InitOptions table](#i
 await init({
   apiKey: process.env.NEATLOGS_API_KEY,
   workflowName: 'my-pipeline',
-  sessionId: 'session-123',
   userId: 'user-456',
   tags: ['production', 'v2'],
   metadata: { environment: 'prod' },
