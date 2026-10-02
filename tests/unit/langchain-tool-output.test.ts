@@ -73,4 +73,26 @@ describe('langchainHandler tool output', () => {
     expect(JSON.parse(vals[0] as string)).toEqual([{ type: 'text', text: 'hi' }]);
     expect(vals[1]).not.toBe('[object Object]');
   });
+
+  it('keeps inline base64 and credential urls out of structured tool output', async () => {
+    const b64 = 'A'.repeat(200000);
+    const signed = 'https://user:hunter2@cdn.example.com/a.png?X-Amz-Signature=sekret123&X-Amz-Credential=AKIAEXAMPLE';
+    const h: any = langchainHandler();
+    await h.handleToolStart({ name: 'calc' }, '{}', 'r1');
+    await h.handleToolEnd(
+      {
+        content: [
+          { type: 'text', text: 'done' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${b64}` } },
+          { type: 'image_url', image_url: { url: signed } },
+        ],
+      },
+      'r1',
+    );
+    const value = String(toolOutput());
+    expect(value).toContain('done');
+    expect(value).not.toContain(b64.slice(0, 200));
+    expect(value).not.toContain('hunter2');
+    expect(value).not.toContain('sekret123');
+  });
 });

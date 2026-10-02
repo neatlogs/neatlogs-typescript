@@ -12,6 +12,7 @@
 import { trace, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
 import { maybeOpenAutoRoot, endAutoRoot } from './core/auto-root.js';
 import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
+import { captureMedia } from './core/media.js';
 
 const TRACER_NAME = 'neatlogs.langchain';
 
@@ -312,7 +313,7 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    span.setAttribute('output.value', toolOutputToString(output));
+    span.setAttribute('output.value', toolOutputToString(output, span));
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
     this._spans.delete(runId);
@@ -423,12 +424,15 @@ function mapRole(role: string): string {
  * ToolCall (the agent/LangGraph path) and the raw return value otherwise, so
  * String() would record "[object ToolMessage]" or "[object Object]".
  */
-function toolOutputToString(output: unknown): string {
+function toolOutputToString(output: unknown, span: Span): string {
   if (output == null) return '';
   if (typeof output === 'string') return output;
   const content = (output as { content?: unknown }).content;
   if (typeof content === 'string') return content;
-  if (typeof output === 'object') return safeStringify(content !== undefined ? content : output);
+  if (typeof output === 'object') {
+    const structured = content !== undefined ? content : output;
+    return safeStringify(captureMedia(span, 'neatlogs.tool.output', structured, 'output'));
+  }
   return String(output);
 }
 
