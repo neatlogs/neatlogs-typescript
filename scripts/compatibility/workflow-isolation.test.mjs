@@ -28,6 +28,9 @@ test('published upstream code runs only in a read-only job without service secre
   assert.match(assess, /needs: \[releases, verify\]/);
   assert.match(assess, /COMPAT_GEMINI_API_KEY: \$\{\{ secrets\.COMPAT_GEMINI_API_KEY \}\}/);
   assert.doesNotMatch(assess, /node scripts\/compatibility\/verify-releases\.mjs/);
+  for (const name of ['releases', 'verify', 'discover', 'validate_fix', 'publish_fix']) {
+    assert.doesNotMatch(job(name), /cache: npm/, `${name} must not share a writable npm cache across trust boundaries`);
+  }
 });
 
 test('verification results survive candidate failures and reach issue and Slack reporting', () => {

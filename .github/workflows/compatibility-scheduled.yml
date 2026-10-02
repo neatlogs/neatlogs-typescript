@@ -60,7 +60,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci --ignore-scripts
       - name: Download release report
         uses: actions/download-artifact@v4
@@ -104,7 +103,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci --ignore-scripts
       - name: Download release report
         uses: actions/download-artifact@v4
@@ -258,7 +256,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci --ignore-scripts
       - name: Download original proposal and evidence
         uses: actions/download-artifact@v4
