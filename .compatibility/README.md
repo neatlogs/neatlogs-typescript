@@ -60,6 +60,8 @@ code, so their runner is discarded before a separate job receives the Gemini
 API key to analyze evidence or propose a fix. The release and verification
 reports cross that boundary as JSON artifacts; a failed verifier still leaves
 the assessment job able to record an incomplete check and notify maintainers.
+The jobs do not share a writable npm cache, so code loaded by smoke probes or
+patch validation cannot leave cached files for a later secret-bearing job.
 
 The recorded version lock does not advance automatically. Until it is updated,
 the same package versions can appear in successive scheduled alerts; the
