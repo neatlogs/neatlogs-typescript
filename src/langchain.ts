@@ -12,6 +12,7 @@
 import { trace, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
 import { maybeOpenAutoRoot, endAutoRoot } from './core/auto-root.js';
 import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
+import { captureMedia } from './core/media.js';
 
 const TRACER_NAME = 'neatlogs.langchain';
 
@@ -217,7 +218,12 @@ class NeatlogsCallbackHandler {
         const msg = gen[j]?.message ?? gen[j];
         const content = msg?.content ?? msg?.text ?? '';
         span.setAttribute(`neatlogs.llm.output_messages.${i}.role`, 'assistant');
-        span.setAttribute(`neatlogs.llm.output_messages.${i}.content`, typeof content === 'string' ? content : safeStringify(content));
+        span.setAttribute(
+          `neatlogs.llm.output_messages.${i}.content`,
+          typeof content === 'string'
+            ? content
+            : safeStringify(captureMedia(span, `neatlogs.llm.output_messages.${i}`, content, 'output')),
+        );
 
         const toolCalls = msg?.tool_calls ?? msg?.additional_kwargs?.tool_calls;
         if (toolCalls && Array.isArray(toolCalls)) {

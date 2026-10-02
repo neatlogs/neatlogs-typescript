@@ -49,4 +49,19 @@ describe('langchainHandler LLM output content', () => {
     expect(value).not.toContain('[object Object]');
     expect(JSON.parse(value as string)).toEqual(blocks);
   });
+
+  it('keeps inline base64 and credential urls out of the span attribute', async () => {
+    const b64 = 'A'.repeat(200000);
+    const signed = 'https://user:hunter2@cdn.example.com/a.png?X-Amz-Signature=sekret123&X-Amz-Credential=AKIAEXAMPLE';
+    const blocks = [
+      { type: 'text', text: 'here' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${b64}` } },
+      { type: 'image_url', image_url: { url: signed } },
+    ];
+    const value = String(await outputContent(blocks));
+    expect(value).toContain('here');
+    expect(value).not.toContain(b64.slice(0, 200));
+    expect(value).not.toContain('hunter2');
+    expect(value).not.toContain('sekret123');
+  });
 });
