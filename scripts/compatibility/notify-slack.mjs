@@ -16,11 +16,15 @@ function workflowURL() {
   return server && repository && runID ? `${server}/${repository}/actions/runs/${runID}` : null;
 }
 
-export function slackMessage({ status, report, analysis, verification = null, verificationOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null }) {
+export function slackMessage({ status, report, analysis, verification = null, verificationOutcome = null, advisoryOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null }) {
   const changes = report?.changes ?? [];
   const risk = analysis?.riskLevel
     ? `Gemini advisory: *${analysis.riskLevel} potential risk* (unverified; this does not establish an SDK regression).`
-    : 'Gemini advisory: unavailable.';
+    : analysis?.unavailable || advisoryOutcome === 'failure'
+      ? `Gemini advisory failed: ${analysis?.reason ?? 'no assessment was produced.'} Deterministic smoke results remain separate.`
+      : analysis?.skipped
+        ? 'Gemini advisory skipped: API key is not configured.'
+        : 'Gemini advisory: unavailable.';
   const counts = verification?.counts;
   const regressionPackages = verification?.packages?.filter((item) => item.status === 'failed') ?? [];
   const examples = regressionPackages.slice(0, 3).map((item) => `${item.package}@${item.latestVersion}`).join(', ');
@@ -97,6 +101,7 @@ async function main() {
     body: JSON.stringify({ text: slackMessage({
       status, report, analysis, verification, proposal, validation, publication,
       verificationOutcome: process.env.COMPAT_VERIFICATION_OUTCOME,
+      advisoryOutcome: process.env.COMPAT_ADVISORY_OUTCOME,
       proposalOutcome: process.env.COMPAT_PROPOSAL_OUTCOME,
       proposalReady: process.env.COMPAT_PROPOSAL_READY,
       priorPrsOutcome: process.env.COMPAT_PRIOR_PRS_OUTCOME,

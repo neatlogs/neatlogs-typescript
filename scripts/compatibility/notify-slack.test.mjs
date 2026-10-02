@@ -32,10 +32,21 @@ test('Slack failure message does not require a release report', () => {
   assert.doesNotMatch(message, /github\.com\/neatlogs\/neatlogs-typescript\/36571240360>/);
 });
 
-test('Slack release message says when the Gemini analysis is unavailable', () => {
+test('Slack distinguishes skipped Gemini analysis from a malformed-response failure', () => {
   const message = slackMessage({ status: 'success', report: { changes: [] }, analysis: { skipped: true }, url: null });
-  assert.match(message, /Gemini advisory: unavailable/);
+  assert.match(message, /Gemini advisory skipped: API key is not configured/);
   assert.doesNotMatch(message, /Advisory risk: \*undefined\*/);
+  const failed = slackMessage({
+    status: 'success', report: { changes: [] },
+    analysis: { unavailable: true, reason: 'Gemini advisory returned malformed JSON.' },
+    advisoryOutcome: 'failure',
+    issueUrl: 'https://github.com/neatlogs/neatlogs-typescript/issues/46',
+    url: 'https://github.com/neatlogs/neatlogs-typescript/actions/runs/36974184056',
+  });
+  assert.match(failed, /Gemini advisory failed: Gemini advisory returned malformed JSON/);
+  assert.match(failed, /issues\/46/);
+  assert.match(failed, /actions\/runs\/36974184056/);
+  assert.doesNotMatch(failed, /high potential risk/);
 });
 
 test('Slack release message limits the package examples to three', () => {

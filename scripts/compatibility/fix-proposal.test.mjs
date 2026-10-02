@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { boundedPackageEvidence, candidatePackages, consideredPackages, validProposal } from './propose-fix.mjs';
+import { boundedPackageEvidence, candidatePackages, consideredPackages, reviewOnlyReason, validProposal } from './propose-fix.mjs';
 import { proposalBranch } from './publish-fix.mjs';
 import { patchPaths, validateAdapterPaths, validateProposalReferences } from './validate-fix.mjs';
 
@@ -19,6 +19,13 @@ test('three-package rotation eventually considers all fifteen packages', () => {
   const names = Array.from({ length: 15 }, (_, index) => `package-${index}`);
   const covered = new Set(Array.from({ length: 5 }, (_, run) => consideredPackages(names, run)).flat());
   assert.deepEqual([...covered].sort(), [...names].sort());
+});
+
+test('review-only issue summary does not present model explanations as verified facts', () => {
+  const reason = reviewOnlyReason(['@ai-sdk/otel', '@anthropic-ai/sdk']);
+  assert.match(reason, /No SDK patch was selected for validation from 2 packages/);
+  assert.match(reason, /model explanations in the artifact are unverified/);
+  assert.doesNotMatch(reason, /syntax error|constructor signature/);
 });
 
 test('model high risk alone is not an actionable fix decision', () => {

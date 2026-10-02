@@ -28,6 +28,7 @@ jobs:
       proposal_ready: ${{ steps.propose_fix.outputs.proposal_ready }}
       issue_url: ${{ steps.discovery_issue.outputs.issue_url }}
       verify_outcome: ${{ steps.verify_releases.outcome }}
+      advisory_outcome: ${{ steps.llm_analysis.outcome }}
       proposal_outcome: ${{ steps.propose_fix.outcome }}
       prior_prs_outcome: ${{ steps.prior_prs.outcome }}
     steps:
@@ -105,7 +106,7 @@ jobs:
             const report = JSON.parse(fs.readFileSync('compatibility-release-report.json', 'utf8'));
             const analysis = fs.existsSync('compatibility-llm-analysis.json')
               ? JSON.parse(fs.readFileSync('compatibility-llm-analysis.json', 'utf8'))
-              : { unavailable: true };
+              : { unavailable: true, reason: 'Gemini advisory did not produce an analysis report.' };
             const verification = fs.existsSync('compatibility-verification.json')
               ? JSON.parse(fs.readFileSync('compatibility-verification.json', 'utf8'))
               : { counts: { passed: 0, failed: 0, blocked: 0, 'not-tested': report.changes.length }, packages: [] };
@@ -130,7 +131,8 @@ jobs:
               rows,
               '',
               '### Automated fix proposal',
-              `Decision: ${proposal.decision}. ${proposal.reason ?? ''}`,
+              `Decision: ${proposal.decision}. ${proposal.decision === 'propose_fix' ? 'Gemini proposed a patch; its rationale requires review.' : proposal.reason ?? ''}`,
+              proposal.decision === 'propose_fix' ? `Unverified Gemini rationale: ${proposal.reason ?? 'not supplied'}` : '',
               'Validation: pending or not run.',
               'Review PR: pending or not created.',
               `Candidates deferred or not proposed: ${(proposal.unproposedCandidates ?? []).join(', ') || 'none'}.`,
@@ -138,6 +140,7 @@ jobs:
               '',
               '### Unverified Gemini advisory analysis',
               'Gemini provides an advisory assessment from upstream package evidence and adapter source. Its findings are separate from the deterministic smoke results and require review.',
+              analysis.unavailable ? `Status: failed. ${analysis.reason ?? 'No assessment was produced.'}` : analysis.skipped ? 'Status: skipped because the API key is not configured.' : 'Status: completed; findings are unverified.',
               '',
               '```json',
               JSON.stringify(analysis, null, 2),
@@ -318,6 +321,7 @@ jobs:
           COMPAT_CHANGES_FOUND: ${{ needs.discover.outputs.changes_found }}
           COMPAT_DISCOVERY_ISSUE_URL: ${{ needs.discover.outputs.issue_url }}
           COMPAT_VERIFICATION_OUTCOME: ${{ needs.discover.outputs.verify_outcome }}
+          COMPAT_ADVISORY_OUTCOME: ${{ needs.discover.outputs.advisory_outcome }}
           COMPAT_PROPOSAL_OUTCOME: ${{ needs.discover.outputs.proposal_outcome }}
           COMPAT_PROPOSAL_READY: ${{ needs.discover.outputs.proposal_ready }}
           COMPAT_PRIOR_PRS_OUTCOME: ${{ needs.discover.outputs.prior_prs_outcome }}

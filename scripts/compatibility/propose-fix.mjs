@@ -32,6 +32,10 @@ export function consideredPackages(candidates, runNumber) {
   return [...candidates.slice(start), ...candidates.slice(0, start)].slice(0, 3);
 }
 
+export function reviewOnlyReason(considered) {
+  return `No SDK patch was selected for validation from ${considered.length} package${considered.length === 1 ? '' : 's'} considered in this run. Any model explanations in the artifact are unverified.`;
+}
+
 export function validProposal(proposal, candidates, payload = null) {
   const adapters = new Set((payload?.upstreamEvidence?.integrations ?? [])
     .flatMap((integration) => integration.adapterSource ?? [])
@@ -139,12 +143,12 @@ async function main() {
   const candidates = candidatePackages(report, analysis, verification, priorBranches);
   const consideredCandidates = consideredPackages(candidates, process.env.GITHUB_RUN_NUMBER);
   const output = resolve(repositoryRoot, argumentValue('--output', 'compatibility-fix-proposal.json'));
-  let proposal = { decision: 'review_only', package: null, reason: 'No safe code-specific SDK fix was produced for the packages considered in this run.', evidence: '', patch: '' };
+  let proposal = { decision: 'review_only', package: null, reason: reviewOnlyReason(consideredCandidates), evidence: '', patch: '' };
+  const modelNotes = [];
   const apiKey = process.env.COMPAT_GEMINI_API_KEY;
   if (consideredCandidates.length && apiKey) {
     try {
       const evidence = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-evidence.json'), 'utf8'));
-      const reasons = [];
       for (const packageName of consideredCandidates) {
         const selected = boundedPackageEvidence(
           report.changes.find((item) => item.package === packageName),
@@ -158,12 +162,11 @@ async function main() {
             proposal = generated;
             break;
           }
-          reasons.push(`${packageName}: ${generated?.reason || 'no complete SDK patch'}`);
+          modelNotes.push({ package: packageName, decision: generated?.decision ?? null, unverifiedReason: generated?.reason ?? null, accepted: false });
         } catch (error) {
-          reasons.push(`${packageName}: ${error instanceof Error ? error.message : String(error)}`);
+          modelNotes.push({ package: packageName, error: error instanceof Error ? error.message : String(error), accepted: false });
         }
       }
-      if (proposal.decision === 'review_only') proposal.reason = `No safe fix produced. ${reasons.join(' | ').slice(0, 2000)}`;
     } catch (error) {
       proposal = { decision: 'review_only', package: null, reason: `Proposal generation unavailable: ${error instanceof Error ? error.message : String(error)}`, evidence: '', patch: '' };
     }
@@ -177,6 +180,7 @@ async function main() {
     consideredCandidates,
     unproposedCandidates: candidates.filter((name) => name !== (proposal.decision === 'propose_fix' ? proposal.package : null)),
     ...proposal,
+    modelNotes,
   }, null, 2)}\n`);
   if (process.env.GITHUB_OUTPUT) {
     await appendFile(process.env.GITHUB_OUTPUT, `proposal_ready=${proposal.decision === 'propose_fix'}\n`);

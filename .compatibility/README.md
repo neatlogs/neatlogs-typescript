@@ -59,7 +59,12 @@ the same package versions can appear in successive scheduled alerts; the
 discovery issue is updated in place.
 
 The Gemini assessment is advisory only. It cannot change a compatibility
-verdict or make a workflow pass.
+verdict or make a workflow pass. The advisory request uses bounded excerpts
+while preserving every tracked adapter source path; the full upstream evidence
+remains in the run artifact. If Gemini times out or returns malformed JSON,
+the issue and Slack alert say the advisory failed and link the workflow run.
+Model explanations for rejected fix proposals remain labeled unverified in
+the artifact instead of appearing as factual issue conclusions.
 
 An aggregate `high` risk rating does not open a PR. For a review PR, Gemini
 must provide a specific upstream-to-adapter rationale and a patch that changes
