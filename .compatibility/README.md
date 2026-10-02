@@ -110,5 +110,7 @@ Configure these GitHub Actions settings:
 Organization-level secrets scoped only to the SDK repositories are preferred.
 The credentials are used only by the scheduled/default-branch workflow and are
 never passed to pull-request jobs. Slack delivery failures are non-blocking;
-alerts are sent when detected versions are newer than the recorded baseline
-or the workflow fails.
+alerts are sent for candidate regressions, incomplete checks or advisory
+analysis, fix automation failures, and reviewable fix PRs. A high Gemini risk
+label alone does not send Slack when all version probes pass and no SDK patch
+is selected. The discovery issue and run artifact still record those releases.
