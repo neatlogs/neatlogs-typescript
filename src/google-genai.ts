@@ -336,8 +336,8 @@ function setInputAttributes(span: Span, opts: any): void {
   if (typeof contents === 'string') {
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'user');
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, contents);
-  } else if (Array.isArray(contents)) {
-    for (const item of contents) {
+  } else if (Array.isArray(contents) || (contents && typeof contents === 'object' && Array.isArray(contents.parts))) {
+    for (const item of Array.isArray(contents) ? contents : [contents]) {
       if (typeof item === 'string') {
         span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'user');
         span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, item);
@@ -459,10 +459,15 @@ function wrapStream(stream: any, span: Span): any {
       async return(value?: any): Promise<IteratorResult<any>> {
         markStreamIncomplete(accumulated, 'consumer_cancelled');
         span.setAttribute('neatlogs.stream.cancelled', true);
-        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-        if (result.done) finalizeStreamChunks(span, accumulated);
-        else addStreamChunk(span, accumulated, result.value);
-        return result;
+        try {
+          const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+          if (result.done) finalizeStreamChunks(span, accumulated);
+          else addStreamChunk(span, accumulated, result.value);
+          return result;
+        } catch (err) {
+          recordError(span, err);
+          throw err;
+        }
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
         recordError(span, err);

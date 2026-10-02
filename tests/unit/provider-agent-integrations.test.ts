@@ -49,6 +49,51 @@ function attr(span: ReadableSpan, key: string): any {
   return span.attributes[key];
 }
 
+describe('single GenAI Content inputs', () => {
+  it.each([
+    ['google', wrapGoogleGenAI],
+    ['vertex', wrapVertexAI],
+  ] as const)('%s preserves a typed single Content role and text', async (_name, wrap) => {
+    const contents = { role: 'model', parts: [{ text: 'prior answer' }, { text: 'continued' }] };
+    const wrapped = wrap({ models: { generateContent: async () => ({ candidates: [] }) } } as any);
+    await (wrapped as any).models.generateContent({ model: 'gemini-test', contents });
+
+    const spans = getSpans();
+    expect(spans).toHaveLength(1);
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.role')).toBe('model');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.content')).toBe('prior answer\ncontinued');
+  });
+
+  it.each([
+    ['google', wrapGoogleGenAI],
+    ['vertex', wrapVertexAI],
+  ] as const)('%s keeps system indexing and captures media for single Content', async (_name, wrap) => {
+    const imageBytes = Buffer.from('typed-single-image');
+    const contents = {
+      role: 'user',
+      parts: [
+        { text: 'look at this' },
+        { inlineData: { mimeType: 'image/png', data: imageBytes.toString('base64') } },
+      ],
+    };
+    const wrapped = wrap({ models: { generateContent: async () => ({ candidates: [] }) } } as any);
+    await (wrapped as any).models.generateContent({
+      model: 'gemini-test',
+      contents,
+      config: { systemInstruction: 'be brief' },
+    });
+
+    const spans = getSpans();
+    expect(spans).toHaveLength(1);
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.0.role')).toBe('system');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.1.role')).toBe('user');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.1.content')).toBe('look at this');
+    expect(attr(spans[0], 'neatlogs.llm.input_messages.1.media.0.mime_type')).toBe('image/png');
+    expect(JSON.stringify(spans[0].attributes)).not.toContain(imageBytes.toString('base64'));
+    discardPendingMedia(spans[0] as object);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Azure OpenAI
 // ---------------------------------------------------------------------------
