@@ -8,6 +8,8 @@ import { span } from './decorators/orchestration.js';
 import {
   doctorCapturedLocalV2,
   DOCTOR_V2_FORMAT_VERSION,
+  summarizeDoctorChecks,
+  type DoctorV2Check,
   type DoctorV2Result,
 } from './doctor-v2.js';
 import { flush, init, shutdown } from './init.js';
@@ -478,12 +480,11 @@ async function localResult(
     if (!result) throw new Error('Diagnostic envelope was not captured');
 
     const fixtureChecks = validateLocalFixture(traceId);
-    const fixtureFailure = fixtureChecks.find((item) => item.status === 'fail');
+    const checks = [...result.checks, ...fixtureChecks];
     return Object.freeze({
       ...result,
-      status: fixtureFailure ? 'fail' : result.status,
-      first_failure: fixtureFailure?.reason_code ?? result.first_failure,
-      checks: Object.freeze([...result.checks, ...fixtureChecks]),
+      ...summarizeDoctorChecks(checks),
+      checks: Object.freeze(checks),
     });
   } finally {
     await shutdown('doctor-complete', flushTimeoutMs).catch(() => false);
@@ -569,14 +570,13 @@ function persistedProbeResult(
     check('probe_metadata', exactMetadata, 'METADATA_VALID', 'METADATA_INVALID', 'CHECK_METADATA_FINALIZATION', 'All versioned Doctor SDK metadata survived finalization'),
     check('probe_typed_tokens', exactTokens, 'TYPED_TOKENS_VALID', 'TYPED_TOKENS_INVALID', 'CHECK_TOKEN_MAPPING', 'Persisted token totals remain exact numeric values'),
   ];
-  const firstFailure = probeChecks.find((item) => item.status === 'fail');
+  const checks = [...local.checks, ...probeChecks];
+  const summary = summarizeDoctorChecks(checks);
 
   return {
     ...local,
     mode: 'probe',
-    status: firstFailure || local.status !== 'pass' ? 'fail' : 'pass',
-    first_failure: firstFailure?.reason_code ??
-      (local.status === 'fail' ? local.first_failure : null),
+    ...summary,
     probe: {
       ingest_route: '/v1/traces',
       marker_header: 'x-neatlogs-doctor',
@@ -593,7 +593,7 @@ function persistedProbeResult(
       metadata_valid: exactMetadata,
       typed_tokens_valid: exactTokens,
     },
-    checks: [...local.checks, ...probeChecks],
+    checks,
   } as const;
 }
 
@@ -603,12 +603,12 @@ function failedProbeResult(
   details?: CheckDetails,
 ) {
   const transportCheck = failedProbeTransportCheck(reasonCode, details);
+  const checks = [...local.checks, transportCheck];
   return {
     ...local,
     mode: 'probe',
-    status: 'fail',
-    first_failure: reasonCode,
-    checks: [...local.checks, transportCheck],
+    ...summarizeDoctorChecks(checks),
+    checks,
   } as const;
 }
 
@@ -632,27 +632,29 @@ function failedProbeWithoutCapture(
   flushTimeoutMs: number,
   details?: CheckDetails,
 ): DoctorProbeFailureResult {
+  const checks = [failedProbeTransportCheck(reasonCode, details)];
   return {
     ...failedDoctorBase(flushTimeoutMs),
     mode: 'probe',
-    first_failure: reasonCode,
-    checks: [failedProbeTransportCheck(reasonCode, details)],
+    ...summarizeDoctorChecks(checks),
+    checks,
   };
 }
 
 function failedLocalWithoutCapture(flushTimeoutMs: number): DoctorV2Result {
   const reasonCode = 'INSTRUMENTOR_INACTIVE';
+  const checks = [{
+    name: 'local_envelope',
+    status: 'fail',
+    reason_code: reasonCode,
+    remediation_code: 'ENABLE_INSTRUMENTOR',
+    message: 'Doctor could not capture a local diagnostic envelope',
+  }] satisfies readonly DoctorV2Check[];
   return {
     ...failedDoctorBase(flushTimeoutMs),
     mode: 'local',
-    first_failure: reasonCode,
-    checks: [{
-      name: 'local_envelope',
-      status: 'fail',
-      reason_code: reasonCode,
-      remediation_code: 'ENABLE_INSTRUMENTOR',
-      message: 'Doctor could not capture a local diagnostic envelope',
-    }],
+    ...summarizeDoctorChecks(checks),
+    checks,
   };
 }
 
@@ -875,16 +877,16 @@ export async function runDoctorCli(
   if (!apiKey) {
     try {
       const local = await localResult(io.env);
+      const checks = [...local.checks, {
+        name: 'credentials', status: 'fail', reason_code: 'CREDENTIAL_MISSING',
+        remediation_code: 'SET_CREDENTIAL',
+        message: 'Configure an ingestion credential to run a backend probe',
+      } satisfies DoctorV2Check];
       const result = {
         ...local,
         mode: 'probe',
-        status: 'fail',
-        first_failure: 'CREDENTIAL_MISSING',
-        checks: [...local.checks, {
-          name: 'credentials', status: 'fail', reason_code: 'CREDENTIAL_MISSING',
-          remediation_code: 'SET_CREDENTIAL',
-          message: 'Configure an ingestion credential to run a backend probe',
-        }],
+        ...summarizeDoctorChecks(checks),
+        checks,
       } as const;
       io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
     } catch {
@@ -901,16 +903,16 @@ export async function runDoctorCli(
     }
   } catch {
     const local = await localResult({ ...io.env, NEATLOGS_API_KEY: undefined });
+    const checks = [...local.checks, {
+      name: 'endpoint', status: 'fail', reason_code: 'ENDPOINT_INVALID',
+      remediation_code: 'SET_ENDPOINT',
+      message: 'Configure an absolute HTTP or HTTPS diagnostic endpoint',
+    } satisfies DoctorV2Check];
     const result = {
       ...local,
       mode: 'probe',
-      status: 'fail',
-      first_failure: 'ENDPOINT_INVALID',
-      checks: [...local.checks, {
-        name: 'endpoint', status: 'fail', reason_code: 'ENDPOINT_INVALID',
-        remediation_code: 'SET_ENDPOINT',
-        message: 'Configure an absolute HTTP or HTTPS diagnostic endpoint',
-      }],
+      ...summarizeDoctorChecks(checks),
+      checks,
     } as const;
     io.stdout(json ? JSON.stringify(result, null, 2) : human(result));
     return 3;
@@ -997,10 +999,11 @@ export async function runDoctorCli(
         }
       } else {
         await discardResponseBody(response);
+        const diagnosticDetails = response.status >= 500 ? lastDiagnostics : undefined;
         throw new ProbeReadError(
           'BACKEND_HTTP_ERROR',
           `Trace read-back failed with HTTP ${response.status}`,
-          response.status >= 500 ? lastDiagnostics : undefined,
+          { http_status: response.status, ...diagnosticDetails },
         );
       }
       const delay = Math.min(io.pollIntervalMs, Math.max(0, deadline - Date.now()));
