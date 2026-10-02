@@ -20,6 +20,7 @@ import { strandsHooks } from '../../src/strands.js';
 import { openaiAgentsProcessor } from '../../src/openai-agents.js';
 import { wrapMastra } from '../../src/mastra-wrap.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
+import { discardPendingMedia } from '../../src/core/media.js';
 
 let provider: NodeTracerProvider;
 let exporter: InMemorySpanExporter;
@@ -468,7 +469,10 @@ describe('openaiAgentsProcessor', () => {
     processor.onTraceStart({ traceId: 'trace-x', name: 'Agent workflow' });
     processor.onSpanStart({ spanId: 'a1', traceId: 'trace-x', spanData: { type: 'agent', name: 'Weather Assistant', tools: ['get_weather'] } });
     processor.onSpanStart({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response' } });
-    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response', _response: {
+    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-x', spanData: { type: 'response', _input: [
+      { role: 'system', content: 'Be concise' },
+      { role: 'user', content: 'Where is order 42?' },
+    ], _response: {
       model: 'gpt-4o-mini-2024-07-18',
       usage: { input_tokens: 57, output_tokens: 15, total_tokens: 72 },
       output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Sunny' }] }],
@@ -487,6 +491,13 @@ describe('openaiAgentsProcessor', () => {
     expect(attr(llm, 'neatlogs.llm.token_count.total')).toBe(72);
     expect(attr(llm, 'neatlogs.llm.output_messages.0.content')).toBe('Sunny');
 
+    const workflow = spans.find(s => s.attributes['neatlogs.span.kind'] === 'WORKFLOW')!;
+    expect(attr(workflow, 'input.value')).toBe('Where is order 42?');
+    expect(attr(workflow, 'output.value')).toBe('Sunny');
+    expect(attr(llm, 'neatlogs.llm.input_messages.0.role')).toBe('system');
+    expect(attr(llm, 'neatlogs.llm.input_messages.1.role')).toBe('user');
+    expect(attr(llm, 'neatlogs.llm.input_messages.1.content')).toBe('Where is order 42?');
+
     const tool = spans.find(s => s.attributes['neatlogs.span.kind'] === 'TOOL')!;
     expect(attr(tool, 'neatlogs.tool.name')).toBe('get_weather');
 
@@ -502,6 +513,31 @@ describe('openaiAgentsProcessor', () => {
     const spans = getSpans();
     expect(spans.length).toBe(1);
     expect(spans[0].status.code).toBe(2); // ERROR
+  });
+  it('keeps inline media out of response and root text attributes', () => {
+    const processor = openaiAgentsProcessor();
+    const data = Buffer.alloc(120_000, 0x41).toString('base64');
+    processor.onTraceStart({ traceId: 'trace-m', name: 'Agent workflow' });
+    processor.onSpanStart({ spanId: 'r1', traceId: 'trace-m', spanData: { type: 'response' } });
+    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-m', spanData: { type: 'response', _input: [
+      { role: 'user', content: [
+        { type: 'input_text', text: 'What is in this image?' },
+        { type: 'input_image', image_url: `data:image/png;base64,${data}` },
+      ] },
+    ], _response: {
+      model: 'gpt-4o-mini',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'A cat' }] }],
+    } } });
+    processor.onTraceEnd({ traceId: 'trace-m' });
+
+    const spans = exporter.getFinishedSpans();
+    expect(JSON.stringify(spans.map(s => s.attributes))).not.toContain(data.slice(0, 256));
+    const llm = spans.find(s => s.attributes['neatlogs.span.kind'] === 'LLM')!;
+    const workflow = spans.find(s => s.attributes['neatlogs.span.kind'] === 'WORKFLOW')!;
+    expect(attr(llm, 'neatlogs.llm.input_messages.0.content')).toBe('What is in this image?');
+    expect(attr(llm, 'neatlogs.llm.input_messages.0.media.0.mime_type')).toBe('image/png');
+    expect(attr(workflow, 'input.value')).toBe('What is in this image?');
+    for (const span of spans) discardPendingMedia(span as object);
   });
 });
 
