@@ -85,7 +85,8 @@ checks paths and patch size, runs the changed test against the original SDK,
 then applies the patch, runs TypeScript lint and the full test suite, rebuilds
 the SDK, and repeats the selected package's published-version smoke probe.
 The test result on the original SDK and post-patch probe scope are recorded in
-the PR. A passing smoke probe
+the PR. Both post-patch baseline and latest probes must pass before a PR is
+published or its version lock can advance. A passing smoke probe
 or patched test suite does not prove that the proposed fix is necessary; the
 PR is opened ready for human code review. No review is approved and no PR is
 merged automatically. If no safe patch is produced, the issue records that

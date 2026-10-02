@@ -39,15 +39,21 @@ test('a focused regression fixture validates a patch, checks the published versi
     for (const name of ['validate-fix.mjs', 'publish-fix.mjs']) {
       copyFileSync(join(sourceRoot, 'scripts/compatibility', name), join(scripts, name));
     }
-    writeFileSync(join(scripts, 'verify-releases.mjs'), [
-      "import { readFileSync, writeFileSync } from 'node:fs';",
-      "const report = JSON.parse(readFileSync('compatibility-fix-release-report.json', 'utf8'));",
-      "if (report.changes.length !== 1 || report.changes[0].package !== 'openai') process.exit(1);",
-      "if (!readFileSync('dist/openai.js', 'utf8').includes(\"value === 'new'\")) process.exit(1);",
-      "const change = report.changes[0];",
-      "writeFileSync('compatibility-fix-verification.json', JSON.stringify({ packages: [{ package: change.package, latestVersion: change.latest, status: 'passed', latest: { status: 'passed' }, scope: 'fixture runtime response mapping' }] }));",
-      '',
-    ].join('\n'));
+    const verifierPath = join(scripts, 'verify-releases.mjs');
+    function writeVerifier(status) {
+      writeFileSync(verifierPath, [
+        "import { readFileSync, writeFileSync } from 'node:fs';",
+        "const report = JSON.parse(readFileSync('compatibility-fix-release-report.json', 'utf8'));",
+        "if (report.changes.length !== 1 || report.changes[0].package !== 'openai') process.exit(1);",
+        "if (!readFileSync('dist/openai.js', 'utf8').includes(\"value === 'new'\")) process.exit(1);",
+        'const change = report.changes[0];',
+        `const status = ${JSON.stringify(status)};`,
+        "const counts = { passed: 0, failed: 0, blocked: 0, 'not-tested': 0 }; counts[status] = 1;",
+        "writeFileSync('compatibility-fix-verification.json', JSON.stringify({ schemaVersion: 1, generatedAt: new Date().toISOString(), counts, packages: [{ package: change.package, baselineVersion: change.previouslyAnalyzed, latestVersion: change.latest, status, baseline: { status: 'passed' }, latest: { status }, scope: 'fixture runtime response mapping' }] }));",
+        '',
+      ].join('\n'));
+    }
+    writeVerifier('passed');
     symlinkSync(join(sourceRoot, 'node_modules'), join(repo, 'node_modules'));
     writeFileSync(join(repo, 'package.json'), JSON.stringify({
       name: 'compat-fix-fixture', private: true, type: 'module',
@@ -109,7 +115,27 @@ test('a focused regression fixture validates a patch, checks the published versi
     assert.equal(validation.baselineTargetedTest, 'failed');
     assert.deepEqual(validation.checks, ['lint', 'targeted-test', 'test', 'post-patch-build', 'post-patch-published-version-smoke']);
     assert.equal(validation.postPatchSmoke.latestStatus, 'passed');
+    assert.equal(validation.postPatchSmoke.baselineStatus, 'passed');
     assert.equal(validation.postPatchSmoke.latestVersion, '2.0.0');
+    const successfulValidation = readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8');
+    for (const status of ['blocked', 'not-tested']) {
+      command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+      writeVerifier(status);
+      const rejected = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
+      assert.equal(rejected.status, 1, rejected.stderr);
+      const report = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+      assert.equal(report.status, 'rejected');
+      assert.equal(report.postPatchSmoke.latestStatus, status);
+    }
+    command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    writeFileSync(verifierPath, 'process.exit(2);\n');
+    writeFileSync(join(repo, 'compatibility-fix-verification.json'), successfulValidation);
+    const stale = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
+    assert.equal(stale.status, 1, stale.stderr);
+    const staleReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.match(staleReport.reason, /did not produce a report/);
+    writeVerifier('passed');
+    writeFileSync(join(repo, 'compatibility-fix-validation.json'), successfulValidation);
 
     const gh = join(bin, 'gh');
     writeFileSync(gh, [

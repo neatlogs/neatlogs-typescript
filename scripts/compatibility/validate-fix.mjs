@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFile, lstat, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, lstat, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -137,6 +137,9 @@ async function main() {
     await writeFile(resolve(repositoryRoot, 'compatibility-fix-release-report.json'), `${JSON.stringify({
       ...releases, changes: [change],
     }, null, 2)}\n`);
+    const postPatchOutput = resolve(repositoryRoot, 'compatibility-fix-verification.json');
+    await rm(postPatchOutput, { force: true });
+    const verificationStartedAt = Date.now();
     try {
       await run('node', [
         resolve(repositoryRoot, 'scripts/compatibility/verify-releases.mjs'),
@@ -144,25 +147,34 @@ async function main() {
         '--output=compatibility-fix-verification.json',
       ], 300_000);
     } catch (error) {
-      if (!(await readFile(resolve(repositoryRoot, 'compatibility-fix-verification.json'), 'utf8').catch(() => null))) {
+      if (!(await readFile(postPatchOutput, 'utf8').catch(() => null))) {
         throw new Error(`Post-patch published-version smoke check did not produce a report: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`);
       }
     }
-    const postPatchReport = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-fix-verification.json'), 'utf8'));
+    const postPatchReport = JSON.parse(await readFile(postPatchOutput, 'utf8'));
     const postPatch = postPatchReport.packages?.[0];
-    if (postPatch?.package !== proposal.package || postPatch.latestVersion !== change.latest) {
-      throw new Error('Post-patch smoke report does not match the selected published package');
+    const counts = postPatchReport.counts ?? {};
+    const total = ['passed', 'failed', 'blocked', 'not-tested'].reduce((sum, name) => sum + Number(counts[name] ?? 0), 0);
+    const generatedAt = Date.parse(postPatchReport.generatedAt);
+    if (postPatchReport.schemaVersion !== 1 || postPatchReport.packages?.length !== 1
+        || postPatch?.package !== proposal.package
+        || postPatch.baselineVersion !== change.previouslyAnalyzed
+        || postPatch.latestVersion !== change.latest
+        || counts[postPatch.status] !== 1 || total !== 1
+        || !Number.isFinite(generatedAt) || generatedAt < verificationStartedAt - 1000) {
+      throw new Error('Post-patch smoke report is stale or does not match the selected published package');
     }
     result.postPatchSmoke = {
       package: proposal.package,
       status: postPatch.status,
+      baselineStatus: postPatch.baseline?.status ?? 'not-tested',
       latestStatus: postPatch.latest?.status ?? 'not-tested',
       latestVersion: change.latest,
       scope: postPatch.scope ?? null,
       detail: postPatch.latest?.detail?.slice(0, 500) ?? null,
     };
-    if (postPatch.latest?.status === 'failed') {
-      throw new Error(`Post-patch ${proposal.package}@${change.latest} runtime smoke check still fails`);
+    if (postPatch.baseline?.status !== 'passed' || postPatch.latest?.status !== 'passed' || postPatch.status !== 'passed') {
+      throw new Error(`Post-patch ${proposal.package} baseline/latest smoke probes did not both pass`);
     }
     result.checks.push('post-patch-published-version-smoke');
     result.status = 'validated';

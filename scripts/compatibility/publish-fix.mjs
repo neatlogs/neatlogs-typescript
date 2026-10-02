@@ -32,6 +32,7 @@ export function updatedVersionLock(lock, change) {
 
 export function mayAdvanceVersionLock(validation, change) {
   return Boolean(validation.postPatchSmoke?.status === 'passed'
+    && validation.postPatchSmoke.baselineStatus === 'passed'
     && validation.postPatchSmoke.latestStatus === 'passed'
     && validation.postPatchSmoke.package === change.package
     && validation.postPatchSmoke.latestVersion === change.latest
