@@ -11,6 +11,9 @@ import {
   documentationText,
   officialDocumentationUrls,
   packageSurface,
+  compactEvidence,
+  advisoryFailureReason,
+  analyzeWithGemini,
 } from './analyze-upstream.mjs';
 
 test('packageSurface keeps only compatibility-relevant package metadata', () => {
@@ -80,4 +83,37 @@ test('official documentation is discovered from authoritative package metadata',
 
 test('documentationText extracts visible documentation without scripts', () => {
   assert.equal(documentationText('<html><script>ignore()</script><body><h1>Migration</h1><p>Use runtimeContext.</p></body></html>', 'text/html'), 'Migration Use runtimeContext.');
+});
+
+test('advisory input stays bounded across fifteen large package reports and labels incomplete excerpts', () => {
+  const large = 'x'.repeat(100_000);
+  const item = (index) => ({
+    package: `package-${index}`, previousVersion: '1', latestVersion: '2',
+    integrations: [{ id: 'adapter', adapterPaths: ['src/adapter.ts'], adapterSource: [{ path: 'src/adapter.ts', content: large }] }],
+    packageSurfaceChanges: [{ key: 'exports', before: large, after: large }],
+    publicApiChanges: { added: [large], removed: [large] },
+    sourceContentChanges: [{ path: 'index.ts', addedLines: [large], removedLines: [large] }],
+    officialDocumentation: [{ url: 'https://example.test/docs', content: large }],
+  });
+  const packages = Array.from({ length: 15 }, (_, index) => item(index));
+  packages[0].integrations.push({ id: 'third-adapter', adapterSource: [{ path: 'src/third.ts', content: large }] });
+  const compact = compactEvidence({ schemaVersion: 1, packages });
+  assert.ok(Buffer.byteLength(JSON.stringify(compact)) < 300_000);
+  assert.equal(compact.packages[0].integrations[0].adapterSource[0].truncated, true);
+  assert.equal(compact.packages[0].integrations[1].adapterSource[0].path, 'src/third.ts');
+  assert.match(compact.note, /Do not infer missing handlers or syntax errors/);
+});
+
+test('malformed Gemini JSON becomes a safe advisory failure without publishing model text', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({
+    candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"summary":"unfinished' }] } }],
+  }) });
+  try {
+    await assert.rejects(analyzeWithGemini({ packages: [] }, 'fake-key'), /Gemini advisory returned malformed JSON after reaching its output limit/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(advisoryFailureReason(Object.assign(new Error('network details'), { name: 'TimeoutError' })), 'Gemini advisory request timed out after six minutes.');
+  assert.equal(advisoryFailureReason(new SyntaxError('raw model text')), 'Gemini advisory request failed before producing a valid assessment.');
 });

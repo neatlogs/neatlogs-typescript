@@ -16,18 +16,85 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: read
 
 jobs:
-  discover:
+  releases:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       changes_found: ${{ steps.discovery.outputs.changes_found }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Discover npm releases
+        id: discovery
+        run: node scripts/compatibility/discover-releases.mjs --report=compatibility-release-report.json
+      - name: Upload release report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: typescript-compatibility-releases
+          path: compatibility-release-report.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  verify:
+    needs: releases
+    if: needs.releases.outputs.changes_found == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      verify_outcome: ${{ steps.verify_releases.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - name: Download release report
+        uses: actions/download-artifact@v4
+        with:
+          name: typescript-compatibility-releases
+      - name: Build SDK for isolated consumer checks
+        run: npm run build
+      - name: Verify detected versions against recorded baselines
+        id: verify_releases
+        continue-on-error: true
+        run: node scripts/compatibility/verify-releases.mjs
+      - name: Upload version verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: typescript-compatibility-verification
+          path: compatibility-verification.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  discover:
+    needs: [releases, verify]
+    if: always() && needs.releases.outputs.changes_found == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    outputs:
+      changes_found: ${{ needs.releases.outputs.changes_found }}
       proposal_ready: ${{ steps.propose_fix.outputs.proposal_ready }}
       issue_url: ${{ steps.discovery_issue.outputs.issue_url }}
-      verify_outcome: ${{ steps.verify_releases.outcome }}
+      verify_outcome: ${{ needs.verify.outputs.verify_outcome }}
+      advisory_outcome: ${{ steps.llm_analysis.outcome }}
       proposal_outcome: ${{ steps.propose_fix.outcome }}
       prior_prs_outcome: ${{ steps.prior_prs.outcome }}
     steps:
@@ -37,19 +104,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci --ignore-scripts
-      - name: Discover npm releases
-        id: discovery
-        run: node scripts/compatibility/discover-releases.mjs --report=compatibility-release-report.json
-      - name: Build SDK for isolated consumer checks
-        if: steps.discovery.outputs.changes_found == 'true'
-        run: npm run build
-      - name: Verify detected versions against recorded baselines
-        id: verify_releases
-        if: steps.discovery.outputs.changes_found == 'true'
+      - name: Download release report
+        uses: actions/download-artifact@v4
+        with:
+          name: typescript-compatibility-releases
+      - name: Download version verification report
+        id: download_verification
         continue-on-error: true
-        run: node scripts/compatibility/verify-releases.mjs
+        uses: actions/download-artifact@v4
+        with:
+          name: typescript-compatibility-verification
       - name: Capture upstream issue evidence
         if: inputs.upstream_issue_url != ''
         env:
@@ -65,16 +130,16 @@ jobs:
           mv compatibility-release-report.tmp.json compatibility-release-report.json
           jq -e '.changes | length == 1' compatibility-release-report.json
       - name: Build deterministic upstream evidence
-        if: steps.discovery.outputs.changes_found == 'true'
+        if: needs.releases.outputs.changes_found == 'true'
         run: npm run compatibility:evidence
       - name: Attach upstream issue evidence
-        if: steps.discovery.outputs.changes_found == 'true' && inputs.upstream_issue_url != ''
+        if: needs.releases.outputs.changes_found == 'true' && inputs.upstream_issue_url != ''
         run: |
           jq --slurpfile issue compatibility-upstream-issue.json '.upstreamIssues = $issue' compatibility-evidence.json > compatibility-evidence.tmp.json
           mv compatibility-evidence.tmp.json compatibility-evidence.json
       - name: Run advisory Gemini impact analysis
         id: llm_analysis
-        if: steps.discovery.outputs.changes_found == 'true'
+        if: needs.releases.outputs.changes_found == 'true'
         continue-on-error: true
         env:
           COMPAT_GEMINI_API_KEY: ${{ secrets.COMPAT_GEMINI_API_KEY }}
@@ -82,14 +147,14 @@ jobs:
         run: npm run compatibility:llm
       - name: List prior compatibility PRs
         id: prior_prs
-        if: steps.discovery.outputs.changes_found == 'true'
+        if: needs.releases.outputs.changes_found == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh pr list --repo "$GITHUB_REPOSITORY" --state all --limit 500 --json headRefName,url > compatibility-existing-prs.json
       - name: Ask Gemini for one specific SDK fix
         id: propose_fix
-        if: always() && steps.discovery.outputs.changes_found == 'true' && steps.verify_releases.outcome != 'skipped' && steps.prior_prs.outcome == 'success' && github.ref_name == github.event.repository.default_branch
+        if: always() && needs.releases.outputs.changes_found == 'true' && steps.download_verification.outcome == 'success' && steps.prior_prs.outcome == 'success' && github.ref_name == github.event.repository.default_branch
         continue-on-error: true
         env:
           COMPAT_GEMINI_API_KEY: ${{ secrets.COMPAT_GEMINI_API_KEY }}
@@ -97,7 +162,7 @@ jobs:
         run: node scripts/compatibility/propose-fix.mjs
       - name: Create or update discovery issue
         id: discovery_issue
-        if: always() && steps.discovery.outputs.changes_found == 'true'
+        if: always() && needs.releases.outputs.changes_found == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -105,7 +170,7 @@ jobs:
             const report = JSON.parse(fs.readFileSync('compatibility-release-report.json', 'utf8'));
             const analysis = fs.existsSync('compatibility-llm-analysis.json')
               ? JSON.parse(fs.readFileSync('compatibility-llm-analysis.json', 'utf8'))
-              : { unavailable: true };
+              : { unavailable: true, reason: 'Gemini advisory did not produce an analysis report.' };
             const verification = fs.existsSync('compatibility-verification.json')
               ? JSON.parse(fs.readFileSync('compatibility-verification.json', 'utf8'))
               : { counts: { passed: 0, failed: 0, blocked: 0, 'not-tested': report.changes.length }, packages: [] };
@@ -130,7 +195,11 @@ jobs:
               rows,
               '',
               '### Automated fix proposal',
-              `Decision: ${proposal.decision}. ${proposal.reason ?? ''}`,
+              `Decision: ${proposal.decision}. ${proposal.decision === 'propose_fix' ? 'Gemini proposed a patch; its rationale requires review.' : proposal.reason ?? ''}`,
+              (proposal.modelNotes ?? []).some((note) => note.error)
+                ? `Gemini proposal requests failed for ${(proposal.modelNotes ?? []).filter((note) => note.error).length} candidate(s); see the workflow artifact. The fix scan is incomplete.`
+                : '',
+              proposal.decision === 'propose_fix' ? `Unverified Gemini rationale: ${proposal.reason ?? 'not supplied'}` : '',
               'Validation: pending or not run.',
               'Review PR: pending or not created.',
               `Candidates deferred or not proposed: ${(proposal.unproposedCandidates ?? []).join(', ') || 'none'}.`,
@@ -138,6 +207,7 @@ jobs:
               '',
               '### Unverified Gemini advisory analysis',
               'Gemini provides an advisory assessment from upstream package evidence and adapter source. Its findings are separate from the deterministic smoke results and require review.',
+              analysis.unavailable ? `Status: failed. ${analysis.reason ?? 'No assessment was produced.'}` : analysis.skipped ? 'Status: skipped because the API key is not configured.' : 'Status: completed; findings are unverified.',
               '',
               '```json',
               JSON.stringify(analysis, null, 2),
@@ -192,7 +262,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci --ignore-scripts
       - name: Download original proposal and evidence
         uses: actions/download-artifact@v4
@@ -209,7 +278,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: typescript-compatibility-fix-validation
-          path: compatibility-fix-validation.json
+          path: |
+            compatibility-fix-validation.json
+            compatibility-fix-verification.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -259,7 +330,7 @@ jobs:
           retention-days: 14
 
   notify:
-    needs: [discover, validate_fix, publish_fix]
+    needs: [releases, verify, discover, validate_fix, publish_fix]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -307,17 +378,18 @@ jobs:
               ? JSON.parse(fs.readFileSync('compatibility-fix-publication.json', 'utf8')) : null;
             const current = await github.rest.issues.get({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber });
             const body = current.data.body
-              .replace(/^Validation:.*$/m, `Validation: ${validation?.status ?? (process.env.COMPAT_VALIDATION_JOB_STATUS === 'failure' ? 'failed before report' : 'not run')}${validation?.reason ? ` (${validation.reason})` : ''}. Targeted test on original SDK: ${validation?.baselineTargetedTest ?? 'not run'}.`)
+              .replace(/^Validation:.*$/m, `Validation: ${validation?.status ?? (process.env.COMPAT_VALIDATION_JOB_STATUS === 'failure' ? 'failed before report' : 'not run')}${validation?.reason ? ` (${validation.reason})` : ''}. Targeted test on original SDK: ${validation?.baselineTargetedTest ?? 'not run'}. Post-patch published-version smoke: ${validation?.postPatchSmoke?.latestStatus ?? 'not run'}${validation?.postPatchSmoke?.scope ? ` (${validation.postPatchSmoke.scope})` : ''}.`)
               .replace(/^Review PR:.*$/m, `Review PR: ${publication?.url || process.env.COMPAT_PR_URL || (publication?.priorPrUrl ? `${publication.priorPrUrl} (left unchanged: ${publication.reason})` : publication?.reason) || (process.env.COMPAT_PUBLICATION_JOB_STATUS === 'failure' ? 'publication failed before report' : 'not created')}.`);
             await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body });
       - name: Notify Slack of release and fix outcome
         continue-on-error: true
         env:
           COMPAT_SLACK_WEBHOOK_URL: ${{ secrets.COMPAT_SLACK_WEBHOOK_URL }}
-          COMPAT_JOB_STATUS: ${{ needs.discover.result }}
-          COMPAT_CHANGES_FOUND: ${{ needs.discover.outputs.changes_found }}
+          COMPAT_JOB_STATUS: ${{ (needs.releases.result == 'failure' || needs.verify.result == 'failure' || needs.discover.result == 'failure') && 'failure' || 'success' }}
+          COMPAT_CHANGES_FOUND: ${{ needs.releases.outputs.changes_found }}
           COMPAT_DISCOVERY_ISSUE_URL: ${{ needs.discover.outputs.issue_url }}
-          COMPAT_VERIFICATION_OUTCOME: ${{ needs.discover.outputs.verify_outcome }}
+          COMPAT_VERIFICATION_OUTCOME: ${{ needs.verify.outputs.verify_outcome }}
+          COMPAT_ADVISORY_OUTCOME: ${{ needs.discover.outputs.advisory_outcome }}
           COMPAT_PROPOSAL_OUTCOME: ${{ needs.discover.outputs.proposal_outcome }}
           COMPAT_PROPOSAL_READY: ${{ needs.discover.outputs.proposal_ready }}
           COMPAT_PRIOR_PRS_OUTCOME: ${{ needs.discover.outputs.prior_prs_outcome }}
@@ -328,5 +400,5 @@ jobs:
           COMPAT_PR_URL: ${{ needs.publish_fix.outputs.pr_url }}
         run: node scripts/compatibility/notify-slack.mjs
       - name: Fail run for candidate regression or fix automation failure
-        if: always() && (needs.discover.outputs.verify_outcome == 'failure' || needs.discover.outputs.proposal_outcome == 'failure' || needs.discover.outputs.prior_prs_outcome == 'failure' || needs.validate_fix.result == 'failure' || needs.validate_fix.outputs.validation_outcome == 'failure' || (needs.discover.outputs.proposal_ready == 'true' && needs.validate_fix.result == 'skipped') || needs.publish_fix.result == 'failure' || needs.publish_fix.outputs.publish_outcome == 'failure' || (needs.validate_fix.outputs.validated == 'true' && needs.publish_fix.result == 'skipped'))
+        if: always() && (needs.releases.result == 'failure' || needs.verify.result == 'failure' || needs.discover.result == 'failure' || needs.verify.outputs.verify_outcome == 'failure' || needs.discover.outputs.proposal_outcome == 'failure' || needs.discover.outputs.prior_prs_outcome == 'failure' || needs.validate_fix.result == 'failure' || needs.validate_fix.outputs.validation_outcome == 'failure' || (needs.discover.outputs.proposal_ready == 'true' && needs.validate_fix.result == 'skipped') || needs.publish_fix.result == 'failure' || needs.publish_fix.outputs.publish_outcome == 'failure' || (needs.validate_fix.outputs.validated == 'true' && needs.publish_fix.result == 'skipped'))
         run: exit 1

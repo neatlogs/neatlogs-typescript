@@ -27,9 +27,21 @@ export function candidatePackages(report, analysis, verification, priorBranches 
   });
 }
 
-export function consideredPackages(candidates, runNumber) {
-  const start = candidates.length ? ((Number(runNumber) || 0) * 3) % candidates.length : 0;
-  return [...candidates.slice(start), ...candidates.slice(0, start)].slice(0, 3);
+export function consideredPackages(candidates, runNumber, confirmedFailures = []) {
+  const failed = new Set(confirmedFailures);
+  const priority = candidates.filter((name) => failed.has(name));
+  const others = candidates.filter((name) => !failed.has(name));
+  function rotate(values, count) {
+    if (!values.length || !count) return [];
+    const start = ((Number(runNumber) || 0) * count) % values.length;
+    return [...values.slice(start), ...values.slice(0, start)].slice(0, count);
+  }
+  const first = rotate(priority, Math.min(3, priority.length));
+  return [...first, ...rotate(others, 3 - first.length)];
+}
+
+export function reviewOnlyReason(considered) {
+  return `No SDK patch was selected for validation from ${considered.length} package${considered.length === 1 ? '' : 's'} considered in this run. Any model explanations in the artifact are unverified.`;
 }
 
 export function validProposal(proposal, candidates, payload = null) {
@@ -137,14 +149,18 @@ async function main() {
     // Publication rechecks PR and branch state before any push.
   }
   const candidates = candidatePackages(report, analysis, verification, priorBranches);
-  const consideredCandidates = consideredPackages(candidates, process.env.GITHUB_RUN_NUMBER);
+  const confirmedFailures = (verification.packages ?? [])
+    .filter((item) => item.status === 'failed')
+    .map((item) => item.package);
+  const consideredCandidates = consideredPackages(candidates, process.env.GITHUB_RUN_NUMBER, confirmedFailures);
   const output = resolve(repositoryRoot, argumentValue('--output', 'compatibility-fix-proposal.json'));
-  let proposal = { decision: 'review_only', package: null, reason: 'No safe code-specific SDK fix was produced for the packages considered in this run.', evidence: '', patch: '' };
+  let proposal = { decision: 'review_only', package: null, reason: reviewOnlyReason(consideredCandidates), evidence: '', patch: '' };
+  const modelNotes = [];
+  let requestFailures = 0;
   const apiKey = process.env.COMPAT_GEMINI_API_KEY;
   if (consideredCandidates.length && apiKey) {
     try {
       const evidence = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-evidence.json'), 'utf8'));
-      const reasons = [];
       for (const packageName of consideredCandidates) {
         const selected = boundedPackageEvidence(
           report.changes.find((item) => item.package === packageName),
@@ -158,17 +174,21 @@ async function main() {
             proposal = generated;
             break;
           }
-          reasons.push(`${packageName}: ${generated?.reason || 'no complete SDK patch'}`);
+          modelNotes.push({ package: packageName, decision: generated?.decision ?? null, unverifiedReason: generated?.reason ?? null, accepted: false });
         } catch (error) {
-          reasons.push(`${packageName}: ${error instanceof Error ? error.message : String(error)}`);
+          requestFailures += 1;
+          modelNotes.push({ package: packageName, error: error instanceof Error ? error.message : String(error), accepted: false });
         }
       }
-      if (proposal.decision === 'review_only') proposal.reason = `No safe fix produced. ${reasons.join(' | ').slice(0, 2000)}`;
     } catch (error) {
-      proposal = { decision: 'review_only', package: null, reason: `Proposal generation unavailable: ${error instanceof Error ? error.message : String(error)}`, evidence: '', patch: '' };
+      requestFailures += 1;
+      modelNotes.push({ error: error instanceof Error ? error.message : String(error), accepted: false });
     }
   } else if (!apiKey) {
     proposal.reason = 'Gemini API key is not configured; no automated fix proposal was generated.';
+  }
+  if (requestFailures && proposal.decision !== 'propose_fix') {
+    proposal.reason = `Gemini fix proposal failed for ${requestFailures} request${requestFailures === 1 ? '' : 's'}; no SDK patch was selected. Review the workflow artifact for the affected packages.`;
   }
   await writeFile(output, `${JSON.stringify({
     schemaVersion: 1,
@@ -177,11 +197,16 @@ async function main() {
     consideredCandidates,
     unproposedCandidates: candidates.filter((name) => name !== (proposal.decision === 'propose_fix' ? proposal.package : null)),
     ...proposal,
+    modelNotes,
   }, null, 2)}\n`);
   if (process.env.GITHUB_OUTPUT) {
     await appendFile(process.env.GITHUB_OUTPUT, `proposal_ready=${proposal.decision === 'propose_fix'}\n`);
   }
   console.log(`Fix proposal: ${proposal.decision}; ${proposal.reason}`);
+  if (requestFailures) {
+    console.error(`Gemini fix proposal was incomplete: ${requestFailures} request${requestFailures === 1 ? '' : 's'} failed`);
+    process.exitCode = 1;
+  }
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? '')).href) {
