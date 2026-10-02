@@ -54,6 +54,13 @@ problems, and failures present at baseline, are marked blocked. They require
 triage before compatibility can be judged. A candidate regression fails the
 workflow after the issue and Slack alert are written.
 
+Release discovery and the smoke probes run in jobs with read-only repository
+permission and no service secrets. The smoke probes import published upstream
+code, so their runner is discarded before a separate job receives the Gemini
+API key to analyze evidence or propose a fix. The release and verification
+reports cross that boundary as JSON artifacts; a failed verifier still leaves
+the assessment job able to record an incomplete check and notify maintainers.
+
 The recorded version lock does not advance automatically. Until it is updated,
 the same package versions can appear in successive scheduled alerts; the
 discovery issue is updated in place.
