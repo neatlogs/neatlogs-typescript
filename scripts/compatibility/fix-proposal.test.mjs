@@ -110,9 +110,10 @@ test('publisher advances only the selected published version from its recorded b
   assert.deepEqual(lock.packages, { openai: '1.0.0', ai: '7.0.0' });
   assert.throws(() => updatedVersionLock(lock, { package: 'openai', previouslyAnalyzed: '0.9.0', latest: '2.0.0' }), /stale fix/);
   const change = { package: 'openai', latest: '2.0.0' };
-  const validation = { checks: ['post-patch-published-version-smoke'], postPatchSmoke: { package: 'openai', latestVersion: '2.0.0', status: 'passed', latestStatus: 'passed' } };
+  const validation = { checks: ['post-patch-published-version-smoke'], postPatchSmoke: { package: 'openai', latestVersion: '2.0.0', status: 'passed', baselineStatus: 'passed', latestStatus: 'passed' } };
   assert.equal(mayAdvanceVersionLock(validation, change), true);
   assert.equal(mayAdvanceVersionLock({ ...validation, postPatchSmoke: { ...validation.postPatchSmoke, latestStatus: 'blocked' } }, change), false);
+  assert.equal(mayAdvanceVersionLock({ ...validation, postPatchSmoke: { ...validation.postPatchSmoke, baselineStatus: 'blocked' } }, change), false);
   assert.equal(mayAdvanceVersionLock({ ...validation, checks: [] }, change), false);
   assert.equal(mayAdvanceVersionLock({ ...validation, postPatchSmoke: { ...validation.postPatchSmoke, package: 'ai' } }, change), false);
 });
