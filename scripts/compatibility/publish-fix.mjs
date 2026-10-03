@@ -4,7 +4,7 @@ import { appendFile, lstat, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { patchPaths, validateAdapterPaths, validateProposalReferences } from './validate-fix.mjs';
+import { patchPaths, regressionProof, validateAdapterPaths, validateProposalReferences } from './validate-fix.mjs';
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -76,6 +76,11 @@ async function main() {
   try {
     if (proposal.decision !== 'propose_fix' || validation.status !== 'validated' || !change) {
       throw new Error('No validated SDK fix is available to publish');
+    }
+    const originalVerification = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-verification.json'), 'utf8'));
+    const proof = regressionProof(validation, originalVerification, change);
+    if (!proof || validation.regressionProof !== proof) {
+      throw new Error('Validated fix lacks matching before/after regression proof; refusing to publish');
     }
     if (!process.env.GH_TOKEN) throw new Error('GitHub token is unavailable');
     const { stdout: head } = await run('git', ['rev-parse', 'HEAD']);
@@ -165,7 +170,7 @@ async function main() {
         '',
         'This PR is ready for human code review; it is not approved or merged automatically. The Gemini reasoning is advisory; the bounded baseline/latest smoke probes and repository tests do not establish complete integration compatibility.',
         '',
-        `Targeted changed test on the original SDK: ${validation.baselineTargetedTest ?? 'not run'}. A failure here may reproduce the issue, but still needs human review.`,
+        `Before/after regression proof: ${proof}. Targeted changed test on the original SDK: ${validation.baselineTargetedTest ?? 'not run'}. This evidence needs human review.`,
         `Validated files: ${validation.files.join(', ')}`,
         `Post-patch published-version smoke: ${validation.postPatchSmoke?.latestStatus ?? 'not run'} for ${change.package}@${change.latest}; scope: ${validation.postPatchSmoke?.scope ?? 'not tested'}. This is a bounded probe, not full integration compatibility.`,
         advanceLock

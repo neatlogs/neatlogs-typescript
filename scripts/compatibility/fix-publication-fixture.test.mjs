@@ -106,6 +106,12 @@ test('a focused regression fixture validates a patch, checks the published versi
     writeFileSync(join(repo, 'compatibility-release-report.json'), JSON.stringify({ changes: [
       { package: 'openai', previouslyAnalyzed: '1.0.0', latest: '2.0.0' },
     ] }));
+    writeFileSync(join(repo, 'compatibility-verification.json'), JSON.stringify({
+      schemaVersion: 1, counts: { passed: 1, failed: 0, blocked: 0, 'not-tested': 0 },
+      packages: [{ package: 'openai', baselineVersion: '1.0.0', latestVersion: '2.0.0', status: 'passed',
+        baseline: { status: 'passed' }, latest: { status: 'passed' } }],
+    }));
+    const originalVerification = readFileSync(join(repo, 'compatibility-verification.json'), 'utf8');
     writeFileSync(env.GITHUB_OUTPUT, '');
 
     const validationLog = command(repo, process.execPath, [join(scripts, 'validate-fix.mjs')], env);
@@ -113,11 +119,45 @@ test('a focused regression fixture validates a patch, checks the published versi
     const validation = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
     assert.equal(validation.status, 'validated');
     assert.equal(validation.baselineTargetedTest, 'failed');
+    assert.equal(validation.regressionProof, 'targeted-test-red-green');
     assert.deepEqual(validation.checks, ['lint', 'targeted-test', 'test', 'post-patch-build', 'post-patch-published-version-smoke']);
     assert.equal(validation.postPatchSmoke.latestStatus, 'passed');
     assert.equal(validation.postPatchSmoke.baselineStatus, 'passed');
     assert.equal(validation.postPatchSmoke.latestVersion, '2.0.0');
     const successfulValidation = readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8');
+    const successfulProposal = readFileSync(join(repo, 'compatibility-fix-proposal.json'), 'utf8');
+    command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    writeFileSync(sourcePath, "export function mapResponse(value: string): string { return value === 'new' ? 'old' : value; }\n");
+    writeFileSync(testPath, [
+      "import { expect, test } from 'vitest';",
+      "import { mapResponse } from '../../src/openai';",
+      "test('preserves old response', () => expect(mapResponse('old')).toBe('old'));",
+      "test('also preserves another old response', () => expect(mapResponse('older')).toBe('older'));",
+      '',
+    ].join('\n'));
+    const unprovenPatch = command(repo, 'git', ['diff', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env) + '\n';
+    command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    writeFileSync(join(repo, 'compatibility-fix-proposal.json'), JSON.stringify({
+      ...JSON.parse(successfulProposal), patch: unprovenPatch,
+    }));
+    const unproven = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
+    assert.equal(unproven.status, 1, unproven.stderr);
+    const unprovenReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.equal(unprovenReport.baselineTargetedTest, 'passed');
+    assert.match(unprovenReport.reason, /No before\/after regression proof/);
+    const smokeRegression = JSON.parse(originalVerification);
+    smokeRegression.counts = { passed: 0, failed: 1, blocked: 0, 'not-tested': 0 };
+    smokeRegression.packages[0].status = 'failed';
+    smokeRegression.packages[0].latest.status = 'failed';
+    writeFileSync(join(repo, 'compatibility-verification.json'), JSON.stringify(smokeRegression));
+    command(repo, process.execPath, [join(scripts, 'validate-fix.mjs')], env);
+    const smokeValidated = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.equal(smokeValidated.status, 'validated');
+    assert.equal(smokeValidated.baselineTargetedTest, 'passed');
+    assert.equal(smokeValidated.regressionProof, 'baseline-latest-smoke');
+    command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    writeFileSync(join(repo, 'compatibility-verification.json'), originalVerification);
+    writeFileSync(join(repo, 'compatibility-fix-proposal.json'), successfulProposal);
     for (const status of ['blocked', 'not-tested']) {
       command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
       writeVerifier(status);
@@ -135,6 +175,13 @@ test('a focused regression fixture validates a patch, checks the published versi
     const staleReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
     assert.match(staleReport.reason, /did not produce a report/);
     writeVerifier('passed');
+    writeFileSync(join(repo, 'compatibility-fix-validation.json'), successfulValidation);
+
+    const forgedValidation = { ...JSON.parse(successfulValidation), baselineTargetedTest: 'passed' };
+    writeFileSync(join(repo, 'compatibility-fix-validation.json'), JSON.stringify(forgedValidation));
+    const unprovenPublication = spawnSync(process.execPath, [join(scripts, 'publish-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
+    assert.equal(unprovenPublication.status, 1, unprovenPublication.stderr);
+    assert.match(JSON.parse(readFileSync(join(repo, 'compatibility-fix-publication.json'), 'utf8')).reason, /lacks matching before\/after regression proof/);
     writeFileSync(join(repo, 'compatibility-fix-validation.json'), successfulValidation);
 
     const gh = join(bin, 'gh');

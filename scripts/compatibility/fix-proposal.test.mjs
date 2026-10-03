@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { boundedPackageEvidence, candidatePackages, consideredPackages, reviewOnlyReason, validProposal } from './propose-fix.mjs';
 import { mayAdvanceVersionLock, proposalBranch, updatedVersionLock } from './publish-fix.mjs';
-import { patchPaths, validateAdapterPaths, validateProposalReferences } from './validate-fix.mjs';
+import { confirmedSmokeRegression, patchPaths, regressionProof, validateAdapterPaths, validateProposalReferences } from './validate-fix.mjs';
 
 const report = { changes: [
   { package: 'openai', previouslyAnalyzed: '6', latest: '7' },
@@ -116,4 +116,38 @@ test('publisher advances only the selected published version from its recorded b
   assert.equal(mayAdvanceVersionLock({ ...validation, postPatchSmoke: { ...validation.postPatchSmoke, baselineStatus: 'blocked' } }, change), false);
   assert.equal(mayAdvanceVersionLock({ ...validation, checks: [] }, change), false);
   assert.equal(mayAdvanceVersionLock({ ...validation, postPatchSmoke: { ...validation.postPatchSmoke, package: 'ai' } }, change), false);
+});
+
+test('advisory-only fixes require a red test before patch and green checks after patch', () => {
+  const change = { package: 'openai', previouslyAnalyzed: '1.0.0', latest: '2.0.0' };
+  const verification = { schemaVersion: 1, packages: [{
+    package: 'openai', baselineVersion: '1.0.0', latestVersion: '2.0.0', status: 'passed',
+    baseline: { status: 'passed' }, latest: { status: 'passed' },
+  }] };
+  const validation = {
+    baselineTargetedTest: 'passed',
+    checks: ['lint', 'targeted-test', 'test', 'post-patch-build', 'post-patch-published-version-smoke'],
+    postPatchSmoke: { package: 'openai', latestVersion: '2.0.0', status: 'passed', baselineStatus: 'passed', latestStatus: 'passed' },
+  };
+  assert.equal(confirmedSmokeRegression(verification, change), false);
+  assert.equal(regressionProof(validation, verification, change), null);
+  assert.equal(regressionProof({ ...validation, baselineTargetedTest: 'failed' }, verification, change), 'targeted-test-red-green');
+  assert.equal(regressionProof({ ...validation, baselineTargetedTest: 'failed', checks: ['post-patch-published-version-smoke'] }, verification, change), null);
+  assert.equal(regressionProof({ ...validation, baselineTargetedTest: 'failed', postPatchSmoke: { ...validation.postPatchSmoke, latestStatus: 'blocked' } }, verification, change), null);
+});
+
+test('a verified baseline-pass latest-fail smoke can prove the regression when the targeted test was already green', () => {
+  const change = { package: 'openai', previouslyAnalyzed: '1.0.0', latest: '2.0.0' };
+  const verification = { schemaVersion: 1, packages: [{
+    package: 'openai', baselineVersion: '1.0.0', latestVersion: '2.0.0', status: 'failed',
+    baseline: { status: 'passed' }, latest: { status: 'failed' },
+  }] };
+  const validation = {
+    baselineTargetedTest: 'passed', checks: ['lint', 'targeted-test', 'test', 'post-patch-build', 'post-patch-published-version-smoke'],
+    postPatchSmoke: { package: 'openai', latestVersion: '2.0.0', status: 'passed', baselineStatus: 'passed', latestStatus: 'passed' },
+  };
+  assert.equal(confirmedSmokeRegression(verification, change), true);
+  assert.equal(regressionProof(validation, verification, change), 'baseline-latest-smoke');
+  assert.equal(regressionProof(validation, verification, { ...change, latest: '3.0.0' }), null);
+  assert.equal(regressionProof(validation, { ...verification, schemaVersion: 0 }, change), null);
 });

@@ -67,16 +67,20 @@ export function slackMessage(context) {
     action = 'Review the failed job before judging SDK compatibility.';
   } else if (signals.prReady) {
     heading = 'Validated SDK fix PR ready; review the code.';
-    why = validation?.postPatchSmoke?.latestStatus === 'passed'
-      ? `The patch passed validation and a bounded ${brief(validation.postPatchSmoke.scope ?? 'runtime')} smoke probe against ${brief(validation.postPatchSmoke.package)}@${brief(validation.postPatchSmoke.latestVersion)}.`
-      : 'The SDK patch passed validation; bounded checks do not prove full compatibility.';
+    why = validation?.regressionProof === 'targeted-test-red-green'
+      ? 'A focused test failed on the unchanged SDK and passed after the patch; bounded published-version smoke checks passed.'
+      : validation?.regressionProof === 'baseline-latest-smoke'
+        ? 'The newer version failed a baseline-passing smoke probe before the patch and passed afterward.'
+        : validation?.postPatchSmoke?.latestStatus === 'passed'
+          ? `The patch passed validation and a bounded ${brief(validation.postPatchSmoke.scope ?? 'runtime')} smoke probe against ${brief(validation.postPatchSmoke.package)}@${brief(validation.postPatchSmoke.latestVersion)}.`
+          : 'The SDK patch passed validation; bounded checks do not prove full compatibility.';
     action = proposalOutcome === 'failure'
       ? 'Review the PR; Gemini requests for other candidates were incomplete.'
       : 'Review and approve the PR manually.';
   } else if (signals.candidateRegression) {
     heading = 'Candidate SDK regression found; triage the failing probe.';
     why = validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure'
-      ? 'The baseline passed and the newer version failed; the proposed SDK patch failed validation, so no PR was opened.'
+      ? `The baseline passed and the newer version failed; the proposed SDK patch failed validation${validation?.reason ? `: ${brief(validation.reason)}` : ''}, so no PR was opened.`
       : proposalOutcome === 'failure'
         ? 'The baseline passed and the newer version failed; Gemini fix proposal failed, so no PR was opened.'
         : 'The recorded baseline passed and the newer version failed a bounded probe; no validated SDK fix PR was opened.';
@@ -84,7 +88,7 @@ export function slackMessage(context) {
   } else if (signals.automationFailed) {
     heading = 'Compatibility automation failed; inspect the run.';
     if (validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure') {
-      why = 'Gemini-proposed SDK patch failed validation or tests; no PR was opened.';
+      why = `Gemini-proposed SDK patch failed validation or tests${validation?.reason ? `: ${brief(validation.reason)}` : ''}; no PR was opened.`;
     } else if (proposalReady === 'true' && validationJobStatus === 'skipped') {
       why = 'SDK patch validation was unexpectedly skipped; no PR was opened.';
     } else if (publication?.status === 'existing_unverified') {

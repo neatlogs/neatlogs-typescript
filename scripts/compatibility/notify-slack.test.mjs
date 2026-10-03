@@ -64,19 +64,20 @@ test('candidate regression and rejected fix show the failed gate and no PR', () 
   const context = {
     status: 'success', report: { changes: changes.slice(0, 1) },
     verification: { counts: { passed: 0, failed: 1, blocked: 0, 'not-tested': 0 } },
-    validation: { status: 'rejected' }, validationOutcome: 'failure', url: runUrl,
+    validation: { status: 'rejected', reason: 'No before/after regression proof' }, validationOutcome: 'failure', url: runUrl,
   };
   assert.equal(shouldNotifySlack(context), true);
   const message = slackMessage(context);
   assert.match(message, /^:red_circle: \*TypeScript SDK: Candidate SDK regression found/);
   assert.match(message, /Regression: 1 candidate \(baseline passed; latest failed\) \| Fix PR: none/);
-  assert.match(message, /proposed SDK patch failed validation, so no PR was opened/);
+  assert.match(message, /proposed SDK patch failed validation: No before\/after regression proof, so no PR was opened/);
+  assert.match(message, /No before\/after regression proof/);
 });
 
 test('validated patch shows review PR and bounded post-patch result', () => {
   const context = {
     status: 'success', report: { changes: changes.slice(0, 1) }, verification: allPass,
-    validation: { status: 'validated', postPatchSmoke: {
+    validation: { status: 'validated', regressionProof: 'targeted-test-red-green', postPatchSmoke: {
       package: 'openai', latestVersion: '7', latestStatus: 'passed', scope: 'client construction and SDK wrapping',
     } },
     publication: { status: 'created', url: 'https://github.com/neatlogs/neatlogs-typescript/pull/50' },
@@ -86,7 +87,7 @@ test('validated patch shows review PR and bounded post-patch result', () => {
   const message = slackMessage(context);
   assert.match(message, /Validated SDK fix PR ready; review the code/);
   assert.match(message, /Fix PR: <https:\/\/github.com\/neatlogs\/neatlogs-typescript\/pull\/50\|ready for code review>/);
-  assert.match(message, /bounded client construction and SDK wrapping smoke probe against openai@7/);
+  assert.match(message, /focused test failed on the unchanged SDK and passed after the patch/);
   assert.match(message, /Review and approve the PR manually/);
   assert.doesNotMatch(message, /draft PR/);
 });
