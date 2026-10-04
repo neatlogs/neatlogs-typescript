@@ -430,31 +430,44 @@ export async function analyzeWithGemini(evidence, apiKey, model = 'gemini-2.5-fl
     'Do not claim compatibility. Return concise JSON with keys summary (at most 500 characters), riskLevel (low|medium|high), findings[] (at most five entries with package, risk, description of at most 300 characters), and recommendedTests[] (at most five entries).',
     JSON.stringify(compactEvidence(evidence)),
   ].join('\n\n');
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 8192 },
-    }),
-    signal: AbortSignal.timeout(360_000),
-  });
-  if (!response.ok) throw new Error(`Gemini advisory HTTP ${response.status}.`);
-  const payload = await response.json();
-  const text = payload.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('');
-  if (!text) throw new Error('Gemini advisory returned no text.');
-  let analysis;
-  try {
-    analysis = JSON.parse(text);
-  } catch {
-    const outputLimited = payload.candidates?.[0]?.finishReason === 'MAX_TOKENS';
-    throw new Error(`Gemini advisory returned malformed JSON${outputLimited ? ' after reaching its output limit' : ''}.`);
+  // Gemini 2.5 Flash's dynamic thinking consumes maxOutputTokens and can exhaust
+  // the budget before a small JSON response is complete. Reserve most tokens for
+  // the response, then retry once without thinking if it still hits that limit.
+  const thinkingBudgets = /^gemini-2\.5-flash(?:$|-)/.test(model) ? [1024, 0] : [null];
+  const signal = AbortSignal.timeout(360_000);
+  for (const [attempt, thinkingBudget] of thinkingBudgets.entries()) {
+    const generationConfig = { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 8192 };
+    if (thinkingBudget !== null) generationConfig.thinkingConfig = { thinkingBudget };
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig,
+      }),
+      signal,
+    });
+    if (!response.ok) throw new Error(`Gemini advisory HTTP ${response.status}.`);
+    const payload = await response.json();
+    const candidate = payload.candidates?.[0];
+    if (candidate?.finishReason === 'MAX_TOKENS') {
+      if (attempt + 1 < thinkingBudgets.length) continue;
+      throw new Error('Gemini advisory returned malformed JSON after reaching its output limit.');
+    }
+    const text = candidate?.content?.parts?.map((part) => part.text ?? '').join('');
+    if (!text) throw new Error('Gemini advisory returned no text.');
+    let analysis;
+    try {
+      analysis = JSON.parse(text);
+    } catch {
+      throw new Error('Gemini advisory returned malformed JSON.');
+    }
+    if (!analysis || !['low', 'medium', 'high'].includes(analysis.riskLevel)
+        || typeof analysis.summary !== 'string' || !Array.isArray(analysis.findings)) {
+      throw new Error('Gemini advisory returned an invalid JSON schema.');
+    }
+    return analysis;
   }
-  if (!analysis || !['low', 'medium', 'high'].includes(analysis.riskLevel)
-      || typeof analysis.summary !== 'string' || !Array.isArray(analysis.findings)) {
-    throw new Error('Gemini advisory returned an invalid JSON schema.');
-  }
-  return analysis;
 }
 
 async function main() {
