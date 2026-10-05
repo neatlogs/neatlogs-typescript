@@ -51,6 +51,9 @@ test('verification results survive candidate failures and reach issue and Slack 
   assert.match(notify, /needs: \[releases, verify, discover, validate_fix, publish_fix\]/);
   assert.match(notify, /needs\.verify\.result == 'failure'/);
   assert.match(notify, /needs\.verify\.outputs\.verify_outcome == 'failure'/);
+  assert.match(notify, /- name: Notify Slack of release and fix outcome\s+env:/);
+  assert.doesNotMatch(notify, /- name: Notify Slack of release and fix outcome\s+continue-on-error: true/);
+  assert.match(notify, /- name: Fail run for candidate regression or fix automation failure\s+if: always\(\)/);
 });
 
 test('generated code and PR credentials stay in separate jobs', () => {

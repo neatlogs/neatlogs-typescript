@@ -183,12 +183,20 @@ export function slackMessage(context) {
   return slackPayload(context).text;
 }
 
+export async function deliverSlackAlert(context, webhook, fetcher = fetch) {
+  if (!shouldNotifySlack(context)) return false;
+  if (!webhook) throw new Error('COMPAT_SLACK_WEBHOOK_URL is not configured for an actionable alert');
+  const response = await fetcher(webhook, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(slackPayload(context)),
+  });
+  if (!response.ok) throw new Error(`Slack webhook returned ${response.status}`);
+  return true;
+}
+
 async function main() {
   const webhook = process.env.COMPAT_SLACK_WEBHOOK_URL;
-  if (!webhook) {
-    console.log('Slack notification skipped: COMPAT_SLACK_WEBHOOK_URL is not configured');
-    return;
-  }
   const status = process.env.COMPAT_JOB_STATUS ?? 'unknown';
   const report = await optionalJSON('compatibility-release-report.json');
   const analysis = await optionalJSON('compatibility-llm-analysis.json');
@@ -212,16 +220,10 @@ async function main() {
     prUrl: process.env.COMPAT_PR_URL,
     upstreamIssue, issueUrl: process.env.COMPAT_DISCOVERY_ISSUE_URL, url: workflowURL(),
   };
-  if (!shouldNotifySlack(context)) {
+  if (!await deliverSlackAlert(context, webhook)) {
     console.log('Slack notification skipped: no actionable compatibility result');
     return;
   }
-  const response = await fetch(webhook, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(slackPayload(context)),
-  });
-  if (!response.ok) throw new Error(`Slack webhook returned ${response.status}`);
   console.log('Slack compatibility alert sent');
 }
 

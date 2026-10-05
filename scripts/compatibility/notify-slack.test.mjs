@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { shouldNotifySlack, slackMessage, slackPayload, verificationIsConsistent } from './notify-slack.mjs';
+import { deliverSlackAlert, shouldNotifySlack, slackMessage, slackPayload, verificationIsConsistent } from './notify-slack.mjs';
 
 const runUrl = 'https://github.com/neatlogs/neatlogs-typescript/actions/runs/37084327273';
 const issueUrl = 'https://github.com/neatlogs/neatlogs-typescript/issues/46';
@@ -173,4 +173,23 @@ test('post-merge proposal failure has separate Slack blocks for outcome and next
   assert.match(payload.blocks[7].elements[0].text, /Discovery issue.*Workflow run/);
   assert.match(payload.text, /\*TypeScript SDK:.*\*\n\n\*Checked:/);
   assert.doesNotMatch(payload.text, /\*\*Checked:/);
+});
+
+test('actionable alerts require a configured webhook and a successful Slack response', async () => {
+  const context = {
+    status: 'success', changesFound: 'true', report: { changes }, verification: allPass,
+    proposalOutcome: 'failure', url: runUrl,
+  };
+  await assert.rejects(deliverSlackAlert(context, ''), /COMPAT_SLACK_WEBHOOK_URL is not configured/);
+  let sent;
+  const webhook = 'https://hooks.slack.test/example';
+  assert.equal(await deliverSlackAlert(context, webhook, async (url, options) => {
+    sent = { url, options };
+    return { ok: true, status: 200 };
+  }), true);
+  assert.equal(sent.url, webhook);
+  assert.match(JSON.parse(sent.options.body).blocks[0].text.text, /Compatibility automation failed/);
+  await assert.rejects(deliverSlackAlert(context, webhook, async () => ({ ok: false, status: 429 })), /Slack webhook returned 429/);
+  const noAlert = { ...context, proposalOutcome: 'success' };
+  assert.equal(await deliverSlackAlert(noAlert, '', () => { throw new Error('unexpected request'); }), false);
 });

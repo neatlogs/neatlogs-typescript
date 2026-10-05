@@ -382,7 +382,6 @@ jobs:
               .replace(/^Review PR:.*$/m, `Review PR: ${publication?.url || process.env.COMPAT_PR_URL || (publication?.priorPrUrl ? `${publication.priorPrUrl} (left unchanged: ${publication.reason})` : publication?.reason) || (process.env.COMPAT_PUBLICATION_JOB_STATUS === 'failure' ? 'publication failed before report' : 'not created')}.`);
             await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body });
       - name: Notify Slack of release and fix outcome
-        continue-on-error: true
         env:
           COMPAT_SLACK_WEBHOOK_URL: ${{ secrets.COMPAT_SLACK_WEBHOOK_URL }}
           COMPAT_JOB_STATUS: ${{ (needs.releases.result == 'failure' || needs.verify.result == 'failure' || needs.discover.result == 'failure') && 'failure' || 'success' }}
