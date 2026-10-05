@@ -253,6 +253,7 @@ jobs:
     outputs:
       validated: ${{ steps.validate.outputs.validated }}
       validation_outcome: ${{ steps.validate.outcome }}
+      validation_status: ${{ steps.validate.outputs.validation_status }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -380,6 +381,7 @@ jobs:
               .replace(/^Review PR:.*$/m, `Review PR: ${publication?.url || process.env.COMPAT_PR_URL || (publication?.priorPrUrl ? `${publication.priorPrUrl} (left unchanged: ${publication.reason})` : publication?.reason) || (process.env.COMPAT_PUBLICATION_JOB_STATUS === 'failure' ? 'publication failed before report' : 'not created')}.`);
             await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, body });
       - name: Notify Slack of release and fix outcome
+        id: slack
         env:
           COMPAT_SLACK_WEBHOOK_URL: ${{ secrets.COMPAT_SLACK_WEBHOOK_URL }}
           COMPAT_JOB_STATUS: ${{ (needs.releases.result == 'failure' || needs.verify.result == 'failure' || needs.discover.result == 'failure') && 'failure' || 'success' }}
@@ -390,11 +392,12 @@ jobs:
           COMPAT_PROPOSAL_READY: ${{ needs.discover.outputs.proposal_ready }}
           COMPAT_PRIOR_PRS_OUTCOME: ${{ needs.discover.outputs.prior_prs_outcome }}
           COMPAT_VALIDATION_OUTCOME: ${{ needs.validate_fix.outputs.validation_outcome }}
+          COMPAT_VALIDATION_STATUS: ${{ needs.validate_fix.outputs.validation_status }}
           COMPAT_PUBLICATION_OUTCOME: ${{ needs.publish_fix.outputs.publish_outcome }}
           COMPAT_VALIDATION_JOB_STATUS: ${{ needs.validate_fix.result }}
           COMPAT_PUBLICATION_JOB_STATUS: ${{ needs.publish_fix.result }}
           COMPAT_PR_URL: ${{ needs.publish_fix.outputs.pr_url }}
         run: node scripts/compatibility/notify-slack.mjs
       - name: Fail run for candidate regression or fix automation failure
-        if: always() && (needs.releases.result == 'failure' || needs.verify.result == 'failure' || needs.discover.result == 'failure' || needs.verify.outputs.verify_outcome == 'failure' || needs.discover.outputs.proposal_outcome == 'failure' || needs.discover.outputs.prior_prs_outcome == 'failure' || needs.validate_fix.result == 'failure' || needs.validate_fix.outputs.validation_outcome == 'failure' || (needs.discover.outputs.proposal_ready == 'true' && needs.validate_fix.result == 'skipped') || needs.publish_fix.result == 'failure' || needs.publish_fix.outputs.publish_outcome == 'failure' || (needs.validate_fix.outputs.validated == 'true' && needs.publish_fix.result == 'skipped'))
+        if: always() && (needs.releases.result == 'failure' || needs.verify.result == 'failure' || needs.discover.result == 'failure' || needs.verify.outputs.verify_outcome == 'failure' || needs.discover.outputs.proposal_outcome == 'failure' || needs.discover.outputs.prior_prs_outcome == 'failure' || needs.validate_fix.result == 'failure' || (needs.validate_fix.outputs.validation_outcome == 'failure' && steps.slack.outputs.safe_rejected != 'true') || (needs.discover.outputs.proposal_ready == 'true' && needs.validate_fix.result == 'skipped') || needs.publish_fix.result == 'failure' || needs.publish_fix.outputs.publish_outcome == 'failure' || (needs.validate_fix.outputs.validated == 'true' && needs.publish_fix.result == 'skipped'))
         run: exit 1

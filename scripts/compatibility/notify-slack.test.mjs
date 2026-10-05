@@ -99,6 +99,9 @@ test('missing or inconsistent verification results alert with unknown regression
   assert.equal(shouldNotifySlack({ ...base, verification: inconsistent }), true);
   assert.match(slackMessage({ ...base, verification: inconsistent }), /\*Regression:\* unknown/);
   assert.match(slackMessage({ ...base, verification: inconsistent }), /report is missing or inconsistent/);
+  const bothFailed = slackMessage({ ...base, verification: inconsistent, proposalOutcome: 'failure' });
+  assert.match(bothFailed, /SDK regression status is unknown, and the Gemini fix scan also failed/);
+  assert.doesNotMatch(bothFailed, /smoke probes found no regression/);
   assert.equal(shouldNotifySlack({ ...base, verification: null }), true);
   const duplicate = verificationFor(selected);
   duplicate.packages[1].package = duplicate.packages[0].package;
@@ -122,6 +125,25 @@ test('candidate regression and rejected fix show the failed gate and no PR', () 
   assert.match(message, /No before\/after regression proof/);
 });
 
+test('safe rejection without a verified regression stays in the issue; crashes still alert', () => {
+  const selected = changes.slice(0, 1);
+  const context = {
+    status: 'success', changesFound: 'true', report: { changes: selected },
+    verification: verificationFor(selected), proposal: { decision: 'propose_fix', package: selected[0].package },
+    proposalOutcome: 'success', validation: {
+      schemaVersion: 1, status: 'rejected', package: selected[0].package,
+      reason: 'Targeted test passed on unchanged SDK; no before/after proof',
+    },
+    validationOutcome: 'failure', validationStatus: 'rejected', validationJobStatus: 'success',
+  };
+  assert.equal(shouldNotifySlack(context), false);
+  assert.equal(shouldNotifySlack({ ...context, verification: verificationFor(selected, ['failed']) }), true);
+  assert.equal(shouldNotifySlack({ ...context, validation: null }), true);
+  assert.equal(shouldNotifySlack({ ...context, validation: { status: 'rejected' } }), true);
+  assert.equal(shouldNotifySlack({ ...context, validationJobStatus: 'failure' }), true);
+  assert.equal(shouldNotifySlack({ ...context, validationStatus: '' }), true);
+});
+
 test('validated patch shows review PR and bounded post-patch result', () => {
   const context = {
     status: 'success', report: { changes: changes.slice(0, 1) }, verification: verificationFor(changes.slice(0, 1)),
@@ -138,6 +160,8 @@ test('validated patch shows review PR and bounded post-patch result', () => {
   assert.match(message, /focused test failed on the unchanged SDK and passed after the patch/);
   assert.match(message, /Review and approve the PR manually/);
   assert.doesNotMatch(message, /draft PR/);
+  const partialScan = slackMessage({ ...context, proposalOutcome: 'failure' });
+  assert.match(partialScan, /Review the PR; Gemini requests for other candidates were incomplete/);
 });
 
 test('proposal and publication failures explain why no new PR appeared', () => {

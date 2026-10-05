@@ -214,7 +214,9 @@ test('a focused regression fixture validates a patch, checks the published versi
     const publishedLock = JSON.parse(command(root, 'git', ['--git-dir', remote, 'show', 'refs/heads/compat/ts-openai-2-0-0:.compatibility/versions.lock.json'], env));
     assert.equal(publishedLock.packages.openai, '2.0.0');
     assert.match(readFileSync(join(repo, 'compatibility-fix-pr-body.md'), 'utf8'), /ready for human code review/);
-    assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /validated=true\npr_url=https:\/\/github\.test\/neatlogs\/fixture\/pull\/2\n/);
+    const jobOutputs = readFileSync(env.GITHUB_OUTPUT, 'utf8');
+    assert.match(jobOutputs, /validated=true\nvalidation_status=validated\n/);
+    assert.match(jobOutputs, /pr_url=https:\/\/github\.test\/neatlogs\/fixture\/pull\/2\n/);
     assert.ok(existsSync(join(repo, 'compatibility-fix.patch')));
   } finally {
     rmSync(root, { recursive: true, force: true });

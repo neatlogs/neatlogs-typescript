@@ -220,6 +220,7 @@ async function main() {
     process.exitCode = 1;
   }
   await writeFile(output, `${JSON.stringify(result, null, 2)}\n`);
+  if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `validation_status=${result.status}\n`);
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? '')).href) {
