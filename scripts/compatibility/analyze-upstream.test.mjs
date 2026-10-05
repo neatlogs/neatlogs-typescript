@@ -106,14 +106,47 @@ test('advisory input stays bounded across fifteen large package reports and labe
 
 test('malformed Gemini JSON becomes a safe advisory failure without publishing model text', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ ok: true, json: async () => ({
-    candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"summary":"unfinished' }] } }],
-  }) });
+  const requests = [];
+  globalThis.fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return { ok: true, json: async () => ({
+      candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"summary":"unfinished' }] } }],
+    }) };
+  };
   try {
     await assert.rejects(analyzeWithGemini({ packages: [] }, 'fake-key'), /Gemini advisory returned malformed JSON after reaching its output limit/);
   } finally {
     globalThis.fetch = originalFetch;
   }
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(({ generationConfig }) => generationConfig.thinkingConfig), [
+    { thinkingBudget: 1024 },
+    { thinkingBudget: 0 },
+  ]);
   assert.equal(advisoryFailureReason(Object.assign(new Error('network details'), { name: 'TimeoutError' })), 'Gemini advisory request timed out after six minutes.');
   assert.equal(advisoryFailureReason(new SyntaxError('raw model text')), 'Gemini advisory request failed before producing a valid assessment.');
+});
+
+test('Gemini advisory retries once without thinking after MAX_TOKENS and accepts valid JSON', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const analysis = { summary: 'Review one adapter', riskLevel: 'medium', findings: [], recommendedTests: [] };
+  globalThis.fetch = async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return { ok: true, json: async () => ({
+      candidates: [requests.length === 1
+        ? { finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"summary":"unfinished' }] } }
+        : { finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(analysis) }] } }],
+    }) };
+  };
+  try {
+    assert.deepEqual(await analyzeWithGemini({ packages: [] }, 'fake-key'), analysis);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map(({ generationConfig }) => generationConfig.thinkingConfig), [
+    { thinkingBudget: 1024 },
+    { thinkingBudget: 0 },
+  ]);
 });

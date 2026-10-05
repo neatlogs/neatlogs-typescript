@@ -67,6 +67,32 @@ export function validateProposalReferences(proposal, paths, evidence) {
   }
 }
 
+function originalPackageResult(verification, change) {
+  return verification?.schemaVersion === 1 && Array.isArray(verification.packages)
+    ? verification.packages.find((item) => (
+      item.package === change.package
+      && item.baselineVersion === change.previouslyAnalyzed
+      && item.latestVersion === change.latest
+    )) : null;
+}
+
+export function confirmedSmokeRegression(verification, change) {
+  const item = originalPackageResult(verification, change);
+  return Boolean(item?.status === 'failed' && item.baseline?.status === 'passed' && item.latest?.status === 'failed');
+}
+
+export function regressionProof(validation, verification, change) {
+  const smoke = validation.postPatchSmoke;
+  const requiredChecks = ['lint', 'targeted-test', 'test', 'post-patch-build', 'post-patch-published-version-smoke'];
+  if (smoke?.package !== change.package || smoke.latestVersion !== change.latest
+      || smoke.status !== 'passed' || smoke.baselineStatus !== 'passed' || smoke.latestStatus !== 'passed'
+      || !requiredChecks.every((check) => validation.checks?.includes(check))
+      || !['passed', 'failed'].includes(validation.baselineTargetedTest)
+      || !originalPackageResult(verification, change)) return null;
+  if (confirmedSmokeRegression(verification, change)) return 'baseline-latest-smoke';
+  return validation.baselineTargetedTest === 'failed' ? 'targeted-test-red-green' : null;
+}
+
 async function run(command, args, timeout = 300_000) {
   return execFileAsync(command, args, {
     cwd: repositoryRoot,
@@ -89,6 +115,10 @@ async function main() {
     const evidence = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-evidence.json'), 'utf8'));
     validateAdapterPaths(paths, proposal.package, evidence);
     validateProposalReferences(proposal, paths, evidence);
+    const releases = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-release-report.json'), 'utf8'));
+    const change = (releases.changes ?? []).find((item) => item.package === proposal.package);
+    if (!change) throw new Error('Selected package is absent from the release report');
+    const originalVerification = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-verification.json'), 'utf8'));
     result.baseSha = proposal.baseSha;
     result.patchSha256 = createHash('sha256').update(proposal.patch).digest('hex');
     for (const path of paths) {
@@ -113,6 +143,9 @@ async function main() {
     } finally {
       await run('git', ['restore', '--', ...testPaths], 20_000);
     }
+    if (!confirmedSmokeRegression(originalVerification, change) && result.baselineTargetedTest !== 'failed') {
+      throw new Error('No before/after regression proof: original smoke checks found no regression and the proposed test passed on the unchanged SDK');
+    }
     await run('git', ['apply', '--whitespace=error', patchFile], 20_000);
     result.files = paths;
     const { stdout: changed } = await run('git', ['diff', '--name-only'], 20_000);
@@ -131,9 +164,6 @@ async function main() {
     // The consumer probe packs dist/, so build again after applying the patch.
     await run('npm', ['run', 'build']);
     result.checks.push('post-patch-build');
-    const releases = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-release-report.json'), 'utf8'));
-    const change = (releases.changes ?? []).find((item) => item.package === proposal.package);
-    if (!change) throw new Error('Selected package is absent from the release report');
     await writeFile(resolve(repositoryRoot, 'compatibility-fix-release-report.json'), `${JSON.stringify({
       ...releases, changes: [change],
     }, null, 2)}\n`);
@@ -177,6 +207,10 @@ async function main() {
       throw new Error(`Post-patch ${proposal.package} baseline/latest smoke probes did not both pass`);
     }
     result.checks.push('post-patch-published-version-smoke');
+    result.regressionProof = regressionProof(result, originalVerification, change);
+    if (!result.regressionProof) {
+      throw new Error('No before/after regression proof: the original baseline/latest smoke did not regress and the proposed test did not fail on the unchanged SDK');
+    }
     result.status = 'validated';
     if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, 'validated=true\n');
     console.log(`Validated Gemini fix in ${paths.join(', ')}`);
