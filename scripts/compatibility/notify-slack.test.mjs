@@ -1,14 +1,33 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { shouldNotifySlack, slackMessage, slackPayload } from './notify-slack.mjs';
+import { shouldNotifySlack, slackMessage, slackPayload, verificationIsConsistent } from './notify-slack.mjs';
 
 const runUrl = 'https://github.com/neatlogs/neatlogs-typescript/actions/runs/37084327273';
 const issueUrl = 'https://github.com/neatlogs/neatlogs-typescript/issues/46';
 const changes = Array.from({ length: 15 }, (_, index) => ({
   package: `package-${index}`, previouslyAnalyzed: '1', latest: '2',
 }));
-const allPass = { counts: { passed: 15, failed: 0, blocked: 0, 'not-tested': 0 } };
+function verificationFor(releaseChanges, statuses = []) {
+  const packages = releaseChanges.map((change, index) => {
+    const status = statuses[index] ?? 'passed';
+    return {
+      package: change.package, baselineVersion: change.previouslyAnalyzed, latestVersion: change.latest,
+      status,
+      ...(status === 'not-tested' ? {} : {
+        baseline: { status: 'passed' }, latest: { status: status === 'failed' ? 'failed' : status },
+      }),
+    };
+  });
+  return {
+    schemaVersion: 1,
+    packages,
+    counts: Object.fromEntries(['passed', 'failed', 'blocked', 'not-tested'].map((status) =>
+      [status, packages.filter((item) => item.status === status).length])),
+  };
+}
+
+const allPass = verificationFor(changes);
 
 test('all-pass high Gemini advisory is not a Slack alert', () => {
   const context = {
@@ -54,29 +73,47 @@ test('October 3 all-pass run reports Gemini failure as automation, not SDK regre
 test('workflow failure links to the actual actions run without claiming a regression', () => {
   const message = slackMessage({ status: 'failure', report: null, analysis: null, url: runUrl });
   assert.match(message, /Compatibility workflow failed; inspect the run/);
-  assert.match(message, /\*Checked:\* no completed report\n\*Regression:\* unknown\n\*Fix PR:\* none/);
+  assert.match(message, /\*Checked:\* no valid completed report\n\*Regression:\* unknown\n\*Fix PR:\* none/);
   assert.match(message, /actions\/runs\/37084327273/);
   assert.doesNotMatch(message, /neatlogs-typescript\/37084327273>/);
 });
 
-test('blocked checks say compatibility is unknown for those versions', () => {
+test('blocked and not-tested results stay in the issue when the completed run found no regression', () => {
+  const selected = changes.slice(0, 3);
   const context = {
-    status: 'success', changesFound: 'true', report: { changes: changes.slice(0, 3) },
-    verification: { counts: { passed: 2, failed: 0, blocked: 1, 'not-tested': 0 } },
+    status: 'success', changesFound: 'true', report: { changes: selected },
+    verification: verificationFor(selected, ['passed', 'blocked', 'not-tested']),
     analysis: { riskLevel: 'high' }, issueUrl, url: runUrl,
   };
-  assert.equal(shouldNotifySlack(context), true);
-  const message = slackMessage(context);
-  assert.match(message, /Compatibility checks incomplete; investigate the blocked probes/);
-  assert.match(message, /\*Checked:\* 2\/3 passed \(bounded smoke probes\), 1 blocked/);
-  assert.match(message, /Blocked or untested probes leave those package versions unverified/);
-  assert.doesNotMatch(message, /high potential risk/);
+  assert.equal(verificationIsConsistent(context.report, context.verification), true);
+  assert.equal(shouldNotifySlack(context), false);
+  assert.equal(shouldNotifySlack({ ...context, verification: verificationFor(selected, ['passed', 'blocked', 'passed']) }), false);
+  assert.equal(shouldNotifySlack({ ...context, verification: verificationFor(selected, ['passed', 'passed', 'not-tested']) }), false);
+});
+
+test('missing or inconsistent verification results alert with unknown regression status', () => {
+  const selected = changes.slice(0, 3);
+  const base = { status: 'success', changesFound: 'true', report: { changes: selected }, url: runUrl };
+  const inconsistent = verificationFor(selected);
+  inconsistent.counts.passed = 3;
+  inconsistent.packages[1].status = 'failed';
+  assert.equal(verificationIsConsistent(base.report, inconsistent), false);
+  assert.equal(shouldNotifySlack({ ...base, verification: inconsistent }), true);
+  assert.match(slackMessage({ ...base, verification: inconsistent }), /\*Regression:\* unknown/);
+  assert.match(slackMessage({ ...base, verification: inconsistent }), /report is missing or inconsistent/);
+  assert.equal(shouldNotifySlack({ ...base, verification: null }), true);
+  const duplicate = verificationFor(selected);
+  duplicate.packages[1].package = duplicate.packages[0].package;
+  assert.equal(verificationIsConsistent(base.report, duplicate), false);
+  const stale = verificationFor(selected);
+  stale.packages[0].latestVersion = 'stale-version';
+  assert.equal(verificationIsConsistent(base.report, stale), false);
 });
 
 test('candidate regression and rejected fix show the failed gate and no PR', () => {
   const context = {
     status: 'success', report: { changes: changes.slice(0, 1) },
-    verification: { counts: { passed: 0, failed: 1, blocked: 0, 'not-tested': 0 } },
+    verification: verificationFor(changes.slice(0, 1), ['failed']),
     validation: { status: 'rejected', reason: 'No before/after regression proof' }, validationOutcome: 'failure', url: runUrl,
   };
   assert.equal(shouldNotifySlack(context), true);
@@ -89,7 +126,7 @@ test('candidate regression and rejected fix show the failed gate and no PR', () 
 
 test('validated patch shows review PR and bounded post-patch result', () => {
   const context = {
-    status: 'success', report: { changes: changes.slice(0, 1) }, verification: allPass,
+    status: 'success', report: { changes: changes.slice(0, 1) }, verification: verificationFor(changes.slice(0, 1)),
     validation: { status: 'validated', regressionProof: 'targeted-test-red-green', postPatchSmoke: {
       package: 'openai', latestVersion: '7', latestStatus: 'passed', scope: 'client construction and SDK wrapping',
     } },
@@ -106,7 +143,7 @@ test('validated patch shows review PR and bounded post-patch result', () => {
 });
 
 test('proposal and publication failures explain why no new PR appeared', () => {
-  const base = { status: 'success', report: { changes: changes.slice(0, 1) }, verification: allPass, url: runUrl };
+  const base = { status: 'success', report: { changes: changes.slice(0, 1) }, verification: verificationFor(changes.slice(0, 1)), url: runUrl };
   const proposalContext = { ...base, proposalOutcome: 'failure' };
   assert.equal(shouldNotifySlack(proposalContext), true);
   assert.match(slackMessage(proposalContext), /Gemini fix proposal failed; no validated SDK patch was available/);

@@ -16,14 +16,49 @@ function workflowURL() {
   return server && repository && runID ? `${server}/${repository}/actions/runs/${runID}` : null;
 }
 
+export function verificationIsConsistent(report, verification) {
+  const changes = report?.changes;
+  const packages = verification?.packages;
+  const counts = verification?.counts;
+  const statuses = ['passed', 'failed', 'blocked', 'not-tested'];
+  if (verification?.schemaVersion !== 1 || !Array.isArray(changes) || !Array.isArray(packages)
+      || !counts || packages.length !== changes.length
+      || changes.some((change) => !change || typeof change.package !== 'string' || typeof change.latest !== 'string')
+      || packages.some((item) => !item || typeof item.package !== 'string')
+      || statuses.some((status) => !Number.isSafeInteger(counts[status]) || counts[status] < 0)) return false;
+  const changesByPackage = new Map(changes.map((change) => [change.package, change]));
+  if (changesByPackage.size !== changes.length) return false;
+  const seen = new Set();
+  for (const item of packages) {
+    const change = changesByPackage.get(item.package);
+    if (!change || seen.has(item.package) || !statuses.includes(item.status)
+        || item.baselineVersion !== (change.previouslyAnalyzed ?? null)
+        || item.latestVersion !== change.latest) return false;
+    seen.add(item.package);
+    if (item.status === 'not-tested') {
+      if (item.baseline || item.latest) return false;
+    } else {
+      const baseline = item.baseline?.status;
+      const latest = item.latest?.status;
+      if (!['passed', 'failed', 'blocked'].includes(baseline)
+          || !['passed', 'failed', 'blocked'].includes(latest)) return false;
+      const expected = latest === 'passed' ? 'passed'
+        : latest === 'blocked' || baseline === 'blocked' ? 'blocked'
+          : baseline === 'passed' && latest === 'failed' ? 'failed' : 'blocked';
+      if (item.status !== expected) return false;
+    }
+  }
+  return statuses.every((status) => counts[status] === packages.filter((item) => item.status === status).length);
+}
+
 function notificationSignals({ status, report, changesFound, analysis, verification, verificationOutcome, advisoryOutcome, proposalOutcome, priorPrsOutcome, proposalReady, validation, validationOutcome, validationJobStatus, publication, publicationOutcome, publicationJobStatus, prUrl }) {
   const detected = changesFound === true || changesFound === 'true' || (changesFound == null && Boolean(report?.changes?.length));
-  const counts = verification?.counts;
+  const verificationValid = !detected || verificationIsConsistent(report, verification);
+  const counts = verificationValid ? verification?.counts : null;
   const candidateRegression = Number(counts?.failed ?? 0) > 0;
-  const checksIncomplete = (verificationOutcome === 'failure' && !candidateRegression)
-    || (detected && !counts) || Number(counts?.blocked ?? 0) > 0 || Number(counts?.['not-tested'] ?? 0) > 0;
+  const checksIncomplete = detected && !verificationValid;
   const advisoryFailed = Boolean(analysis?.unavailable || advisoryOutcome === 'failure');
-  const automationFailed = status !== 'success' || (verificationOutcome === 'failure' && !candidateRegression)
+  const automationFailed = status !== 'success' || checksIncomplete || (verificationOutcome === 'failure' && !candidateRegression)
     || proposalOutcome === 'failure' || priorPrsOutcome === 'failure'
     || validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure'
     || (proposalReady === 'true' && validationJobStatus === 'skipped')
@@ -32,11 +67,12 @@ function notificationSignals({ status, report, changesFound, analysis, verificat
     || (validation?.status === 'validated' && publicationJobStatus === 'skipped')
     || publication?.status === 'existing_unverified';
   const prReady = Boolean(publication?.url || prUrl);
-  return { candidateRegression, checksIncomplete, advisoryFailed, automationFailed, prReady };
+  return { candidateRegression, checksIncomplete, advisoryFailed, automationFailed, prReady, verificationValid };
 }
 
 export function shouldNotifySlack(context) {
-  return Object.values(notificationSignals(context)).some(Boolean);
+  const { candidateRegression, advisoryFailed, automationFailed, prReady } = notificationSignals(context);
+  return candidateRegression || advisoryFailed || automationFailed || prReady;
 }
 
 function brief(value, limit = 180) {
@@ -47,11 +83,11 @@ function brief(value, limit = 180) {
 export function slackPayload(context) {
   const { status, report, analysis, verification = null, verificationOutcome = null, advisoryOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null } = context;
   const signals = notificationSignals(context);
-  const counts = verification?.counts;
+  const counts = signals.verificationValid ? verification?.counts : null;
   const total = counts ? ['passed', 'failed', 'blocked', 'not-tested'].reduce((sum, key) => sum + Number(counts[key] ?? 0), 0) : 0;
   const checked = counts
     ? `${counts.passed}/${total} passed (bounded smoke probes)${counts.blocked ? `, ${counts.blocked} blocked` : ''}${counts['not-tested'] ? `, ${counts['not-tested']} not tested` : ''}`
-    : verificationOutcome === 'failure' ? 'failed before a report was produced' : 'no completed report';
+    : verificationOutcome === 'failure' ? 'failed before a valid report was produced' : 'no valid completed report';
   const regression = Number(counts?.failed ?? 0) > 0
     ? `${counts.failed} candidate${counts.failed === 1 ? '' : 's'} (baseline passed; latest failed)`
     : counts && Number(counts.passed ?? 0) > 0 ? 'none found in tested scope' : 'unknown';
@@ -87,7 +123,9 @@ export function slackPayload(context) {
     action = 'Inspect the failing probe and fix automation result.';
   } else if (signals.automationFailed) {
     heading = 'Compatibility automation failed; inspect the run.';
-    if (validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure') {
+    if (signals.checksIncomplete) {
+      why = 'The smoke verification report is missing or inconsistent with the discovered package versions; SDK regression status is unknown.';
+    } else if (validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure') {
       why = `Gemini-proposed SDK patch failed validation or tests${validation?.reason ? `: ${brief(validation.reason)}` : ''}; no PR was opened.`;
     } else if (proposalReady === 'true' && validationJobStatus === 'skipped') {
       why = 'SDK patch validation was unexpectedly skipped; no PR was opened.';
@@ -109,10 +147,6 @@ export function slackPayload(context) {
     heading = 'Gemini analysis failed; review the workflow run.';
     why = `${brief(analysis?.reason || 'no assessment was produced').replace(/[.!?]+$/, '')}. No validated SDK fix was proposed.`;
     action = 'Inspect the Gemini failure; use the separate smoke results to assess the tested scope.';
-  } else if (signals.checksIncomplete) {
-    heading = 'Compatibility checks incomplete; investigate the blocked probes.';
-    why = 'Blocked or untested probes leave those package versions unverified; no validated SDK fix PR was opened.';
-    action = 'Review the check report before judging those versions.';
   } else {
     heading = `${report?.changes?.length ?? 0} newer package versions checked; no candidate regression found.`;
     why = 'All completed bounded smoke probes passed; no SDK fix PR was opened.';
