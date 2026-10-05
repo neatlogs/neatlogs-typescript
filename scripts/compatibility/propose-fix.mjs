@@ -31,13 +31,18 @@ export function consideredPackages(candidates, runNumber, confirmedFailures = []
   const failed = new Set(confirmedFailures);
   const priority = candidates.filter((name) => failed.has(name));
   const others = candidates.filter((name) => !failed.has(name));
-  function rotate(values, count) {
+  const sequence = Math.max(0, Math.floor(Number(runNumber) || 0));
+  function rotate(values, count, round = sequence) {
     if (!values.length || !count) return [];
-    const start = ((Number(runNumber) || 0) * count) % values.length;
+    const start = (round * count) % values.length;
     return [...values.slice(start), ...values.slice(0, start)].slice(0, count);
   }
-  const first = rotate(priority, Math.min(3, priority.length));
-  return [...first, ...rotate(others, 3 - first.length)];
+  // Keep confirmed smoke failures first, but let semantic-only candidates use
+  // one of the three requests every third run so persistent failures cannot
+  // starve the remainder of the watched packages indefinitely.
+  const reservedOther = priority.length >= 3 && others.length > 0 && sequence % 3 === 2;
+  const first = rotate(priority, Math.min(reservedOther ? 2 : 3, priority.length));
+  return [...first, ...rotate(others, 3 - first.length, reservedOther ? Math.floor(sequence / 3) : sequence)];
 }
 
 export function reviewOnlyReason(considered) {

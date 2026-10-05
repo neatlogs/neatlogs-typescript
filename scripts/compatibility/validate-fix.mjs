@@ -11,6 +11,36 @@ const MAX_PATCH_BYTES = 24_000;
 const MAX_CHANGED_LINES = 250;
 const MAX_FILES = 4;
 
+class ProposalGateRejection extends Error {}
+
+function gate(condition, message) {
+  if (!condition) throw new ProposalGateRejection(message);
+}
+
+function isCheckFailure(error) {
+  return typeof error?.code === 'number' && !error?.killed && !error?.signal;
+}
+
+function hasFailedTest(output) {
+  return /(?:Tests\s+\d+\s+failed|Failed Tests\s+\d+)/.test(output);
+}
+
+async function patchCheck(command, args, timeout = 300_000) {
+  try {
+    return await run(command, args, timeout);
+  } catch (error) {
+    if (!isCheckFailure(error)) throw error;
+    const diagnostics = `${error.stdout ?? ''}\n${error.stderr ?? ''}`;
+    const expectedPatchFailure = command === 'git' && args[0] === 'apply'
+      || command === 'npm' && (
+        (args[0] === 'run' && ['lint', 'build'].includes(args[1]) && /error TS\d+:/.test(diagnostics))
+        || (args[0] === 'test' || args[0] === 'exec') && hasFailedTest(diagnostics)
+      );
+    if (!expectedPatchFailure) throw error;
+    throw new ProposalGateRejection(`${command} ${args.join(' ')} rejected the proposed patch: ${(error.message ?? String(error)).slice(0, 500)}`);
+  }
+}
+
 export function patchPaths(patch) {
   if (Buffer.byteLength(patch, 'utf8') > MAX_PATCH_BYTES) throw new Error('Proposal patch exceeds 24 KB');
   if (/^(?:GIT binary patch|Binary files |(?:new|deleted) file mode |(?:new|old) mode |rename (?:from|to) )/m.test(patch)) {
@@ -111,10 +141,25 @@ async function main() {
     if (proposal.decision !== 'propose_fix') throw new Error('No fix proposal was generated');
     const { stdout: baseSha } = await run('git', ['rev-parse', 'HEAD'], 20_000);
     if (!proposal.baseSha || proposal.baseSha !== baseSha.trim()) throw new Error('Proposal base SHA differs from validation checkout');
-    const paths = patchPaths(proposal.patch);
+    let paths;
+    try { paths = patchPaths(proposal.patch); } catch (error) {
+      if (!(error instanceof Error) || !/^(?:Proposal|Patch|Binary patches)/.test(error.message)) throw error;
+      throw new ProposalGateRejection(error.message);
+    }
     const evidence = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-evidence.json'), 'utf8'));
-    validateAdapterPaths(paths, proposal.package, evidence);
-    validateProposalReferences(proposal, paths, evidence);
+    if (!Array.isArray(evidence?.packages)) throw new Error('Compatibility evidence artifact has no package list');
+    const packageEvidence = evidence.packages.find((item) => item?.package === proposal.package);
+    if (!packageEvidence || !Array.isArray(packageEvidence.integrations)
+        || packageEvidence.integrations.some((integration) => !Array.isArray(integration?.adapterSource))) {
+      throw new Error('Compatibility evidence artifact is missing or malformed for the selected package');
+    }
+    try {
+      validateAdapterPaths(paths, proposal.package, evidence);
+      validateProposalReferences(proposal, paths, evidence);
+    } catch (error) {
+      if (!(error instanceof Error) || !/^(?:Proposal changes source outside|Proposal does not cite)/.test(error.message)) throw error;
+      throw new ProposalGateRejection(error.message);
+    }
     const releases = JSON.parse(await readFile(resolve(repositoryRoot, 'compatibility-release-report.json'), 'utf8'));
     const change = (releases.changes ?? []).find((item) => item.package === proposal.package);
     if (!change) throw new Error('Selected package is absent from the release report');
@@ -122,47 +167,42 @@ async function main() {
     result.baseSha = proposal.baseSha;
     result.patchSha256 = createHash('sha256').update(proposal.patch).digest('hex');
     for (const path of paths) {
-      if ((await lstat(resolve(repositoryRoot, path))).isSymbolicLink()) throw new Error(`Symlink target is not allowed: ${path}`);
+      if ((await lstat(resolve(repositoryRoot, path))).isSymbolicLink()) throw new ProposalGateRejection(`Symlink target is not allowed: ${path}`);
     }
     const patchFile = resolve(repositoryRoot, 'compatibility-fix.patch');
     await writeFile(patchFile, proposal.patch);
-    const { stdout: numstat } = await run('git', ['apply', '--numstat', patchFile], 20_000);
+    const { stdout: numstat } = await patchCheck('git', ['apply', '--numstat', patchFile], 20_000);
     const appliedPaths = numstat.trim().split('\n').filter(Boolean).map((line) => line.split('\t').at(-1));
-    if (appliedPaths.length !== paths.length || appliedPaths.some((path) => !paths.includes(path))) {
-      throw new Error('Patch file paths differ from validated headers');
-    }
-    await run('git', ['apply', '--check', '--whitespace=error', patchFile], 20_000);
+    gate(appliedPaths.length === paths.length && !appliedPaths.some((path) => !paths.includes(path)), 'Patch file paths differ from validated headers');
+    await patchCheck('git', ['apply', '--check', '--whitespace=error', patchFile], 20_000);
     const testPaths = paths.filter((path) => path.startsWith('tests/'));
-    await run('git', ['apply', ...testPaths.map((path) => `--include=${path}`), patchFile], 20_000);
+    await patchCheck('git', ['apply', ...testPaths.map((path) => `--include=${path}`), patchFile], 20_000);
     try {
       await run('node', [resolve(repositoryRoot, 'node_modules/vitest/vitest.mjs'), 'run', ...testPaths], 120_000);
       result.baselineTargetedTest = 'passed';
     } catch (error) {
+      if (!isCheckFailure(error) || !hasFailedTest(`${error.stdout ?? ''}\n${error.stderr ?? ''}`)) throw error;
       result.baselineTargetedTest = 'failed';
       result.baselineTargetedTestDetail = (error instanceof Error ? error.message : String(error)).slice(0, 500);
     } finally {
       await run('git', ['restore', '--', ...testPaths], 20_000);
     }
-    if (!confirmedSmokeRegression(originalVerification, change) && result.baselineTargetedTest !== 'failed') {
-      throw new Error('No before/after regression proof: original smoke checks found no regression and the proposed test passed on the unchanged SDK');
-    }
-    await run('git', ['apply', '--whitespace=error', patchFile], 20_000);
+    gate(confirmedSmokeRegression(originalVerification, change) || result.baselineTargetedTest === 'failed', 'No before/after regression proof: original smoke checks found no regression and the proposed test passed on the unchanged SDK');
+    await patchCheck('git', ['apply', '--whitespace=error', patchFile], 20_000);
     result.files = paths;
     const { stdout: changed } = await run('git', ['diff', '--name-only'], 20_000);
     const actual = changed.trim().split('\n').filter(Boolean);
-    if (actual.length !== paths.length || actual.some((path) => !paths.includes(path))) {
-      throw new Error('Applied changes differ from validated paths');
-    }
+    gate(actual.length === paths.length && !actual.some((path) => !paths.includes(path)), 'Applied changes differ from validated paths');
     for (const [name, args] of [
       ['lint', ['run', 'lint']],
       ['targeted-test', ['exec', '--', 'vitest', 'run', ...testPaths]],
       ['test', ['test']],
     ]) {
-      await run('npm', args);
+      await patchCheck('npm', args);
       result.checks.push(name);
     }
     // The consumer probe packs dist/, so build again after applying the patch.
-    await run('npm', ['run', 'build']);
+    await patchCheck('npm', ['run', 'build']);
     result.checks.push('post-patch-build');
     await writeFile(resolve(repositoryRoot, 'compatibility-fix-release-report.json'), `${JSON.stringify({
       ...releases, changes: [change],
@@ -203,20 +243,18 @@ async function main() {
       scope: postPatch.scope ?? null,
       detail: postPatch.latest?.detail?.slice(0, 500) ?? null,
     };
-    if (postPatch.baseline?.status !== 'passed' || postPatch.latest?.status !== 'passed' || postPatch.status !== 'passed') {
-      throw new Error(`Post-patch ${proposal.package} baseline/latest smoke probes did not both pass`);
-    }
+    gate(postPatch.baseline?.status === 'passed' && postPatch.latest?.status === 'passed' && postPatch.status === 'passed', `Post-patch ${proposal.package} baseline/latest smoke probes did not both pass`);
     result.checks.push('post-patch-published-version-smoke');
     result.regressionProof = regressionProof(result, originalVerification, change);
-    if (!result.regressionProof) {
-      throw new Error('No before/after regression proof: the original baseline/latest smoke did not regress and the proposed test did not fail on the unchanged SDK');
-    }
+    gate(Boolean(result.regressionProof), 'No before/after regression proof: the original baseline/latest smoke did not regress and the proposed test did not fail on the unchanged SDK');
     result.status = 'validated';
     if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, 'validated=true\n');
     console.log(`Validated Gemini fix in ${paths.join(', ')}`);
   } catch (error) {
+    result.status = error instanceof ProposalGateRejection ? 'rejected' : 'failed';
+    result.kind = error instanceof ProposalGateRejection ? 'proposal-gate' : 'tooling-or-artifact';
     result.reason = (error instanceof Error ? error.message : String(error)).slice(0, 1500);
-    console.error(`Fix validation rejected: ${result.reason}`);
+    console.error(`Fix validation ${result.status}: ${result.reason}`);
     process.exitCode = 1;
   }
   await writeFile(output, `${JSON.stringify(result, null, 2)}\n`);

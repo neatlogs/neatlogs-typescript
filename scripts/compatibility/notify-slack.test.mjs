@@ -131,17 +131,33 @@ test('safe rejection without a verified regression stays in the issue; crashes s
     status: 'success', changesFound: 'true', report: { changes: selected },
     verification: verificationFor(selected), proposal: { decision: 'propose_fix', package: selected[0].package },
     proposalOutcome: 'success', validation: {
-      schemaVersion: 1, status: 'rejected', package: selected[0].package,
+      schemaVersion: 1, status: 'rejected', kind: 'proposal-gate', package: selected[0].package,
       reason: 'Targeted test passed on unchanged SDK; no before/after proof',
     },
-    validationOutcome: 'failure', validationStatus: 'rejected', validationJobStatus: 'success',
+    validationOutcome: 'failure', validationStatus: 'rejected', validationJobStatus: 'success', publicationJobStatus: 'skipped',
   };
   assert.equal(shouldNotifySlack(context), false);
   assert.equal(shouldNotifySlack({ ...context, verification: verificationFor(selected, ['failed']) }), true);
   assert.equal(shouldNotifySlack({ ...context, validation: null }), true);
   assert.equal(shouldNotifySlack({ ...context, validation: { status: 'rejected' } }), true);
+  assert.equal(shouldNotifySlack({ ...context, validation: { ...context.validation, status: 'failed', kind: 'tooling-or-artifact' }, validationStatus: 'failed' }), true);
+  assert.equal(shouldNotifySlack({ ...context, validation: { ...context.validation, kind: 'tooling-or-artifact' } }), true);
   assert.equal(shouldNotifySlack({ ...context, validationJobStatus: 'failure' }), true);
   assert.equal(shouldNotifySlack({ ...context, validationStatus: '' }), true);
+  assert.equal(shouldNotifySlack({ ...context, publicationJobStatus: 'success' }), true);
+  assert.equal(shouldNotifySlack({ ...context, publication: { status: 'failed' } }), true);
+  assert.equal(shouldNotifySlack({ ...context, prUrl: 'https://github.com/neatlogs/neatlogs-typescript/pull/50' }), true);
+});
+
+test('failed discovery issue update alerts and points to its failed step', () => {
+  const context = {
+    status: 'success', changesFound: 'true', report: { changes }, verification: allPass,
+    proposalOutcome: 'success', issueUpdateOutcome: 'failure', issueUrl, url: runUrl,
+  };
+  assert.equal(shouldNotifySlack(context), true);
+  const message = slackMessage(context);
+  assert.match(message, /discovery issue could not be updated with the fix outcome/);
+  assert.match(message, /Inspect and retry the failed discovery issue update step/);
 });
 
 test('validated patch shows review PR and bounded post-patch result', () => {

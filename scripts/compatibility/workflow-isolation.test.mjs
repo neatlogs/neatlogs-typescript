@@ -52,10 +52,12 @@ test('verification results survive candidate failures and reach issue and Slack 
   assert.match(notify, /needs: \[releases, verify, discover, validate_fix, publish_fix\]/);
   assert.match(notify, /needs\.verify\.result == 'failure'/);
   assert.match(notify, /needs\.verify\.outputs\.verify_outcome == 'failure'/);
-  assert.match(notify, /- name: Notify Slack of release and fix outcome\s+id: slack\s+env:/);
+  assert.match(notify, /- name: Update discovery issue with fix outcome\s+id: update_issue/);
+  assert.match(notify, /- name: Notify Slack of release and fix outcome\s+id: slack\s+if: always\(\)\s+env:/);
   assert.doesNotMatch(notify, /- name: Notify Slack of release and fix outcome\s+continue-on-error: true/);
   assert.match(notify, /- name: Fail run for candidate regression or fix automation failure\s+if: always\(\)/);
   assert.match(notify, /needs\.discover\.outputs\.proposal_outcome == 'failure'/);
+  assert.match(notify, /steps\.update_issue\.outcome == 'failure'/);
   assert.match(notify, /needs\.validate_fix\.outputs\.validation_outcome == 'failure' && steps\.slack\.outputs\.safe_rejected != 'true'/);
   assert.doesNotMatch(notify, /advisory_outcome|llm_analysis\.outcome/);
 });

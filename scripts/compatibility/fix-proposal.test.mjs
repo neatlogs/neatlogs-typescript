@@ -31,12 +31,16 @@ test('confirmed smoke regressions are considered before rotating lower-priority 
   assert.deepEqual([...lowerCovered].sort(), names.slice(1).sort());
 });
 
-test('multiple confirmed regressions retain the three-call cap and rotate among themselves', () => {
+test('confirmed regressions get priority while lower-priority candidates cannot starve', () => {
   const names = Array.from({ length: 15 }, (_, index) => `package-${index}`);
   const failed = names.slice(0, 4);
-  const considered = Array.from({ length: 4 }, (_, run) => consideredPackages(names, run, failed));
-  assert.ok(considered.every((batch) => batch.length === 3 && batch.every((name) => failed.includes(name))));
-  assert.deepEqual([...new Set(considered.flat())].sort(), failed.sort());
+  const considered = Array.from({ length: 33 }, (_, run) => consideredPackages(names, run, failed));
+  assert.ok(considered.every((batch) => batch.length === 3));
+  assert.ok(considered.every((batch) => batch[0] && failed.includes(batch[0])));
+  assert.ok(considered.every((batch, run) => run % 3 === 2
+    ? batch.slice(0, 2).every((name) => failed.includes(name)) && !failed.includes(batch[2])
+    : batch.every((name) => failed.includes(name))));
+  assert.deepEqual([...new Set(considered.flat())].sort(), [...names].sort());
 });
 
 test('review-only issue summary does not present model explanations as verified facts', () => {

@@ -51,7 +51,7 @@ export function verificationIsConsistent(report, verification) {
   return statuses.every((status) => counts[status] === packages.filter((item) => item.status === status).length);
 }
 
-function notificationSignals({ status, report, changesFound, verification, verificationOutcome, proposal, proposalOutcome, priorPrsOutcome, proposalReady, validation, validationOutcome, validationStatus, validationJobStatus, publication, publicationOutcome, publicationJobStatus, prUrl }) {
+function notificationSignals({ status, report, changesFound, verification, verificationOutcome, proposal, proposalOutcome, priorPrsOutcome, proposalReady, validation, validationOutcome, validationStatus, validationJobStatus, publication, publicationOutcome, publicationJobStatus, prUrl, issueUpdateOutcome }) {
   const detected = changesFound === true || changesFound === 'true' || (changesFound == null && Boolean(report?.changes?.length));
   const verificationValid = !detected || verificationIsConsistent(report, verification);
   const counts = verificationValid ? verification?.counts : null;
@@ -60,10 +60,12 @@ function notificationSignals({ status, report, changesFound, verification, verif
   const safeRejected = !candidateRegression && !checksIncomplete && validationJobStatus === 'success'
     && validationOutcome === 'failure'
     && validationStatus === 'rejected' && validation?.schemaVersion === 1
-    && validation.status === 'rejected' && typeof validation.reason === 'string' && validation.reason.length > 0
-    && proposal?.decision === 'propose_fix' && validation.package === proposal.package;
+    && validation.status === 'rejected' && validation.kind === 'proposal-gate'
+    && typeof validation.reason === 'string' && validation.reason.length > 0
+    && proposal?.decision === 'propose_fix' && validation.package === proposal.package
+    && publicationJobStatus === 'skipped' && !publication && !prUrl;
   const automationFailed = status !== 'success' || checksIncomplete || (verificationOutcome === 'failure' && !candidateRegression)
-    || proposalOutcome === 'failure' || priorPrsOutcome === 'failure'
+    || proposalOutcome === 'failure' || priorPrsOutcome === 'failure' || issueUpdateOutcome === 'failure'
     || (validation?.status === 'rejected' && !safeRejected)
     || (validationOutcome === 'failure' && !safeRejected) || validationJobStatus === 'failure'
     || (proposalReady === 'true' && validationJobStatus === 'skipped')
@@ -86,7 +88,7 @@ function brief(value, limit = 180) {
 }
 
 export function slackPayload(context) {
-  const { status, report, verification = null, verificationOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationStatus = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null } = context;
+  const { status, report, verification = null, verificationOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationStatus = null, validationJobStatus = null, publicationJobStatus = null, issueUpdateOutcome = null, url, issueUrl = null, upstreamIssue = null } = context;
   const signals = notificationSignals(context);
   const counts = signals.verificationValid ? verification?.counts : null;
   const total = counts ? ['passed', 'failed', 'blocked', 'not-tested'].reduce((sum, key) => sum + Number(counts[key] ?? 0), 0) : 0;
@@ -130,6 +132,8 @@ export function slackPayload(context) {
     heading = 'Compatibility automation failed; inspect the run.';
     if (signals.checksIncomplete) {
       why = `The smoke verification report is missing or inconsistent with the discovered package versions; SDK regression status is unknown${proposalOutcome === 'failure' ? ', and the Gemini fix scan also failed' : ''}.`;
+    } else if (issueUpdateOutcome === 'failure') {
+      why = 'The discovery issue could not be updated with the fix outcome; the workflow artifacts contain the current result.';
     } else if ((validation?.status === 'rejected' && !signals.safeRejected) || (validationOutcome === 'failure' && !signals.safeRejected) || validationJobStatus === 'failure') {
       why = `Gemini-proposed SDK patch failed validation or tests${validation?.reason ? `: ${brief(validation.reason)}` : ''}; no PR was opened.`;
     } else if (proposalReady === 'true' && validationJobStatus === 'skipped') {
@@ -150,9 +154,11 @@ export function slackPayload(context) {
     } else {
       why = 'A required compatibility automation step failed; no validated fix PR was opened.';
     }
-    action = heading.startsWith('AI fix scan')
-      ? 'Inspect and retry the failed Gemini proposal step.'
-      : 'Inspect the failed step and retry after it is fixed.';
+    action = issueUpdateOutcome === 'failure'
+      ? 'Inspect and retry the failed discovery issue update step.'
+      : heading.startsWith('AI fix scan')
+        ? 'Inspect and retry the failed Gemini proposal step.'
+        : 'Inspect the failed step and retry after it is fixed.';
   } else {
     heading = `${report?.changes?.length ?? 0} newer package versions checked; no candidate regression found.`;
     why = 'All completed bounded smoke probes passed; no SDK fix PR was opened.';
@@ -217,6 +223,7 @@ async function main() {
     proposalOutcome: process.env.COMPAT_PROPOSAL_OUTCOME,
     proposalReady: process.env.COMPAT_PROPOSAL_READY,
     priorPrsOutcome: process.env.COMPAT_PRIOR_PRS_OUTCOME,
+    issueUpdateOutcome: process.env.COMPAT_ISSUE_UPDATE_OUTCOME,
     validationOutcome: process.env.COMPAT_VALIDATION_OUTCOME,
     validationStatus: process.env.COMPAT_VALIDATION_STATUS,
     publicationOutcome: process.env.COMPAT_PUBLICATION_OUTCOME,
