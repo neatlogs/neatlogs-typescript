@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   diffApi,
@@ -149,4 +154,25 @@ test('Gemini advisory retries once without thinking after MAX_TOKENS and accepts
     { thinkingBudget: 1024 },
     { thinkingBudget: 0 },
   ]);
+});
+
+test('failed optional advisory writes a failed artifact but leaves the workflow step successful', () => {
+  const root = mkdtempSync(join(tmpdir(), 'neatlogs-advisory-failure-'));
+  try {
+    const evidence = join(root, 'evidence.json');
+    const output = join(root, 'analysis.json');
+    const fetchMock = join(root, 'mock-fetch.mjs');
+    writeFileSync(evidence, JSON.stringify({ packages: [] }));
+    writeFileSync(fetchMock, 'globalThis.fetch = async () => ({ ok: false, status: 503 });\n');
+    const run = spawnSync(process.execPath, [
+      '--import', fetchMock, fileURLToPath(new URL('./analyze-upstream.mjs', import.meta.url)),
+      '--llm-only', `--evidence=${evidence}`, `--llm-output=${output}`,
+    ], { encoding: 'utf8', env: { ...process.env, COMPAT_GEMINI_API_KEY: 'fixture-key' } });
+    assert.equal(run.status, 0, run.stderr);
+    const artifact = JSON.parse(readFileSync(output, 'utf8'));
+    assert.equal(artifact.unavailable, true);
+    assert.match(artifact.reason, /HTTP 503/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

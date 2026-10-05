@@ -44,3 +44,36 @@ test('Gemini proposal HTTP errors produce a failed step and a reviewable artifac
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('missing Gemini key marks the required fix scan incomplete and fails visibly', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'neatlogs-proposal-no-key-')));
+  const scripts = join(root, 'scripts/compatibility');
+  try {
+    mkdirSync(scripts, { recursive: true });
+    for (const name of ['propose-fix.mjs', 'publish-fix.mjs', 'validate-fix.mjs']) {
+      copyFileSync(join(sourceRoot, 'scripts/compatibility', name), join(scripts, name));
+    }
+    writeFileSync(join(root, 'compatibility-release-report.json'), JSON.stringify({ changes: [
+      { package: 'openai', previouslyAnalyzed: '1.0.0', latest: '2.0.0' },
+    ] }));
+    writeFileSync(join(root, 'compatibility-verification.json'), JSON.stringify({ packages: [
+      { package: 'openai', status: 'passed' },
+    ] }));
+    writeFileSync(join(root, 'compatibility-existing-prs.json'), '[]');
+    const githubOutput = join(root, 'github-output');
+    const run = spawnSync(process.execPath, [join(scripts, 'propose-fix.mjs')], {
+      cwd: root, encoding: 'utf8', env: {
+        ...process.env, COMPAT_GEMINI_API_KEY: '', GITHUB_RUN_NUMBER: '0',
+        GITHUB_SHA: 'fixture-sha', GITHUB_OUTPUT: githubOutput,
+      },
+    });
+    assert.equal(run.status, 1, run.stderr);
+    const artifact = JSON.parse(readFileSync(join(root, 'compatibility-fix-proposal.json'), 'utf8'));
+    assert.equal(artifact.decision, 'review_only');
+    assert.match(artifact.reason, /Gemini API key is not configured; no automated fix proposal was generated/);
+    assert.match(artifact.modelNotes[0].error, /fix proposal scan did not run/);
+    assert.match(readFileSync(githubOutput, 'utf8'), /proposal_ready=false/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

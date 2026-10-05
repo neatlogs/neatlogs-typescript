@@ -249,10 +249,12 @@ async function main() {
       requestFailures += 1;
       modelNotes.push({ error: error instanceof Error ? error.message : String(error), accepted: false });
     }
-  } else if (!apiKey) {
+  } else if (consideredCandidates.length && !apiKey) {
     proposal.reason = 'Gemini API key is not configured; no automated fix proposal was generated.';
+    modelNotes.push({ error: 'COMPAT_GEMINI_API_KEY is not configured; fix proposal scan did not run', accepted: false });
+    requestFailures += 1;
   }
-  if (requestFailures && proposal.decision !== 'propose_fix') {
+  if (requestFailures && apiKey && proposal.decision !== 'propose_fix') {
     proposal.reason = `Gemini fix proposal failed for ${requestFailures} request${requestFailures === 1 ? '' : 's'}; no SDK patch was selected. Review the workflow artifact for the affected packages.`;
   }
   await writeFile(output, `${JSON.stringify({

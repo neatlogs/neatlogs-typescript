@@ -94,7 +94,6 @@ jobs:
       proposal_ready: ${{ steps.propose_fix.outputs.proposal_ready }}
       issue_url: ${{ steps.discovery_issue.outputs.issue_url }}
       verify_outcome: ${{ needs.verify.outputs.verify_outcome }}
-      advisory_outcome: ${{ steps.llm_analysis.outcome }}
       proposal_outcome: ${{ steps.propose_fix.outcome }}
       prior_prs_outcome: ${{ steps.prior_prs.outcome }}
     steps:
@@ -138,7 +137,6 @@ jobs:
           jq --slurpfile issue compatibility-upstream-issue.json '.upstreamIssues = $issue' compatibility-evidence.json > compatibility-evidence.tmp.json
           mv compatibility-evidence.tmp.json compatibility-evidence.json
       - name: Run advisory Gemini impact analysis
-        id: llm_analysis
         if: needs.releases.outputs.changes_found == 'true'
         continue-on-error: true
         env:
@@ -388,7 +386,6 @@ jobs:
           COMPAT_CHANGES_FOUND: ${{ needs.releases.outputs.changes_found }}
           COMPAT_DISCOVERY_ISSUE_URL: ${{ needs.discover.outputs.issue_url }}
           COMPAT_VERIFICATION_OUTCOME: ${{ needs.verify.outputs.verify_outcome }}
-          COMPAT_ADVISORY_OUTCOME: ${{ needs.discover.outputs.advisory_outcome }}
           COMPAT_PROPOSAL_OUTCOME: ${{ needs.discover.outputs.proposal_outcome }}
           COMPAT_PROPOSAL_READY: ${{ needs.discover.outputs.proposal_ready }}
           COMPAT_PRIOR_PRS_OUTCOME: ${{ needs.discover.outputs.prior_prs_outcome }}

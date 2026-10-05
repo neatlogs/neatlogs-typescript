@@ -51,13 +51,12 @@ export function verificationIsConsistent(report, verification) {
   return statuses.every((status) => counts[status] === packages.filter((item) => item.status === status).length);
 }
 
-function notificationSignals({ status, report, changesFound, analysis, verification, verificationOutcome, advisoryOutcome, proposalOutcome, priorPrsOutcome, proposalReady, validation, validationOutcome, validationJobStatus, publication, publicationOutcome, publicationJobStatus, prUrl }) {
+function notificationSignals({ status, report, changesFound, verification, verificationOutcome, proposalOutcome, priorPrsOutcome, proposalReady, validation, validationOutcome, validationJobStatus, publication, publicationOutcome, publicationJobStatus, prUrl }) {
   const detected = changesFound === true || changesFound === 'true' || (changesFound == null && Boolean(report?.changes?.length));
   const verificationValid = !detected || verificationIsConsistent(report, verification);
   const counts = verificationValid ? verification?.counts : null;
   const candidateRegression = Number(counts?.failed ?? 0) > 0;
   const checksIncomplete = detected && !verificationValid;
-  const advisoryFailed = Boolean(analysis?.unavailable || advisoryOutcome === 'failure');
   const automationFailed = status !== 'success' || checksIncomplete || (verificationOutcome === 'failure' && !candidateRegression)
     || proposalOutcome === 'failure' || priorPrsOutcome === 'failure'
     || validation?.status === 'rejected' || validationOutcome === 'failure' || validationJobStatus === 'failure'
@@ -67,12 +66,12 @@ function notificationSignals({ status, report, changesFound, analysis, verificat
     || (validation?.status === 'validated' && publicationJobStatus === 'skipped')
     || publication?.status === 'existing_unverified';
   const prReady = Boolean(publication?.url || prUrl);
-  return { candidateRegression, checksIncomplete, advisoryFailed, automationFailed, prReady, verificationValid };
+  return { candidateRegression, checksIncomplete, automationFailed, prReady, verificationValid };
 }
 
 export function shouldNotifySlack(context) {
-  const { candidateRegression, advisoryFailed, automationFailed, prReady } = notificationSignals(context);
-  return candidateRegression || advisoryFailed || automationFailed || prReady;
+  const { candidateRegression, automationFailed, prReady } = notificationSignals(context);
+  return candidateRegression || automationFailed || prReady;
 }
 
 function brief(value, limit = 180) {
@@ -81,7 +80,7 @@ function brief(value, limit = 180) {
 }
 
 export function slackPayload(context) {
-  const { status, report, analysis, verification = null, verificationOutcome = null, advisoryOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null } = context;
+  const { status, report, verification = null, verificationOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null } = context;
   const signals = notificationSignals(context);
   const counts = signals.verificationValid ? verification?.counts : null;
   const total = counts ? ['passed', 'failed', 'blocked', 'not-tested'].reduce((sum, key) => sum + Number(counts[key] ?? 0), 0) : 0;
@@ -110,7 +109,7 @@ export function slackPayload(context) {
         : validation?.postPatchSmoke?.latestStatus === 'passed'
           ? `The patch passed validation and a bounded ${brief(validation.postPatchSmoke.scope ?? 'runtime')} smoke probe against ${brief(validation.postPatchSmoke.package)}@${brief(validation.postPatchSmoke.latestVersion)}.`
           : 'The SDK patch passed validation; bounded checks do not prove full compatibility.';
-    action = proposalOutcome === 'failure'
+    action = heading.startsWith('AI fix scan')
       ? 'Review the PR; Gemini requests for other candidates were incomplete.'
       : 'Review and approve the PR manually.';
   } else if (signals.candidateRegression) {
@@ -138,15 +137,14 @@ export function slackPayload(context) {
     } else if (publicationOutcome === 'failure' || publicationJobStatus === 'failure' || validation?.status === 'validated' && !publication) {
       why = `PR publication failed after patch validation${publication?.priorPrUrl ? `; <${publication.priorPrUrl}|existing PR> was left unchanged` : ''}.`;
     } else if (proposalOutcome === 'failure') {
-      why = 'Gemini fix proposal failed; no validated SDK patch was available.';
+      heading = 'AI fix scan incomplete; inspect the run.';
+      why = 'Gemini fix proposal failed. Bounded smoke probes found no regression; behavior outside those probes remains unverified. No fix PR was opened.';
     } else {
       why = 'A required compatibility automation step failed; no validated fix PR was opened.';
     }
-    action = 'Inspect the failed step and retry after it is fixed.';
-  } else if (signals.advisoryFailed) {
-    heading = 'Gemini analysis failed; review the workflow run.';
-    why = `${brief(analysis?.reason || 'no assessment was produced').replace(/[.!?]+$/, '')}. No validated SDK fix was proposed.`;
-    action = 'Inspect the Gemini failure; use the separate smoke results to assess the tested scope.';
+    action = proposalOutcome === 'failure'
+      ? 'Inspect and retry the failed Gemini proposal step.'
+      : 'Inspect the failed step and retry after it is fixed.';
   } else {
     heading = `${report?.changes?.length ?? 0} newer package versions checked; no candidate regression found.`;
     why = 'All completed bounded smoke probes passed; no SDK fix PR was opened.';
@@ -199,17 +197,15 @@ async function main() {
   const webhook = process.env.COMPAT_SLACK_WEBHOOK_URL;
   const status = process.env.COMPAT_JOB_STATUS ?? 'unknown';
   const report = await optionalJSON('compatibility-release-report.json');
-  const analysis = await optionalJSON('compatibility-llm-analysis.json');
   const verification = await optionalJSON(process.env.COMPAT_VERIFICATION_FILE ?? 'compatibility-verification.json');
   const proposal = await optionalJSON(process.env.COMPAT_PROPOSAL_FILE ?? 'compatibility-fix-proposal.json');
   const validation = await optionalJSON(process.env.COMPAT_VALIDATION_FILE ?? 'compatibility-fix-validation.json');
   const publication = await optionalJSON(process.env.COMPAT_PUBLICATION_FILE ?? 'compatibility-fix-publication.json');
   const upstreamIssue = await optionalJSON(process.env.COMPAT_UPSTREAM_ISSUE_FILE ?? 'compatibility-upstream-issue.json');
   const context = {
-    status, report, analysis, verification, proposal, validation, publication,
+    status, report, verification, proposal, validation, publication,
     changesFound: process.env.COMPAT_CHANGES_FOUND,
     verificationOutcome: process.env.COMPAT_VERIFICATION_OUTCOME,
-    advisoryOutcome: process.env.COMPAT_ADVISORY_OUTCOME,
     proposalOutcome: process.env.COMPAT_PROPOSAL_OUTCOME,
     proposalReady: process.env.COMPAT_PROPOSAL_READY,
     priorPrsOutcome: process.env.COMPAT_PRIOR_PRS_OUTCOME,
