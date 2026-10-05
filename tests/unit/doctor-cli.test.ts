@@ -39,7 +39,7 @@ function successfulProbeFixture() {
           },
           'doctor.probe.agent': {
             input: 'generated diagnostic input',
-            output: 'Text: generated diagnostic output',
+            output: '{"text":"generated diagnostic output"}',
           },
           'doctor.probe.llm': {
             input: { prompt: 'generated diagnostic input' },
@@ -273,6 +273,37 @@ describe('doctor CLI', () => {
     ]));
     expect(value.output[0]).not.toContain('must-not-survive');
     expect(value.output[0]).not.toContain('private-key');
+  });
+
+  it('keeps the earliest local failure when the hosted probe also fails', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const probeExporter: SpanExporter = {
+      export(_spans, callback) {
+        callback({ code: ExportResultCode.FAILED });
+      },
+      async forceFlush() {},
+      async shutdown() {},
+    };
+    const fetch = vi.fn(async () => new Response(null, { status: 403 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      requestTimeoutMs: 1,
+      probeTimeoutMs: 20,
+      pollIntervalMs: 1,
+      probeExporter,
+    });
+
+    expect(code).toBe(3);
+    const result = JSON.parse(value.output[0]!);
+    const firstFailedCheck = result.checks.find((item: { status: string }) => item.status === 'fail');
+    expect(firstFailedCheck?.reason_code).toBe('FLUSH_TIMEOUT');
+    expect(result.first_failure).toBe('FLUSH_TIMEOUT');
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: 'probe_transport',
+      reason_code: 'AUTH_FAILED',
+    }));
   });
 
   it('continues polling when a legacy 404 response is not JSON', async () => {

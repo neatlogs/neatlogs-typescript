@@ -177,9 +177,10 @@ describe('Doctor probe over the actual OTLP HTTP exporter', () => {
         status: 'fail',
         first_failure: 'FLUSH_TIMEOUT',
       });
-      expect(JSON.parse(stdout[0]!).checks).toContainEqual(
-        expect.objectContaining({ name: 'probe_transport', reason_code: 'AUTH_FAILED' }),
-      );
+      expect(JSON.parse(stdout[0]!).checks).toContainEqual(expect.objectContaining({
+        name: 'probe_transport',
+        reason_code: 'AUTH_FAILED',
+      }));
       expect(requests.some((request) => request.method === 'POST' && request.path === '/v1/traces')).toBe(true);
       expect(requests.some((request) => request.method === 'GET' && /^\/api\/traces\/v3\/[0-9a-f]{32}$/.test(request.path))).toBe(true);
       expect(`${stdout.join('\n')}\n${stderr.join('\n')}`).not.toContain('rejected-project-key');
@@ -245,6 +246,10 @@ describe('Doctor probe over the actual OTLP HTTP exporter', () => {
         status: 'fail',
         first_failure: 'FLUSH_TIMEOUT',
       });
+      expect(JSON.parse(stdout[0]!).checks).toContainEqual(expect.objectContaining({
+        name: 'probe_transport',
+        reason_code: 'TRACE_READBACK_TIMEOUT',
+      }));
       expect(`${stdout.join('\n')}\n${stderr.join('\n')}`).not.toContain('stalled-project-key');
     } finally {
       server.closeAllConnections();
