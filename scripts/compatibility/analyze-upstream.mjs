@@ -502,7 +502,9 @@ async function main() {
     }
     await writeFile(llmOutputPath, `${JSON.stringify(analysis, null, 2)}\n`);
     console.log(failed ? `Gemini advisory failed: ${analysis.reason}` : apiKey ? `Wrote Gemini analysis to ${llmOutputPath}` : 'Gemini analysis skipped: secret is not configured');
-    if (failed) process.exitCode = 1;
+    // Advisory analysis does not gate the independent, exhaustive candidate list
+    // used by the fix proposal step. Keep failures in the issue/artifact without
+    // failing an otherwise complete compatibility review.
   }
 }
 

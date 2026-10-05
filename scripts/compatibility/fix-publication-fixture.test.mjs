@@ -126,7 +126,35 @@ test('a focused regression fixture validates a patch, checks the published versi
     assert.equal(validation.postPatchSmoke.latestVersion, '2.0.0');
     const successfulValidation = readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8');
     const successfulProposal = readFileSync(join(repo, 'compatibility-fix-proposal.json'), 'utf8');
+    const missingTool = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], {
+      cwd: repo, encoding: 'utf8', env: { ...env, PATH: bin },
+    });
+    assert.equal(missingTool.status, 1, missingTool.stderr);
+    const missingToolReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.equal(missingToolReport.status, 'failed');
+    assert.equal(missingToolReport.kind, 'tooling-or-artifact');
+    assert.match(missingToolReport.reason, /spawn git ENOENT/);
     command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    const npmFixture = join(bin, 'npm');
+    writeFileSync(npmFixture, '#!/bin/sh\nexit 73\n');
+    chmodSync(npmFixture, 0o755);
+    const failedNpm = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
+    assert.equal(failedNpm.status, 1, failedNpm.stderr);
+    const failedNpmReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.equal(failedNpmReport.status, 'failed');
+    assert.equal(failedNpmReport.kind, 'tooling-or-artifact');
+    rmSync(npmFixture);
+    command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
+    const evidenceFile = join(repo, 'compatibility-evidence.json');
+    const validEvidence = readFileSync(evidenceFile, 'utf8');
+    writeFileSync(evidenceFile, JSON.stringify({ packages: [{ package: 'openai', integrations: {} }] }));
+    const badEvidence = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
+    assert.equal(badEvidence.status, 1, badEvidence.stderr);
+    const badEvidenceReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.equal(badEvidenceReport.status, 'failed');
+    assert.equal(badEvidenceReport.kind, 'tooling-or-artifact');
+    assert.match(badEvidenceReport.reason, /evidence artifact is missing or malformed/);
+    writeFileSync(evidenceFile, validEvidence);
     writeFileSync(sourcePath, "export function mapResponse(value: string): string { return value === 'new' ? 'old' : value; }\n");
     writeFileSync(testPath, [
       "import { expect, test } from 'vitest';",
@@ -143,6 +171,8 @@ test('a focused regression fixture validates a patch, checks the published versi
     const unproven = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
     assert.equal(unproven.status, 1, unproven.stderr);
     const unprovenReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.equal(unprovenReport.status, 'rejected');
+    assert.equal(unprovenReport.kind, 'proposal-gate');
     assert.equal(unprovenReport.baselineTargetedTest, 'passed');
     assert.match(unprovenReport.reason, /No before\/after regression proof/);
     const smokeRegression = JSON.parse(originalVerification);
@@ -165,6 +195,7 @@ test('a focused regression fixture validates a patch, checks the published versi
       assert.equal(rejected.status, 1, rejected.stderr);
       const report = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
       assert.equal(report.status, 'rejected');
+      assert.equal(report.kind, 'proposal-gate');
       assert.equal(report.postPatchSmoke.latestStatus, status);
     }
     command(repo, 'git', ['restore', '--', 'src/openai.ts', 'tests/unit/openai.test.ts'], env);
@@ -173,6 +204,8 @@ test('a focused regression fixture validates a patch, checks the published versi
     const stale = spawnSync(process.execPath, [join(scripts, 'validate-fix.mjs')], { cwd: repo, encoding: 'utf8', env });
     assert.equal(stale.status, 1, stale.stderr);
     const staleReport = JSON.parse(readFileSync(join(repo, 'compatibility-fix-validation.json'), 'utf8'));
+    assert.equal(staleReport.status, 'failed');
+    assert.equal(staleReport.kind, 'tooling-or-artifact');
     assert.match(staleReport.reason, /did not produce a report/);
     writeVerifier('passed');
     writeFileSync(join(repo, 'compatibility-fix-validation.json'), successfulValidation);
@@ -214,7 +247,9 @@ test('a focused regression fixture validates a patch, checks the published versi
     const publishedLock = JSON.parse(command(root, 'git', ['--git-dir', remote, 'show', 'refs/heads/compat/ts-openai-2-0-0:.compatibility/versions.lock.json'], env));
     assert.equal(publishedLock.packages.openai, '2.0.0');
     assert.match(readFileSync(join(repo, 'compatibility-fix-pr-body.md'), 'utf8'), /ready for human code review/);
-    assert.match(readFileSync(env.GITHUB_OUTPUT, 'utf8'), /validated=true\npr_url=https:\/\/github\.test\/neatlogs\/fixture\/pull\/2\n/);
+    const jobOutputs = readFileSync(env.GITHUB_OUTPUT, 'utf8');
+    assert.match(jobOutputs, /validated=true\nvalidation_status=validated\n/);
+    assert.match(jobOutputs, /pr_url=https:\/\/github\.test\/neatlogs\/fixture\/pull\/2\n/);
     assert.ok(existsSync(join(repo, 'compatibility-fix.patch')));
   } finally {
     rmSync(root, { recursive: true, force: true });

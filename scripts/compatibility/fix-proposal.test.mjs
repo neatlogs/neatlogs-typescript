@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { boundedPackageEvidence, candidatePackages, consideredPackages, reviewOnlyReason, validProposal } from './propose-fix.mjs';
+import { boundedPackageEvidence, candidatePackages, consideredPackages, generateProposal, relevantTestSources, reviewOnlyReason, validProposal } from './propose-fix.mjs';
 import { mayAdvanceVersionLock, proposalBranch, updatedVersionLock } from './publish-fix.mjs';
 import { confirmedSmokeRegression, patchPaths, regressionProof, validateAdapterPaths, validateProposalReferences } from './validate-fix.mjs';
 
@@ -31,12 +31,16 @@ test('confirmed smoke regressions are considered before rotating lower-priority 
   assert.deepEqual([...lowerCovered].sort(), names.slice(1).sort());
 });
 
-test('multiple confirmed regressions retain the three-call cap and rotate among themselves', () => {
+test('confirmed regressions get priority while lower-priority candidates cannot starve', () => {
   const names = Array.from({ length: 15 }, (_, index) => `package-${index}`);
   const failed = names.slice(0, 4);
-  const considered = Array.from({ length: 4 }, (_, run) => consideredPackages(names, run, failed));
-  assert.ok(considered.every((batch) => batch.length === 3 && batch.every((name) => failed.includes(name))));
-  assert.deepEqual([...new Set(considered.flat())].sort(), failed.sort());
+  const considered = Array.from({ length: 33 }, (_, run) => consideredPackages(names, run, failed));
+  assert.ok(considered.every((batch) => batch.length === 3));
+  assert.ok(considered.every((batch) => batch[0] && failed.includes(batch[0])));
+  assert.ok(considered.every((batch, run) => run % 3 === 2
+    ? batch.slice(0, 2).every((name) => failed.includes(name)) && !failed.includes(batch[2])
+    : batch.every((name) => failed.includes(name))));
+  assert.deepEqual([...new Set(considered.flat())].sort(), [...names].sort());
 });
 
 test('review-only issue summary does not present model explanations as verified facts', () => {
@@ -52,15 +56,79 @@ test('model high risk alone is not an actionable fix decision', () => {
   const payload = { upstreamEvidence: {
     integrations: [{ adapterSource: [{ path: 'src/openai.ts' }] }],
     sourceContentChanges: [{ path: 'src/responses.ts' }],
-  } };
+  }, relevantTestSource: [{ path: 'tests/unit/openai.test.ts', content: 'existing test' }] };
   const proposed = {
     decision: 'propose_fix', package: 'openai', adapterPath: 'src/openai.ts', upstreamReference: 'src/responses.ts',
     reason: 'A changed response field requires a parser adjustment in the Neatlogs adapter.',
     evidence: 'The source change renames a field used by the current response parser.',
-    patch: 'diff --git a/src/openai.ts b/src/openai.ts\n',
+    patch: 'diff --git a/src/openai.ts b/src/openai.ts\ndiff --git a/tests/unit/openai.test.ts b/tests/unit/openai.test.ts\n',
   };
   assert.equal(validProposal(proposed, ['openai'], payload), true);
   assert.equal(validProposal({ ...proposed, upstreamReference: 'made-up.ts' }, ['openai'], payload), false);
+  assert.equal(validProposal({ ...proposed, patch: 'diff --git a/src/openai.ts b/src/openai.ts\n' }, ['openai'], payload), false);
+});
+
+test('LangChain proposal receives complete existing test source for changed callback', async () => {
+  const evidence = {
+    integrations: [{ adapterSource: [{ path: 'src/langchain.ts', content: 'adapter code' }] }],
+    sourceContentChanges: [{ addedLines: ['handleToolStart(tool: Serialized, input: string | Record<string, unknown>)'] }],
+  };
+  const sources = await relevantTestSources(evidence);
+  assert.equal(sources[0].path, 'tests/unit/langchain-tool-output.test.ts');
+  assert.match(sources[0].content, /handleToolStart/);
+  assert.ok(sources.every(({ path, content }) => path.startsWith('tests/') && content.length <= 12_000));
+  assert.ok(sources.length <= 3);
+});
+
+test('Gemini proposal retries malformed JSON with bounded thinking, keeping the proof gate separate', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  try {
+    globalThis.fetch = async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [
+        { text: requests.length === 1 ? '{"decision":"review_only"' : JSON.stringify({ decision: 'review_only', patch: '', reason: 'No confirmed regression.' }) },
+      ] } }] }) };
+    };
+    const proposal = await generateProposal({ relevantTestSource: [{ path: 'tests/unit/langchain-tool-output.test.ts', content: 'existing test' }] }, 'key', 'gemini-2.5-flash');
+    assert.equal(proposal.decision, 'review_only');
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests.map((request) => request.generationConfig.thinkingConfig), [
+      { thinkingBudget: 1024 }, { thinkingBudget: 0 },
+    ]);
+    assert.match(requests[0].contents[0].parts[0].text, /tests\/unit\/langchain-tool-output\.test\.ts/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Gemini proposal retries MAX_TOKENS once, then reports an incomplete proposal', async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  try {
+    globalThis.fetch = async () => {
+      requests += 1;
+      return { ok: true, json: async () => ({ candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{' }] } }] }) };
+    };
+    await assert.rejects(generateProposal({}, 'key', 'gemini-2.5-flash'), /MAX_TOKENS/);
+    assert.equal(requests, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Gemini proposal never accepts repeated malformed JSON or JSON without a decision', async () => {
+  const originalFetch = globalThis.fetch;
+  const responses = ['{"decision":"review_only"', '{"reason":"missing decision"}'];
+  try {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ candidates: [{
+      finishReason: 'STOP', content: { parts: [{ text: responses.shift() }] },
+    }] }) });
+    await assert.rejects(generateProposal({}, 'key', 'gemini-2.5-flash'), /without a valid decision/);
+    assert.equal(responses.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('package evidence is bounded without truncating JSON', () => {
