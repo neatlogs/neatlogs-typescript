@@ -468,6 +468,30 @@ describe('doctor CLI', () => {
     }
   });
 
+  it('includes a safe HTTP status in human-readable probe failures', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ingestionDiagnostics: {
+          protocolVersion: 'v1', state: 'processing', currentStage: 'pii_dispatch',
+          lastSuccessfulStage: 'kafka_published', retryable: false,
+        },
+      }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+
+    const code = await runDoctorCli(['doctor', '--probe'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      sleep: async () => undefined,
+      probeExporter: fixture.probeExporter,
+    });
+
+    expect(code).toBe(3);
+    expect(value.output.join('\n')).toContain('BACKEND_HTTP_ERROR: The existing trace read path returned an unexpected HTTP status (HTTP 503)');
+    expect(value.output.join('\n')).toContain('Ingestion: processing at pii_dispatch');
+  });
+
   it('does not retain stale details for a malformed terminal receipt', async () => {
     const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
     const fixture = successfulProbeFixture();

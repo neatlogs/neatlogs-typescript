@@ -713,7 +713,9 @@ function human(result: {
 }): string {
   const lines = [`Neatlogs Doctor: ${result.status.toUpperCase()}`];
   for (const item of result.checks ?? []) {
-    lines.push(`${item.status === 'pass' ? 'PASS' : item.status === 'fail' ? 'FAIL' : 'INFO'} ${item.reason_code}: ${item.message}`);
+    const httpStatus = item.details?.http_status;
+    const statusSuffix = typeof httpStatus === 'number' ? ` (HTTP ${httpStatus})` : '';
+    lines.push(`${item.status === 'pass' ? 'PASS' : item.status === 'fail' ? 'FAIL' : 'INFO'} ${item.reason_code}: ${item.message}${statusSuffix}`);
   }
   const diagnostics = result.checks?.find((item) => item.details?.current_stage)?.details;
   if (diagnostics) {
