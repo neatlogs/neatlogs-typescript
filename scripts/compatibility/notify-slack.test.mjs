@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { shouldNotifySlack, slackMessage } from './notify-slack.mjs';
+import { shouldNotifySlack, slackMessage, slackPayload } from './notify-slack.mjs';
 
 const runUrl = 'https://github.com/neatlogs/neatlogs-typescript/actions/runs/37084327273';
 const issueUrl = 'https://github.com/neatlogs/neatlogs-typescript/issues/46';
@@ -28,20 +28,33 @@ test('October 3 all-pass run reports Gemini failure as automation, not SDK regre
     proposal: { decision: 'review_only' }, issueUrl, url: runUrl,
   };
   assert.equal(shouldNotifySlack(context), true);
-  const lines = slackMessage(context).split('\n');
-  assert.equal(lines.length, 4);
+  const payload = slackPayload(context);
+  const lines = payload.text.split('\n');
   assert.match(lines[0], /TypeScript SDK: Gemini analysis failed; review the workflow run/);
-  assert.match(lines[1], /Checked: 15\/15 passed \(bounded smoke probes\) \| Regression: none found in tested scope \| Fix PR: none/);
-  assert.match(lines[2], /MAX_TOKENS.*malformed JSON.*No validated SDK fix was proposed/);
-  assert.match(lines[3], /Action: .*Discovery issue.*Workflow run/);
-  assert.match(lines[3], /actions\/runs\/37084327273/);
+  assert.equal(lines[1], '');
+  assert.match(lines[2], /\*Checked:\* 15\/15 passed \(bounded smoke probes\)/);
+  assert.match(lines[3], /\*Regression:\* none found in tested scope/);
+  assert.match(lines[4], /\*Fix PR:\* none/);
+  assert.match(lines[6], /MAX_TOKENS.*malformed JSON.*No validated SDK fix was proposed/);
+  assert.match(lines[8], /\*Action:\*/);
+  assert.match(lines[10], /Discovery issue.*Workflow run/);
+  assert.match(lines[10], /actions\/runs\/37084327273/);
+  assert.deepEqual(payload.blocks.map((block) => block.type), [
+    'section', 'divider', 'section', 'section', 'section', 'section', 'section', 'context',
+  ]);
+  assert.match(payload.blocks[2].text.text, /\*Checked:\*/);
+  assert.match(payload.blocks[3].text.text, /\*Regression:\*/);
+  assert.match(payload.blocks[4].text.text, /\*Fix PR:\*/);
+  assert.match(payload.blocks[5].text.text, /\*Why:\*/);
+  assert.match(payload.blocks[6].text.text, /\*Action:\*/);
+  assert.match(payload.blocks[7].elements[0].text, /Discovery issue.*Workflow run/);
   assert.doesNotMatch(slackMessage(context), /package-0|high potential risk|candidate SDK regression found/);
 });
 
 test('workflow failure links to the actual actions run without claiming a regression', () => {
   const message = slackMessage({ status: 'failure', report: null, analysis: null, url: runUrl });
   assert.match(message, /Compatibility workflow failed; inspect the run/);
-  assert.match(message, /Checked: no completed report \| Regression: unknown \| Fix PR: none/);
+  assert.match(message, /\*Checked:\* no completed report\n\*Regression:\* unknown\n\*Fix PR:\* none/);
   assert.match(message, /actions\/runs\/37084327273/);
   assert.doesNotMatch(message, /neatlogs-typescript\/37084327273>/);
 });
@@ -55,7 +68,7 @@ test('blocked checks say compatibility is unknown for those versions', () => {
   assert.equal(shouldNotifySlack(context), true);
   const message = slackMessage(context);
   assert.match(message, /Compatibility checks incomplete; investigate the blocked probes/);
-  assert.match(message, /Checked: 2\/3 passed \(bounded smoke probes\), 1 blocked/);
+  assert.match(message, /\*Checked:\* 2\/3 passed \(bounded smoke probes\), 1 blocked/);
   assert.match(message, /Blocked or untested probes leave those package versions unverified/);
   assert.doesNotMatch(message, /high potential risk/);
 });
@@ -69,7 +82,7 @@ test('candidate regression and rejected fix show the failed gate and no PR', () 
   assert.equal(shouldNotifySlack(context), true);
   const message = slackMessage(context);
   assert.match(message, /^:red_circle: \*TypeScript SDK: Candidate SDK regression found/);
-  assert.match(message, /Regression: 1 candidate \(baseline passed; latest failed\) \| Fix PR: none/);
+  assert.match(message, /\*Regression:\* 1 candidate \(baseline passed; latest failed\)\n\*Fix PR:\* none/);
   assert.match(message, /proposed SDK patch failed validation: No before\/after regression proof, so no PR was opened/);
   assert.match(message, /No before\/after regression proof/);
 });
@@ -86,7 +99,7 @@ test('validated patch shows review PR and bounded post-patch result', () => {
   assert.equal(shouldNotifySlack(context), true);
   const message = slackMessage(context);
   assert.match(message, /Validated SDK fix PR ready; review the code/);
-  assert.match(message, /Fix PR: <https:\/\/github.com\/neatlogs\/neatlogs-typescript\/pull\/50\|ready for code review>/);
+  assert.match(message, /\*Fix PR:\* <https:\/\/github.com\/neatlogs\/neatlogs-typescript\/pull\/50\|ready for code review>/);
   assert.match(message, /focused test failed on the unchanged SDK and passed after the patch/);
   assert.match(message, /Review and approve the PR manually/);
   assert.doesNotMatch(message, /draft PR/);
@@ -105,4 +118,22 @@ test('proposal and publication failures explain why no new PR appeared', () => {
   } };
   assert.equal(shouldNotifySlack(existingContext), true);
   assert.match(slackMessage(existingContext), /existing PR> lacks verified bot provenance and was left unchanged as a draft/);
+});
+
+test('post-merge proposal failure has separate Slack blocks for outcome and next step', () => {
+  const context = {
+    status: 'success', changesFound: 'true', report: { changes }, verification: allPass,
+    proposalOutcome: 'failure', proposal: { decision: 'review_only' }, issueUrl, url: runUrl,
+  };
+  const payload = slackPayload(context);
+  assert.equal(shouldNotifySlack(context), true);
+  assert.match(payload.blocks[0].text.text, /Compatibility automation failed/);
+  assert.equal(payload.blocks[2].text.text, '*Checked:* 15/15 passed (bounded smoke probes)');
+  assert.equal(payload.blocks[3].text.text, '*Regression:* none found in tested scope');
+  assert.equal(payload.blocks[4].text.text, '*Fix PR:* none');
+  assert.match(payload.blocks[5].text.text, /Gemini fix proposal failed/);
+  assert.match(payload.blocks[6].text.text, /Inspect the failed step/);
+  assert.match(payload.blocks[7].elements[0].text, /Discovery issue.*Workflow run/);
+  assert.match(payload.text, /\*TypeScript SDK:.*\*\n\n\*Checked:/);
+  assert.doesNotMatch(payload.text, /\*\*Checked:/);
 });

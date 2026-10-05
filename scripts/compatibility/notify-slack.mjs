@@ -44,7 +44,7 @@ function brief(value, limit = 180) {
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
-export function slackMessage(context) {
+export function slackPayload(context) {
   const { status, report, analysis, verification = null, verificationOutcome = null, advisoryOutcome = null, proposal = null, proposalReady = null, validation = null, publication = null, prUrl = null, proposalOutcome = null, priorPrsOutcome = null, validationOutcome = null, publicationOutcome = null, validationJobStatus = null, publicationJobStatus = null, url, issueUrl = null, upstreamIssue = null } = context;
   const signals = notificationSignals(context);
   const counts = verification?.counts;
@@ -125,7 +125,28 @@ export function slackMessage(context) {
     url ? `<${url}|Workflow run>` : null,
   ].filter(Boolean).join(' · ');
   const marker = signals.candidateRegression || signals.automationFailed ? ':red_circle:' : ':warning:';
-  return `${marker} *TypeScript SDK: ${heading}*\nChecked: ${checked} | Regression: ${regression} | Fix PR: ${pr}\nWhy: ${why}\nAction: ${action}${links ? ` ${links}` : ''}`;
+  const title = `${marker} *TypeScript SDK: ${heading}*`;
+  const sections = [
+    `*Checked:* ${checked}`,
+    `*Regression:* ${regression}`,
+    `*Fix PR:* ${pr}`,
+    `*Why:* ${why}`,
+    `*Action:* ${action}`,
+  ];
+  return {
+    // Slack uses blocks for clear separation; text remains useful as a fallback and in notifications.
+    text: [title, '', ...sections.slice(0, 3), '', sections[3], '', sections[4], ...(links ? ['', links] : [])].join('\n'),
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: title } },
+      { type: 'divider' },
+      ...sections.map((text) => ({ type: 'section', text: { type: 'mrkdwn', text } })),
+      ...(links ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: links }] }] : []),
+    ],
+  };
+}
+
+export function slackMessage(context) {
+  return slackPayload(context).text;
 }
 
 async function main() {
@@ -164,7 +185,7 @@ async function main() {
   const response = await fetch(webhook, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text: slackMessage(context) }),
+    body: JSON.stringify(slackPayload(context)),
   });
   if (!response.ok) throw new Error(`Slack webhook returned ${response.status}`);
   console.log('Slack compatibility alert sent');
