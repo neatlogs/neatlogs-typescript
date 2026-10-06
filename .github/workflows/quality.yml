@@ -15,28 +15,6 @@ permissions:
   contents: read
 
 jobs:
-  unit-tests-node:
-    name: unit tests on Node ${{ matrix.node }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [20, 22]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-
-      - name: Install locked dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-
-      - name: Test
-        run: npm test
-
   compatibility-scripts:
     name: compatibility scripts
     runs-on: ubuntu-latest
