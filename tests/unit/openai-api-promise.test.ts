@@ -1,0 +1,38 @@
+import {beforeAll, beforeEach, afterAll, describe, it, expect} from 'vitest';
+import OpenAI from 'openai';
+import {NodeTracerProvider} from '@opentelemetry/sdk-trace-node';
+import {SimpleSpanProcessor, InMemorySpanExporter} from '@opentelemetry/sdk-trace-base';
+import {wrapOpenAI} from '../../src/openai.js';
+import {_setNeatlogsProvider} from '../../src/core/provider.js';
+const exporter = new InMemorySpanExporter();
+const provider = new NodeTracerProvider();
+const previous = process.env.NEATLOGS_AUTO_ROOT;
+beforeAll(()=>{process.env.NEATLOGS_AUTO_ROOT='false';provider.addSpanProcessor(new SimpleSpanProcessor(exporter));_setNeatlogsProvider(provider);});
+beforeEach(async()=>{await new Promise(resolve=>setTimeout(resolve,10));exporter.reset();});
+afterAll(async()=>{_setNeatlogsProvider(null);await provider.shutdown();if(previous===undefined)delete process.env.NEATLOGS_AUTO_ROOT;else process.env.NEATLOGS_AUTO_ROOT=previous;});
+const opts={model:'gpt-test',messages:[{role:'user' as const,content:'hi'}]};
+const message={id:'chatcmpl_local',object:'chat.completion',created:1,model:'gpt-test',choices:[{index:0,message:{role:'assistant',content:'hello'},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}};
+function create(status=200){let calls=0;const response=new Response(JSON.stringify(status===200?message:{error:{type:'authentication_error',message:'local failure'}}),{status,headers:{'content-type':'application/json','x-request-id':'req-local'}});const client=new OpenAI({apiKey:'fake-local-only',maxRetries:0,fetch:async()=>{calls++;return response;}});return {client:wrapOpenAI(client),response,calls:()=>calls};}
+const responseMessage={id:'resp_local',object:'response',created_at:1,model:'gpt-test',status:'completed',output:[{id:'msg_local',type:'message',role:'assistant',status:'completed',content:[{type:'output_text',text:'hello',annotations:[]}]}],usage:{input_tokens:1,output_tokens:1,total_tokens:2}};
+function createResponses(status=200){let calls=0;const response=new Response(JSON.stringify(status===200?responseMessage:{error:{type:'authentication_error',message:'local failure'}}),{status,headers:{'content-type':'application/json','x-request-id':'req-local'}});const client=new OpenAI({apiKey:'fake-local-only',maxRetries:0,fetch:async()=>{calls++;return response;}});return {client:wrapOpenAI(client),response,calls:()=>calls};}
+describe('OpenAI APIPromise helpers',()=>{
+ it('keeps withResponse data, response identity and request id',async()=>{const c=create();const result=await c.client.chat.completions.create(opts).withResponse();expect(result.data.choices).toEqual(message.choices);expect(result.response).toBe(c.response);expect(result.request_id).toBe('req-local');expect(c.calls()).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('keeps asResponse and leaves the response readable',async()=>{const c=create();const pending=c.client.chat.completions.create(opts);const response=await pending.asResponse();expect(response).toBe(c.response);expect(await response.json()).toEqual(message);expect(c.calls()).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('shares one request and one span across helpers and await',async()=>{const c=create();const pending=c.client.chat.completions.create(opts);const [a,b,response]=await Promise.all([pending,pending.withResponse(),pending.asResponse()]);expect(a).toBe(b.data);expect(response).toBe(b.response);expect(c.calls()).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('keeps ordinary await',async()=>{const c=create();expect((await c.client.chat.completions.create(opts)).choices).toEqual(message.choices);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('withResponse rejects on API errors and ends the error span',async()=>{const c=create(401);await expect(c.client.chat.completions.create(opts).withResponse()).rejects.toThrow('local failure');expect(exporter.getFinishedSpans()).toHaveLength(1);expect(exporter.getFinishedSpans()[0].status.code).toBe(2);});
+ it('keeps catch and finally',async()=>{const c=create(401);let done=0;const result=await c.client.chat.completions.create(opts).catch(()=> 'caught').finally(()=>done++);expect(result).toBe('caught');expect(done).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('asResponse preserves API error rejection',async()=>{const c=create(401);await expect(c.client.chat.completions.create(opts).asResponse()).rejects.toThrow('local failure');expect(exporter.getFinishedSpans()).toHaveLength(1);expect(exporter.getFinishedSpans()[0].status.code).toBe(2);});
+
+});
+
+describe('OpenAI Responses APIPromise helpers',()=>{
+ it('keeps withResponse data, response identity and request id',async()=>{const c=createResponses();const result=await c.client.responses.create({model:'gpt-test',input:'hi'}).withResponse();expect(result.data.output).toEqual(responseMessage.output);expect(result.response).toBe(c.response);expect(result.request_id).toBe('req-local');expect(c.calls()).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('keeps asResponse and leaves the response readable',async()=>{const c=createResponses();const pending=c.client.responses.create({model:'gpt-test',input:'hi'});const response=await pending.asResponse();expect(response).toBe(c.response);expect(await response.json()).toEqual(responseMessage);expect(c.calls()).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('shares one request and one span across helpers and await',async()=>{const c=createResponses();const pending=c.client.responses.create({model:'gpt-test',input:'hi'});const [a,b,response]=await Promise.all([pending,pending.withResponse(),pending.asResponse()]);expect(a).toBe(b.data);expect(response).toBe(b.response);expect(c.calls()).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('keeps ordinary await',async()=>{const c=createResponses();expect((await c.client.responses.create({model:'gpt-test',input:'hi'})).output).toEqual(responseMessage.output);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('withResponse rejects on API errors and ends the error span',async()=>{const c=createResponses(401);await expect(c.client.responses.create({model:'gpt-test',input:'hi'}).withResponse()).rejects.toThrow('local failure');expect(exporter.getFinishedSpans()).toHaveLength(1);expect(exporter.getFinishedSpans()[0].status.code).toBe(2);});
+ it('keeps catch and finally',async()=>{const c=createResponses(401);let done=0;const result=await c.client.responses.create({model:'gpt-test',input:'hi'}).catch(()=> 'caught').finally(()=>done++);expect(result).toBe('caught');expect(done).toBe(1);expect(exporter.getFinishedSpans()).toHaveLength(1);});
+ it('asResponse preserves API error rejection',async()=>{const c=createResponses(401);await expect(c.client.responses.create({model:'gpt-test',input:'hi'}).asResponse()).rejects.toThrow('local failure');expect(exporter.getFinishedSpans()).toHaveLength(1);expect(exporter.getFinishedSpans()[0].status.code).toBe(2);});
+
+});
