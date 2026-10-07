@@ -29,7 +29,7 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-/** Pure checks over a persisted trace. Used by a coding agent to verify instrumentation. */
+// Checks over a trace as the backend returns it.
 export function checkTrace(trace: Record<string, unknown>): TraceCheck[] {
   const spans: Span[] = Array.isArray(trace.spans)
     ? trace.spans.filter((s): s is Span => !!s && typeof s === 'object')
@@ -64,7 +64,8 @@ export function checkTrace(trace: Record<string, unknown>): TraceCheck[] {
   return checks;
 }
 
-/** neatlogs trace get <trace_id>. Exit codes: 0 ok, 1 checks failed, 2 not ready/not found, 3 auth, 4 usage, 5 error. */
+// neatlogs trace get <trace_id>
+// exit: 0 ok, 1 check failed, 2 not ready or not found, 3 key, 4 usage, 5 error
 export async function runTraceCli(
   argv: readonly string[],
   overrides: Partial<TraceCliIO> = {},
@@ -155,6 +156,3 @@ export async function runTraceCli(
   }
   return failed.length === 0 ? 0 : 1;
 }
-
-/** Exit codes returned by runTraceCli, for callers and docs. */
-export const TRACE_EXIT_CODES = { ok: 0, checksFailed: 1, notReady: 2, auth: 3, usage: 4, error: 5 } as const;
