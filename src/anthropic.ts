@@ -147,11 +147,10 @@ function tracedMessagesCreate(original: (...args: any[]) => any) {
 
     const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
-    return promise.then(
+    let traced: Promise<any> | undefined;
+    const consume = () => traced ??= promise.then(
       (response: any) => {
-        if (isStream) {
-          return wrapStreamIterable(response, span);
-        }
+        if (isStream) return wrapStreamIterable(response, span);
         finalizeMessageResponse(span, response);
         return response;
       },
@@ -160,6 +159,39 @@ function tracedMessagesCreate(original: (...args: any[]) => any) {
         throw err;
       },
     );
+
+    // Keep SDK response helpers without eagerly consuming the response body.
+    // Bind other SDK methods to their original receiver (APIPromise has private fields).
+    return new Proxy(promise, {
+      get(target, prop) {
+        if (prop === 'then' || prop === 'catch' || prop === 'finally') {
+          return (...args: any[]) => (consume() as any)[prop](...args);
+        }
+        if (prop === 'withResponse' && typeof target.withResponse === 'function') {
+          return async () => {
+            const [data, response] = await Promise.all([consume(), target.asResponse()]);
+            return { data, response, request_id: response.headers.get('request-id') };
+          };
+        }
+        if (prop === 'asResponse' && typeof target.asResponse === 'function') {
+          return async () => {
+            try {
+              const response = await target.asResponse();
+              if (!traced && span.isRecording()) {
+                span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+                span.end();
+              }
+              return response;
+            } catch (err) {
+              recordError(span, err);
+              throw err;
+            }
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
   };
 }
 
