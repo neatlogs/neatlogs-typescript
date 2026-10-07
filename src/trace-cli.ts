@@ -154,4 +154,4 @@ export async function runTraceCli(
     for (const c of checks) io.stdout(`  ${c.status === 'pass' ? 'ok  ' : 'FAIL'} ${c.name}: ${c.message}`);
   }
   return failed.length === 0 ? 0 : 1;
-    }
+}
