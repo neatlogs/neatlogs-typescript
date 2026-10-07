@@ -155,3 +155,6 @@ export async function runTraceCli(
   }
   return failed.length === 0 ? 0 : 1;
 }
+
+/** Exit codes returned by runTraceCli, for callers and docs. */
+export const TRACE_EXIT_CODES = { ok: 0, checksFailed: 1, notReady: 2, auth: 3, usage: 4, error: 5 } as const;
