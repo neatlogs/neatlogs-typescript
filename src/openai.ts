@@ -242,6 +242,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
         finalizeChatResponse(span, response);
         return response;
       },
+      isStream,
     );
   };
 }
@@ -252,7 +253,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
 
 
 // Preserve the SDK's response helpers while sharing one traced parsed result.
-function preserveResponseHelpers(result: any, span: Span, finalize: (value: any) => any): any {
+function preserveResponseHelpers(result: any, span: Span, finalize: (value: any) => any, isStream = false): any {
   const target = result && typeof result.then === "function" ? result : Promise.resolve(result);
   let traced: Promise<any> | undefined;
   const consume = () => traced ??= Promise.resolve(target).then(finalize, (err: any) => {
@@ -275,8 +276,23 @@ function preserveResponseHelpers(result: any, span: Span, finalize: (value: any)
           try {
             const response = await promise.asResponse();
             if (!traced && span.isRecording()) {
-              span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
-              span.end();
+              if (response.ok && !isStream) {
+                // Parse a copy so a later await still gets traced output.
+                response.clone().json().then(
+                  (body: any) => {
+                    if (!traced && span.isRecording()) finalize(body);
+                  },
+                  () => {
+                    if (!traced && span.isRecording()) {
+                      span.setStatus({ code: SpanStatusCode.OK });
+                      span.end();
+                    }
+                  },
+                );
+              } else {
+                span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+                span.end();
+              }
             }
             return response;
           } catch (err) {
@@ -337,6 +353,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         finalizeResponsesResponse(span, response);
         return response;
       },
+      isStream,
     );
   };
 }
