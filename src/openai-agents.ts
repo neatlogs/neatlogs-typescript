@@ -11,6 +11,7 @@
 
 import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
+import { captureMedia } from './core/media.js';
 
 const TRACER_NAME = 'neatlogs.openai_agents';
 
@@ -29,6 +30,7 @@ export function openaiAgentsProcessor(): any {
 class NeatlogsTraceProcessor {
   private _spans: Map<string, Span> = new Map();
   private _startTimes: Map<string, number> = new Map();
+  private _rootInputDone: Set<string> = new Set();
 
   // The @openai/agents SDK passes a Trace object: { traceId, name, groupId, metadata }.
   onTraceStart(traceData: any): void {
@@ -61,6 +63,7 @@ class NeatlogsTraceProcessor {
     span.end();
     this._spans.delete(key);
     this._startTimes.delete(key);
+    this._rootInputDone.delete(key);
   }
 
   // The SDK passes a Span object: { type, spanId, traceId, parentId?, spanData: {...} }.
@@ -163,11 +166,7 @@ class NeatlogsTraceProcessor {
       // Output text: Responses API output[] has message items with content[].text
       const outputItems = data?.output ?? resp?.output;
       if (Array.isArray(outputItems)) {
-        const text = outputItems
-          .filter((o: any) => o?.type === 'message' || o?.role === 'assistant')
-          .flatMap((o: any) => (Array.isArray(o.content) ? o.content : [o.content]))
-          .map((c: any) => (typeof c === 'string' ? c : c?.text ?? ''))
-          .join('');
+        const text = safeOutputText(otelSpan, outputItems);
         if (text) {
           otelSpan.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
           otelSpan.setAttribute('neatlogs.llm.output_messages.0.content', text);
@@ -184,6 +183,25 @@ class NeatlogsTraceProcessor {
         otelSpan.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
         const c = outputItems.content;
         otelSpan.setAttribute('neatlogs.llm.output_messages.0.content', (typeof c === 'string' ? c : safeStringify(c)));
+      }
+
+      // The SDK fills response input at span end (`_input` in current releases).
+      // Capture it on the LLM span and mirror the first user turn plus latest
+      // assistant output onto the WORKFLOW root, which drives trace-list I/O.
+      const inputItems = data?._input ?? data?.input;
+      const inputTurns = captureInputMessages(otelSpan, inputItems);
+      const traceKey = String(span?.traceId ?? span?.trace_id ?? '');
+      const root = this._spans.get(traceKey);
+      if (root) {
+        if (!this._rootInputDone.has(traceKey)) {
+          const userTurn = latestUserTurn(inputTurns);
+          if (userTurn) {
+            root.setAttribute('input.value', userTurn.slice(0, 10000));
+            this._rootInputDone.add(traceKey);
+          }
+        }
+        const outputText = Array.isArray(outputItems) ? safeOutputText(otelSpan, outputItems) : assistantOutputText(outputItems);
+        if (outputText) root.setAttribute('output.value', outputText.slice(0, 10000));
       }
 
       const usage = data?.usage ?? resp?.usage;
@@ -240,6 +258,7 @@ class NeatlogsTraceProcessor {
     }
     this._spans.clear();
     this._startTimes.clear();
+    this._rootInputDone.clear();
   }
 
   forceFlush(): void {}
@@ -248,6 +267,63 @@ class NeatlogsTraceProcessor {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+function captureInputMessages(span: Span, input: any): Array<{ role: string; text: string }> {
+  const messages = Array.isArray(input) ? input : (typeof input === 'string' ? [{ role: 'user', content: input }] : []);
+  const turns: Array<{ role: string; text: string }> = [];
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const role = typeof message === 'object' && message ? String(message.role ?? '') : '';
+    const content = typeof message === 'object' && message ? message.content : message;
+    // Route media through typed capture first, then read text parts only, so
+    // inline bytes never reach text attributes.
+    const safeContent = captureMedia(span, `neatlogs.llm.input_messages.${i}`, content, 'input');
+    const text = contentText(safeContent);
+    turns.push({ role, text });
+    if (role) span.setAttribute(`neatlogs.llm.input_messages.${i}.role`, role);
+    if (text) span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, text.slice(0, 10000));
+  }
+  return turns;
+}
+
+// Last user turn, taken from the already sanitized text.
+function latestUserTurn(turns: Array<{ role: string; text: string }>): string {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'user') return turns[i].text;
+  }
+  return '';
+}
+
+// Assistant text from a Responses output[] list, with media routed through capture first.
+function safeOutputText(span: Span, output: any[]): string {
+  const parts = output
+    .filter((item: any) => item?.type === 'message' || item?.role === 'assistant')
+    .flatMap((item: any) => (Array.isArray(item.content) ? item.content : [item.content]));
+  const safe = captureMedia(span, 'neatlogs.llm.output_messages.0', parts, 'output');
+  return (Array.isArray(safe) ? safe : [])
+    .map((c: any) => (typeof c === 'string' ? c : c?.text ?? ''))
+    .join('');
+}
+
+function assistantOutputText(output: any): string {
+  if (!Array.isArray(output)) return output?.content ? contentText(output.content) : '';
+  return output
+    .filter((item: any) => item?.type === 'message' || item?.role === 'assistant')
+    .flatMap((item: any) => Array.isArray(item.content) ? item.content : [item.content])
+    .map((content: any) => typeof content === 'string' ? content : content?.text ?? '')
+    .join('');
+}
+
+// Text only: media parts are captured by captureMedia, never stringified here.
+function contentText(content: any): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part: any) => (typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : ''))
+      .join('');
+  }
+  return typeof content?.text === 'string' ? content.text : '';
+}
 
 function safeStringify(value: unknown): string {
   try {
