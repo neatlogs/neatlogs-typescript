@@ -55,8 +55,8 @@ export function checkTrace(trace: Record<string, unknown>): TraceCheck[] {
     unnamed.length === 0 ? 'every span has a name' : `${unnamed.length} span(s) have no name`);
   const llm = spans.filter((s) => /llm/i.test(String(s.node_type ?? s.span_type ?? '')));
   if (llm.length > 0 && typeof trace.totalTokensUsed === 'number') {
-    add('llm_token_usage', trace.totalTokensUsed > 0,
-      `LLM span(s): ${llm.length}, totalTokensUsed=${trace.totalTokensUsed}`);
+    add('llm_token_usage', trace.totalTokensUsed >= 0,
+      `LLM span(s): ${llm.length}, totalTokensUsed=${trace.totalTokensUsed} (0 can mean the provider sent no usage)`);
   }
   if (trace.finalizationStatus !== undefined) {
     add('finalized', trace.finalizationStatus === 'finalized', `finalizationStatus=${String(trace.finalizationStatus)}`);
@@ -65,7 +65,7 @@ export function checkTrace(trace: Record<string, unknown>): TraceCheck[] {
 }
 
 // neatlogs trace get <trace_id>
-// exit: 0 ok, 1 check failed, 2 not ready or not found, 3 key, 4 usage, 5 error
+// exit: 0 ok, 1 check failed, 2 not ready or not found, 3 key, 4 usage, 5 error (incl. 409 failed ingestion)
 export async function runTraceCli(
   argv: readonly string[],
   overrides: Partial<TraceCliIO> = {},
@@ -113,7 +113,11 @@ export async function runTraceCli(
     io.stderr('Trace read rejected the API key');
     return 3;
   }
-  if ([202, 404, 409].includes(response.status)) {
+  if (response.status === 409) {
+    io.stderr('Trace ingestion failed for good (HTTP 409, failed or dead-lettered); retrying will not help');
+    return 5;
+  }
+  if ([202, 404].includes(response.status)) {
     io.stderr(`Trace not ready or not found (HTTP ${response.status}); retry after the app flushes`);
     return 2;
   }
