@@ -1,65 +1,97 @@
 import { describe, expect, it } from 'vitest';
 import { runTraceCli } from '../../src/trace-cli.js';
 
-function io(response: () => Response | Promise<Response>, env: NodeJS.ProcessEnv = { NEATLOGS_API_KEY: 'k' }) {
+type Call = { url: string; headers: Record<string, string> };
+const env = { NEATLOGS_TOKEN: 'tok-secret', NEATLOGS_PROJECT_ID: '11111111-1111-4111-8111-111111111111' };
+
+function io(route: (url: URL) => Response, e: NodeJS.ProcessEnv = env) {
   const out: string[] = [];
   const err: string[] = [];
-  const urls: string[] = [];
+  const calls: Call[] = [];
   return {
-    out, err, urls,
+    out, err, calls,
     overrides: {
       stdout: (l: string) => out.push(l),
       stderr: (l: string) => err.push(l),
-      env,
-      fetch: (async (input: URL | string) => { urls.push(String(input)); return response(); }) as typeof fetch,
+      env: e,
+      fetch: (async (input: URL | string, init?: RequestInit) => {
+        calls.push({ url: String(input), headers: init?.headers as Record<string, string> });
+        return route(new URL(String(input)));
+      }) as typeof fetch,
     },
   };
 }
-const good = {
-  _id: 't1', status: 'success', finalizationStatus: 'finalized', spanCount: 2, totalTokensUsed: 5,
-  spans: [
-    { span_id: 'a', span_name: 'root', node_type: 'workflow' },
-    { span_id: 'b', parent_span_id: 'a', span_name: 'chat', node_type: 'llm' },
-  ],
+const ok = (data: unknown) => new Response(JSON.stringify({ success: true, data, requestId: 'r1' }), { status: 200 });
+const status = (s: number) => new Response('{}', { status: s });
+const traceData = {
+  traceId: 't1', status: 'success', finalizationStatus: 'finalized', spansCount: 2, totalTokens: 5,
 };
-const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
+const spanA = { spanId: 'a', parentSpanId: null, spanName: 'root', spanType: 'workflow' };
+const spanB = { spanId: 'b', parentSpanId: 'a', spanName: 'chat', spanType: 'llm' };
+const healthy = (url: URL) =>
+  url.pathname.endsWith('/spans')
+    ? ok({ spans: [spanA, spanB], page: { hasMore: false, limit: 50, nextCursor: null } })
+    : ok(traceData);
+const args = ['trace', 'get', 't1', '--json'];
 
 describe('neatlogs trace get', () => {
-  it('passes a healthy trace and reads the existing read path', async () => {
-    const t = io(() => json(good));
-    expect(await runTraceCli(['trace', 'get', 't1', '--json'], t.overrides)).toBe(0);
-    expect(t.urls[0]).toBe('https://ingest.neatlogs.com/api/traces/v3/t1');
+  it('passes a healthy trace using the public api with bearer auth and project id', async () => {
+    const t = io(healthy);
+    expect(await runTraceCli(args, t.overrides)).toBe(0);
+    expect(t.calls[0]!.url).toBe('https://app.neatlogs.com/api/v1/public/traces/t1');
+    expect(t.calls[1]!.url).toBe('https://app.neatlogs.com/api/v1/public/traces/t1/spans?limit=50');
+    expect(t.calls[0]!.headers).toEqual({ authorization: 'Bearer tok-secret', 'x-project-id': env.NEATLOGS_PROJECT_ID });
     expect(JSON.parse(t.out[0]!).result).toBe('pass');
   });
-  it('fails a trace with a missing parent and unnamed span', async () => {
-    const bad = { ...good, spans: [{ span_id: 'a', parent_span_id: 'zzz' }, good.spans[1]] };
-    const t = io(() => json(bad));
-    expect(await runTraceCli(['trace', 'get', 't1', '--json'], t.overrides)).toBe(1);
+  it('follows span pages until nextCursor is empty', async () => {
+    const t = io((url) => {
+      if (!url.pathname.endsWith('/spans')) return ok(traceData);
+      return url.searchParams.get('cursor') === 'c2'
+        ? ok({ spans: [spanB], page: { hasMore: false, limit: 50, nextCursor: null } })
+        : ok({ spans: [spanA], page: { hasMore: true, limit: 50, nextCursor: 'c2' } });
+    });
+    expect(await runTraceCli(args, t.overrides)).toBe(0);
+    expect(t.calls).toHaveLength(3);
+    expect(t.calls[2]!.url).toContain('cursor=c2');
+    expect(JSON.parse(t.out[0]!).span_count).toBe(2);
+  });
+  it('fails a trace with a missing parent and an unnamed span', async () => {
+    const t = io((url) => url.pathname.endsWith('/spans')
+      ? ok({ spans: [{ ...spanA, parentSpanId: 'zzz', spanName: '' }, spanB], page: { hasMore: false, limit: 50, nextCursor: null } })
+      : ok(traceData));
+    expect(await runTraceCli(args, t.overrides)).toBe(1);
     const names = JSON.parse(t.out[0]!).checks.filter((c: { status: string }) => c.status === 'fail').map((c: { name: string }) => c.name);
     expect(names).toEqual(expect.arrayContaining(['parents_resolve', 'spans_named']));
   });
-  it('maps statuses to exit codes without leaking the key', async () => {
-    expect(await runTraceCli(['trace', 'get', 't1'], io(() => json({}, 404)).overrides)).toBe(2);
-    const a = io(() => json({}, 401));
+  it('fails a dead-lettered trace and passes zero reported tokens', async () => {
+    const dlq = io((url) => (url.pathname.endsWith('/spans') ? healthy(url) : ok({ ...traceData, finalizationStatus: 'dlq', totalTokens: 0 })));
+    expect(await runTraceCli(args, dlq.overrides)).toBe(1);
+    const checks = JSON.parse(dlq.out[0]!).checks as { name: string; status: string }[];
+    expect(checks.find((c) => c.name === 'finalized')!.status).toBe('fail');
+    expect(checks.find((c) => c.name === 'llm_token_usage')!.status).toBe('pass');
+  });
+  it('maps statuses to exit codes without leaking the token', async () => {
+    expect(await runTraceCli(['trace', 'get', 't1'], io(() => status(404)).overrides)).toBe(2);
+    const a = io(() => status(401));
     expect(await runTraceCli(['trace', 'get', 't1'], a.overrides)).toBe(3);
-    expect(a.err.join()).not.toContain('k"');
-    expect(await runTraceCli(['trace', 'get', 't1'], io(() => json({}), {}).overrides)).toBe(3);
-    expect(await runTraceCli(['trace', 'get'], io(() => json({})).overrides)).toBe(4);
-    expect(await runTraceCli(['trace', 'get', 't1'], io(() => json({}, 500)).overrides)).toBe(5);
+    expect(a.err.join()).not.toContain('tok-secret');
+    expect(await runTraceCli(['trace', 'get', 't1'], io(() => status(403)).overrides)).toBe(3);
+    expect(await runTraceCli(['trace', 'get', 't1'], io(() => status(500)).overrides)).toBe(5);
+    expect(await runTraceCli(['trace', 'get', 't1'], io(() => status(429)).overrides)).toBe(5);
+    expect(await runTraceCli(['trace', 'get', 't1'], io(() => status(409)).overrides)).toBe(5);
   });
-  it('treats a 409 as a permanent failure, not a retry', async () => {
-    const t = io(() => json({}, 409));
-    expect(await runTraceCli(['trace', 'get', 't1'], t.overrides)).toBe(5);
-    expect(t.err.join()).toContain('retrying will not help');
+  it('treats a 409 on the spans page as not ready', async () => {
+    const t = io((url) => (url.pathname.endsWith('/spans') ? status(409) : ok(traceData)));
+    expect(await runTraceCli(['trace', 'get', 't1'], t.overrides)).toBe(2);
   });
-  it('lets a trace with zero reported tokens pass', async () => {
-    const zero = { ...good, totalTokensUsed: 0 };
-    const t = io(() => json(zero));
-    expect(await runTraceCli(['trace', 'get', 't1', '--json'], t.overrides)).toBe(0);
+  it('needs a token and a project id', async () => {
+    expect(await runTraceCli(['trace', 'get', 't1'], io(healthy, { NEATLOGS_PROJECT_ID: 'p' }).overrides)).toBe(3);
+    expect(await runTraceCli(['trace', 'get', 't1'], io(healthy, { NEATLOGS_TOKEN: 't' }).overrides)).toBe(3);
+    expect(await runTraceCli(['trace', 'get'], io(healthy).overrides)).toBe(4);
   });
-  it('honours NEATLOGS_ENDPOINT and encodes the id', async () => {
-    const t = io(() => json(good), { NEATLOGS_API_KEY: 'k', NEATLOGS_ENDPOINT: 'http://localhost:9' });
+  it('honours NEATLOGS_HOST and encodes the id', async () => {
+    const t = io(healthy, { ...env, NEATLOGS_HOST: 'https://eu.app.neatlogs.com' });
     await runTraceCli(['trace', 'get', 'a/b'], t.overrides);
-    expect(t.urls[0]).toBe('http://localhost:9/api/traces/v3/a%2Fb');
+    expect(t.calls[0]!.url).toBe('https://eu.app.neatlogs.com/api/v1/public/traces/a%2Fb');
   });
 });
