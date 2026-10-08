@@ -496,6 +496,21 @@ function candidateBucket(accumulated: StreamAccumulator, index: number): Candida
   return bucket;
 }
 
+// Streamed text goes through media capture first so inline data URLs never reach attributes.
+function safeStreamText(span: Span, accumulated: StreamAccumulator, candidateIndex: number, text: unknown): string {
+  const captured = captureMediaWithIndex(
+    span,
+    `neatlogs.llm.output_messages.${candidateIndex}`,
+    String(text),
+    'output',
+    accumulated.mediaCount,
+  );
+  accumulated.mediaCount += captured.count;
+  if (typeof captured.value === 'string') return captured.value;
+  markStreamIncomplete(accumulated, 'media_capture_incomplete');
+  return '';
+}
+
 function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any): void {
   const chunkCandidates = chunk?.candidates ?? [];
   for (let position = 0; position < chunkCandidates.length; position++) {
@@ -504,11 +519,13 @@ function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any):
     const bucket = candidateBucket(accumulated, candidateIndex);
     for (const part of candidate?.content?.parts ?? []) {
       if (part?.text && !part?.thought) {
-        retainStreamString(accumulated, String(part.text), (value) => {
+        const text = safeStreamText(span, accumulated, candidateIndex, part.text);
+        retainStreamString(accumulated, text, (value) => {
           bucket.textParts.push(value);
         });
       } else if (part?.thought && part?.text) {
-        retainStreamString(accumulated, String(part.text), (value) => {
+        const text = safeStreamText(span, accumulated, candidateIndex, part.text);
+        retainStreamString(accumulated, text, (value) => {
           bucket.thinkingParts.push(value);
         });
       } else if (part?.functionCall) {
