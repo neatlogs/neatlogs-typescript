@@ -178,8 +178,23 @@ function tracedMessagesCreate(original: (...args: any[]) => any) {
             try {
               const response = await target.asResponse();
               if (!traced && span.isRecording()) {
-                span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
-                span.end();
+                if (response.ok && !isStream) {
+                  // Parse a copy so a later await still gets traced output.
+                  response.clone().json().then(
+                    (body: any) => {
+                      if (!traced && span.isRecording()) finalizeMessageResponse(span, body);
+                    },
+                    () => {
+                      if (!traced && span.isRecording()) {
+                        span.setStatus({ code: SpanStatusCode.OK });
+                        span.end();
+                      }
+                    },
+                  );
+                } else {
+                  span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+                  span.end();
+                }
               }
               return response;
             } catch (err) {
