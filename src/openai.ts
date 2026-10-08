@@ -234,7 +234,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
       throw err;
     }
 
-    return Promise.resolve(result).then(
+    return preserveResponseHelpers(result, span,
       (response: any) => {
         if (isStream) {
           return wrapAsyncIterableStream(response, span);
@@ -242,10 +242,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
         finalizeChatResponse(span, response);
         return response;
       },
-      (err: any) => {
-        recordError(span, err);
-        throw err;
-      },
+      isStream,
     );
   };
 }
@@ -253,6 +250,62 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
 // ---------------------------------------------------------------------------
 // responses.create
 // ---------------------------------------------------------------------------
+
+
+// Preserve the SDK's response helpers while sharing one traced parsed result.
+function preserveResponseHelpers(result: any, span: Span, finalize: (value: any) => any, isStream = false): any {
+  const target = result && typeof result.then === "function" ? result : Promise.resolve(result);
+  let traced: Promise<any> | undefined;
+  const consume = () => traced ??= Promise.resolve(target).then(finalize, (err: any) => {
+    recordError(span, err);
+    throw err;
+  });
+  return new Proxy(target, {
+    get(promise, prop) {
+      if (prop === "then" || prop === "catch" || prop === "finally") {
+        return (...args: any[]) => (consume() as any)[prop](...args);
+      }
+      if (prop === "withResponse" && typeof promise.withResponse === "function") {
+        return async () => {
+          const [data, response] = await Promise.all([consume(), promise.asResponse()]);
+          return { data, response, request_id: response.headers.get("x-request-id") };
+        };
+      }
+      if (prop === "asResponse" && typeof promise.asResponse === "function") {
+        return async () => {
+          try {
+            const response = await promise.asResponse();
+            if (!traced && span.isRecording()) {
+              if (response.ok && !isStream) {
+                // Parse a copy so a later await still gets traced output.
+                response.clone().json().then(
+                  (body: any) => {
+                    if (!traced && span.isRecording()) finalize(body);
+                  },
+                  () => {
+                    if (!traced && span.isRecording()) {
+                      span.setStatus({ code: SpanStatusCode.OK });
+                      span.end();
+                    }
+                  },
+                );
+              } else {
+                span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+                span.end();
+              }
+            }
+            return response;
+          } catch (err) {
+            recordError(span, err);
+            throw err;
+          }
+        };
+      }
+      const value = Reflect.get(promise, prop, promise);
+      return typeof value === "function" ? value.bind(promise) : value;
+    },
+  });
+}
 
 function tracedResponsesCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
@@ -292,7 +345,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
       throw err;
     }
 
-    return Promise.resolve(result).then(
+    return preserveResponseHelpers(result, span,
       (response: any) => {
         if (isStream) {
           return wrapResponsesAsyncIterableStream(response, span);
@@ -300,10 +353,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         finalizeResponsesResponse(span, response);
         return response;
       },
-      (err: any) => {
-        recordError(span, err);
-        throw err;
-      },
+      isStream,
     );
   };
 }
