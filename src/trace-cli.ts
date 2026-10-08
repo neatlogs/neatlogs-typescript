@@ -122,6 +122,7 @@ export async function runTraceCli(
       io.stderr(`Trace read rejected the credentials (HTTP ${response.status}); check the token scope, project id and host`);
       return 3;
     }
+    // a 409 on spans while the trace is not dlq means it is still processing
     if (response.status === 404 || (spansCall && response.status === 409)) {
       io.stderr(`Trace not ready or not found (HTTP ${response.status}); retry after the app flushes`);
       return 2;
@@ -151,6 +152,10 @@ export async function runTraceCli(
 
   const trace = await get(tracePath, '', false);
   if (typeof trace === 'number') return trace;
+  if (trace.finalizationStatus === 'dlq') {
+    io.stderr('Trace ingestion failed for good (finalizationStatus=dlq); retrying will not help');
+    return 5;
+  }
 
   const spans: Span[] = [];
   let cursor: string | undefined;
@@ -162,6 +167,10 @@ export async function runTraceCli(
     const next = (data.page as Record<string, unknown> | undefined)?.nextCursor;
     if (typeof next !== 'string' || !next) break;
     cursor = next;
+    if (page === MAX_PAGES - 1) {
+      io.stderr(`Span pagination incomplete: still more spans after ${MAX_PAGES} pages, so the trace was not checked`);
+      return 5;
+    }
   }
 
   const checks = checkTrace(trace, spans);
