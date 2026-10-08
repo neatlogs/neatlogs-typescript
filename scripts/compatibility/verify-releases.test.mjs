@@ -34,3 +34,19 @@ test('verification records paired versions, scope, and packages with no baseline
   assert.equal(results[2].reason, 'no recorded baseline for comparison');
   assert.deepEqual(calls, ['openai@6.0.0', 'openai@7.0.0']);
 });
+
+test('OpenAI Agents release is probed at both versions instead of left untested', async () => {
+  const calls = [];
+  const [result] = await verifyChanges([
+    { package: '@openai/agents', previouslyAnalyzed: '0.18.0', latest: '0.19.0' },
+  ], '/tmp/sdk.tgz', '/tmp', async (_change, version, probe) => {
+    calls.push({ version, mode: probe.mode });
+    return { status: 'passed', phase: 'runtime', version };
+  });
+  assert.deepEqual(calls, [
+    { version: '0.18.0', mode: 'openai-agents' },
+    { version: '0.19.0', mode: 'openai-agents' },
+  ]);
+  assert.equal(result.status, 'passed');
+  assert.equal(result.scope, 'processor registration and local trace/span lifecycle');
+});

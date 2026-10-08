@@ -96,6 +96,9 @@ test('Gemini proposal retries malformed JSON with bounded thinking, keeping the 
     assert.deepEqual(requests.map((request) => request.generationConfig.thinkingConfig), [
       { thinkingBudget: 1024 }, { thinkingBudget: 0 },
     ]);
+    assert.deepEqual(requests.map((request) => request.generationConfig.maxOutputTokens), [8192, 16384]);
+    assert.deepEqual(requests[0].generationConfig.responseSchema.properties.decision.enum, ['propose_fix', 'review_only']);
+    assert.ok(requests[0].generationConfig.responseSchema.required.includes('patch'));
     assert.match(requests[0].contents[0].parts[0].text, /tests\/unit\/langchain-tool-output\.test\.ts/);
   } finally {
     globalThis.fetch = originalFetch;

@@ -161,14 +161,31 @@ export async function generateProposal(payload, apiKey, model) {
     'For propose_fix, provide a small unified git diff that changes an existing src/*.ts adapter and an existing relevant tests/*.test.ts file. Preserve existing behavior. Do not create or delete files. Do not edit workflows, scripts, dependencies, docs, or generated files.',
     'The relevantTestSource entries contain complete existing tests. Use one of those exact paths for the test change; if no suitable test is supplied, choose review_only.',
     'For propose_fix, set adapterPath to an exact adapterSource.path in the input and upstreamReference to an exact upstream source-content path, public API declaration path, package-surface key, or official documentation URL shown in the input.',
-    'Return JSON: {decision:"propose_fix"|"review_only", package:string|null, adapterPath:string|null, upstreamReference:string|null, reason:string, evidence:string, patch:string}. For review_only, patch is empty.',
+    'Return JSON: {decision:"propose_fix"|"review_only", package:string, adapterPath:string, upstreamReference:string, reason:string, evidence:string, patch:string}. For review_only, use empty strings for adapterPath, upstreamReference, evidence, and patch. Never return a partial diff.',
     JSON.stringify(payload),
   ].join('\n\n');
   const thinkingBudgets = /^gemini-2\.5-flash(?:$|-)/.test(model) ? [1024, 0] : [null, null];
   const deadline = Date.now() + 120_000;
   let lastError;
-  for (const thinkingBudget of thinkingBudgets) {
-    const generationConfig = { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 8192 };
+  for (const [attempt, thinkingBudget] of thinkingBudgets.entries()) {
+    const generationConfig = {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          decision: { type: 'STRING', enum: ['propose_fix', 'review_only'] },
+          package: { type: 'STRING' },
+          adapterPath: { type: 'STRING' },
+          upstreamReference: { type: 'STRING' },
+          reason: { type: 'STRING' },
+          evidence: { type: 'STRING' },
+          patch: { type: 'STRING' },
+        },
+        required: ['decision', 'package', 'adapterPath', 'upstreamReference', 'reason', 'evidence', 'patch'],
+      },
+      temperature: 0.1,
+      maxOutputTokens: attempt === 0 ? 8192 : 16384,
+    };
     if (thinkingBudget !== null) generationConfig.thinkingConfig = { thinkingBudget };
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
       method: 'POST',
