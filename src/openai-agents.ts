@@ -166,11 +166,7 @@ class NeatlogsTraceProcessor {
       // Output text: Responses API output[] has message items with content[].text
       const outputItems = data?.output ?? resp?.output;
       if (Array.isArray(outputItems)) {
-        const text = outputItems
-          .filter((o: any) => o?.type === 'message' || o?.role === 'assistant')
-          .flatMap((o: any) => (Array.isArray(o.content) ? o.content : [o.content]))
-          .map((c: any) => (typeof c === 'string' ? c : c?.text ?? ''))
-          .join('');
+        const text = safeOutputText(otelSpan, outputItems);
         if (text) {
           otelSpan.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
           otelSpan.setAttribute('neatlogs.llm.output_messages.0.content', text);
@@ -193,18 +189,18 @@ class NeatlogsTraceProcessor {
       // Capture it on the LLM span and mirror the first user turn plus latest
       // assistant output onto the WORKFLOW root, which drives trace-list I/O.
       const inputItems = data?._input ?? data?.input;
-      captureInputMessages(otelSpan, inputItems);
+      const inputTurns = captureInputMessages(otelSpan, inputItems);
       const traceKey = String(span?.traceId ?? span?.trace_id ?? '');
       const root = this._spans.get(traceKey);
       if (root) {
         if (!this._rootInputDone.has(traceKey)) {
-          const userTurn = latestUserTurn(inputItems);
+          const userTurn = latestUserTurn(inputTurns);
           if (userTurn) {
             root.setAttribute('input.value', userTurn.slice(0, 10000));
             this._rootInputDone.add(traceKey);
           }
         }
-        const outputText = assistantOutputText(outputItems);
+        const outputText = Array.isArray(outputItems) ? safeOutputText(otelSpan, outputItems) : assistantOutputText(outputItems);
         if (outputText) root.setAttribute('output.value', outputText.slice(0, 10000));
       }
 
@@ -272,8 +268,9 @@ class NeatlogsTraceProcessor {
 // Utilities
 // ---------------------------------------------------------------------------
 
-function captureInputMessages(span: Span, input: any): void {
+function captureInputMessages(span: Span, input: any): Array<{ role: string; text: string }> {
   const messages = Array.isArray(input) ? input : (typeof input === 'string' ? [{ role: 'user', content: input }] : []);
+  const turns: Array<{ role: string; text: string }> = [];
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
     const role = typeof message === 'object' && message ? String(message.role ?? '') : '';
@@ -282,19 +279,30 @@ function captureInputMessages(span: Span, input: any): void {
     // inline bytes never reach text attributes.
     const safeContent = captureMedia(span, `neatlogs.llm.input_messages.${i}`, content, 'input');
     const text = contentText(safeContent);
+    turns.push({ role, text });
     if (role) span.setAttribute(`neatlogs.llm.input_messages.${i}.role`, role);
     if (text) span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, text.slice(0, 10000));
   }
+  return turns;
 }
 
-function latestUserTurn(input: any): string {
-  if (typeof input === 'string') return input;
-  if (!Array.isArray(input)) return '';
-  for (let i = input.length - 1; i >= 0; i--) {
-    const message = input[i];
-    if (message?.role === 'user') return contentText(message.content);
+// Last user turn, taken from the already sanitized text.
+function latestUserTurn(turns: Array<{ role: string; text: string }>): string {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'user') return turns[i].text;
   }
   return '';
+}
+
+// Assistant text from a Responses output[] list, with media routed through capture first.
+function safeOutputText(span: Span, output: any[]): string {
+  const parts = output
+    .filter((item: any) => item?.type === 'message' || item?.role === 'assistant')
+    .flatMap((item: any) => (Array.isArray(item.content) ? item.content : [item.content]));
+  const safe = captureMedia(span, 'neatlogs.llm.output_messages.0', parts, 'output');
+  return (Array.isArray(safe) ? safe : [])
+    .map((c: any) => (typeof c === 'string' ? c : c?.text ?? ''))
+    .join('');
 }
 
 function assistantOutputText(output: any): string {
