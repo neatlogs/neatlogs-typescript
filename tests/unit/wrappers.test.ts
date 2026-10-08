@@ -514,6 +514,25 @@ describe('openaiAgentsProcessor', () => {
     expect(spans.length).toBe(1);
     expect(spans[0].status.code).toBe(2); // ERROR
   });
+  it('keeps data URLs in text parts out of root input and output', () => {
+    const processor = openaiAgentsProcessor();
+    const data = Buffer.alloc(120_000, 0x42).toString('base64');
+    const url = `data:image/png;base64,${data}`;
+    processor.onTraceStart({ traceId: 'trace-t', name: 'Agent workflow' });
+    processor.onSpanStart({ spanId: 'r2', traceId: 'trace-t', spanData: { type: 'response' } });
+    processor.onSpanEnd({ spanId: 'r2', traceId: 'trace-t', spanData: { type: 'response', _input: [
+      { role: 'user', content: [{ type: 'input_text', text: url }] },
+    ], _response: {
+      model: 'gpt-4o-mini',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: url }] }],
+    } } });
+    processor.onTraceEnd({ traceId: 'trace-t' });
+
+    const spans = exporter.getFinishedSpans();
+    expect(JSON.stringify(spans.map(s => s.attributes))).not.toContain(data.slice(0, 256));
+    for (const span of spans) discardPendingMedia(span as object);
+  });
+
   it('keeps inline media out of response and root text attributes', () => {
     const processor = openaiAgentsProcessor();
     const data = Buffer.alloc(120_000, 0x41).toString('base64');
