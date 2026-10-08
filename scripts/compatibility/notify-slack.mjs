@@ -92,8 +92,12 @@ export function slackPayload(context) {
   const signals = notificationSignals(context);
   const counts = signals.verificationValid ? verification?.counts : null;
   const total = counts ? ['passed', 'failed', 'blocked', 'not-tested'].reduce((sum, key) => sum + Number(counts[key] ?? 0), 0) : 0;
+  const untested = counts ? verification.packages.filter((item) => item.status === 'not-tested') : [];
+  const untestedExample = untested.length === 1
+    ? ` (${brief(untested[0].package)}: ${brief(untested[0].reason ?? 'reason unavailable', 80)})`
+    : '';
   const checked = counts
-    ? `${counts.passed}/${total} passed (bounded smoke probes)${counts.blocked ? `, ${counts.blocked} blocked` : ''}${counts['not-tested'] ? `, ${counts['not-tested']} not tested` : ''}`
+    ? `${counts.passed}/${total} passed (bounded smoke probes)${counts.blocked ? `, ${counts.blocked} blocked` : ''}${counts['not-tested'] ? `, ${counts['not-tested']} not tested${untestedExample}` : ''}`
     : verificationOutcome === 'failure' ? 'failed before a valid report was produced' : 'no valid completed report';
   const regression = Number(counts?.failed ?? 0) > 0
     ? `${counts.failed} candidate${counts.failed === 1 ? '' : 's'} (baseline passed; latest failed)`
@@ -148,16 +152,20 @@ export function slackPayload(context) {
       why = `PR publication failed after patch validation${publication?.priorPrUrl ? `; <${publication.priorPrUrl}|existing PR> was left unchanged` : ''}.`;
     } else if (proposalOutcome === 'failure') {
       heading = 'AI fix scan incomplete; inspect the run.';
+      const failedRequest = proposal?.modelNotes?.find((note) => note?.error);
+      const failureDetail = failedRequest?.package
+        ? `${brief(failedRequest.package)}: ${brief(failedRequest.error)}`
+        : failedRequest?.error ? brief(failedRequest.error) : null;
       why = counts && Number(counts.failed) === 0
-        ? 'Gemini fix proposal failed. Bounded smoke probes found no regression; behavior outside those probes remains unverified. No fix PR was opened.'
-        : 'Gemini fix proposal failed. The smoke verdict is unavailable; SDK regression status is unknown. No fix PR was opened.';
+        ? `Gemini fix proposal failed${failureDetail ? ` for ${failureDetail}` : ''}. Bounded smoke probes found no regression; behavior outside those probes remains unverified. No fix PR was opened.`
+        : `Gemini fix proposal failed${failureDetail ? ` for ${failureDetail}` : ''}. The smoke verdict is unavailable; SDK regression status is unknown. No fix PR was opened.`;
     } else {
       why = 'A required compatibility automation step failed; no validated fix PR was opened.';
     }
     action = issueUpdateOutcome === 'failure'
       ? 'Inspect and retry the failed discovery issue update step.'
       : heading.startsWith('AI fix scan')
-        ? 'Inspect and retry the failed Gemini proposal step.'
+        ? `Inspect the failed Gemini proposal step${untested.length === 1 ? ` and add a runtime probe for ${brief(untested[0].package)}` : ''}, then retry.`
         : 'Inspect the failed step and retry after it is fixed.';
   } else {
     heading = `${report?.changes?.length ?? 0} newer package versions checked; no candidate regression found.`;

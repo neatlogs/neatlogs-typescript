@@ -27,6 +27,7 @@ export const PROBES = {
   '@langchain/openai': { adapter: 'langchain', exportName: 'langchainHandler', scope: 'consumer import and adapter export' },
   '@mastra/core': { adapter: 'mastra', exportName: 'wrapMastra', scope: 'consumer import and adapter export' },
   '@mastra/observability': { adapter: 'mastra', exportName: 'wrapMastra', scope: 'consumer import and adapter export' },
+  '@openai/agents': { adapter: 'openai-agents', exportName: 'openaiAgentsProcessor', mode: 'openai-agents', scope: 'processor registration and local trace/span lifecycle' },
   '@opencode-ai/plugin': { adapter: 'opencode', exportName: 'NeatlogsOpencodePlugin', scope: 'consumer import and adapter export' },
   ai: { adapter: 'ai', exportName: 'wrapAISDK', mode: 'ai', scope: 'published AI SDK exports and SDK wrapping' },
   openai: { adapter: 'openai', exportName: 'wrapOpenAI', mode: 'openai', scope: 'client construction and SDK wrapping' },
@@ -68,6 +69,36 @@ switch (process.env.COMPAT_MODE) {
   case 'ai': {
     if (typeof upstream.generateText !== 'function') throw new Error('AI SDK generateText missing');
     if (typeof symbol(upstream).generateText !== 'function') throw new Error('Wrapped AI SDK generateText missing');
+    break;
+  }
+  case 'openai-agents': {
+    for (const name of ['setTraceProcessors', 'addTraceProcessor', 'withTrace', 'withAgentSpan']) {
+      if (typeof upstream[name] !== 'function') throw new Error('OpenAI Agents ' + name + ' missing');
+    }
+    const processor = symbol();
+    for (const name of ['onTraceStart', 'onTraceEnd', 'onSpanStart', 'onSpanEnd', 'shutdown', 'forceFlush']) {
+      if (typeof processor?.[name] !== 'function') throw new Error('Neatlogs trace processor ' + name + ' missing');
+    }
+    const calls = Object.fromEntries(['onTraceStart', 'onTraceEnd', 'onSpanStart', 'onSpanEnd'].map((name) => [name, 0]));
+    for (const name of Object.keys(calls)) {
+      const original = processor[name].bind(processor);
+      processor[name] = (...args) => {
+        calls[name] += 1;
+        return original(...args);
+      };
+    }
+    upstream.setTraceProcessors([]);
+    upstream.addTraceProcessor(processor);
+    try {
+      await upstream.withTrace('compatibility-probe', async () => {
+        await upstream.withAgentSpan(async () => {}, { data: { name: 'compatibility-probe' } });
+      });
+      for (const [name, count] of Object.entries(calls)) {
+        if (count !== 1) throw new Error('OpenAI Agents did not call ' + name + ' exactly once: ' + count);
+      }
+    } finally {
+      upstream.setTraceProcessors([]);
+    }
     break;
   }
 }

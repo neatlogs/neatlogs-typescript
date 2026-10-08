@@ -208,10 +208,29 @@ test('post-merge proposal failure has separate Slack blocks for outcome and next
   assert.equal(payload.blocks[3].text.text, '*Regression:* none found in tested scope');
   assert.equal(payload.blocks[4].text.text, '*Fix PR:* none');
   assert.match(payload.blocks[5].text.text, /Gemini fix proposal failed/);
-  assert.match(payload.blocks[6].text.text, /Inspect and retry the failed Gemini proposal step/);
+  assert.match(payload.blocks[6].text.text, /Inspect the failed Gemini proposal step, then retry/);
   assert.match(payload.blocks[7].elements[0].text, /Discovery issue.*Workflow run/);
   assert.match(payload.text, /\*TypeScript SDK:.*\*\n\n\*Checked:/);
   assert.doesNotMatch(payload.text, /\*\*Checked:/);
+});
+
+test('incomplete scan names the untested package and malformed Gemini response', () => {
+  const selected = [
+    ...changes.slice(0, 1),
+    { package: '@openai/agents', previouslyAnalyzed: '0.18.0', latest: '0.19.0' },
+  ];
+  const verification = verificationFor(selected, ['passed', 'not-tested']);
+  verification.packages[1].reason = 'no runtime probe configured';
+  const message = slackMessage({
+    status: 'success', report: { changes: selected }, verification,
+    proposalOutcome: 'failure', proposal: { modelNotes: [{
+      package: '@openai/agents', error: 'Gemini proposal returned malformed JSON',
+    }] },
+  });
+  assert.match(message, /1 not tested \(@openai\/agents: no runtime probe configured\)/);
+  assert.match(message, /@openai\/agents: Gemini proposal returned malformed JSON/);
+  assert.match(message, /add a runtime probe for @openai\/agents/);
+  assert.match(message, /Regression:\* none found in tested scope/);
 });
 
 test('actionable alerts require a configured webhook and a successful Slack response', async () => {
