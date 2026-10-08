@@ -63,8 +63,28 @@ describe('neatlogs trace get', () => {
     const names = JSON.parse(t.out[0]!).checks.filter((c: { status: string }) => c.status === 'fail').map((c: { name: string }) => c.name);
     expect(names).toEqual(expect.arrayContaining(['parents_resolve', 'spans_named']));
   });
-  it('fails a dead-lettered trace and passes zero reported tokens', async () => {
-    const dlq = io((url) => (url.pathname.endsWith('/spans') ? healthy(url) : ok({ ...traceData, finalizationStatus: 'dlq', totalTokens: 0 })));
+  it('reports a dlq trace as a terminal failure before reading spans', async () => {
+    const t = io((url) => (url.pathname.endsWith('/spans') ? status(409) : ok({ ...traceData, finalizationStatus: 'dlq' })));
+    expect(await runTraceCli(['trace', 'get', 't1'], t.overrides)).toBe(5);
+    expect(t.calls).toHaveLength(1);
+    expect(t.err.join()).toContain('dlq');
+  });
+  it('reports a pending trace with a 409 on spans as not ready', async () => {
+    const t = io((url) => (url.pathname.endsWith('/spans') ? status(409) : ok({ ...traceData, finalizationStatus: 'pending' })));
+    expect(await runTraceCli(['trace', 'get', 't1'], t.overrides)).toBe(2);
+    expect(t.err.join()).toContain('not ready');
+  });
+  it('does not check a partial span set when pagination hits the cap', async () => {
+    const t = io((url) => (url.pathname.endsWith('/spans')
+      ? ok({ spans: [spanA], page: { hasMore: true, limit: 50, nextCursor: 'more' } })
+      : ok(traceData)));
+    expect(await runTraceCli(args, t.overrides)).toBe(5);
+    expect(t.out).toHaveLength(0);
+    expect(t.err.join()).toContain('pagination incomplete');
+    expect(t.calls).toHaveLength(201);
+  });
+  it('fails a pending trace and passes zero reported tokens', async () => {
+    const dlq = io((url) => (url.pathname.endsWith('/spans') ? healthy(url) : ok({ ...traceData, finalizationStatus: 'pending', totalTokens: 0 })));
     expect(await runTraceCli(args, dlq.overrides)).toBe(1);
     const checks = JSON.parse(dlq.out[0]!).checks as { name: string; status: string }[];
     expect(checks.find((c) => c.name === 'finalized')!.status).toBe('fail');
