@@ -231,6 +231,39 @@ describe('provider tool media safety', () => {
   });
 });
 
+describe('streamed thinking and text media', () => {
+  it.each([
+    ['google', wrapGoogleGenAI],
+    ['vertex', wrapVertexAI],
+  ] as const)('%s keeps data URLs out of streamed thinking and text', async (_name, wrap) => {
+    const data = Buffer.alloc(120_000, 0x43).toString('base64');
+    const url = `data:image/png;base64,${data}`;
+    const stream = (async function* () {
+      yield {
+        candidates: [{
+          content: { parts: [
+            { thought: true, text: url },
+            { text: url },
+          ] },
+        }],
+      };
+    })();
+    const wrapped = wrap({
+      models: { generateContentStream: async () => stream },
+    } as any);
+    const result = await (wrapped as any).models.generateContentStream({
+      model: 'gemini-test',
+      contents: 'go',
+    });
+    for await (const _chunk of result) {
+      // consume
+    }
+    const readable = span();
+    expect(JSON.stringify(readable.attributes)).not.toContain(data.slice(0, 256));
+    discardPendingMedia(readable as object);
+  });
+});
+
 describe('provider streaming capture bounds', () => {
   it('short-circuits UTF-8 byte counting at the requested limit', () => {
     expect(utf8ByteLength('é🙂', 2)).toBe(3);
