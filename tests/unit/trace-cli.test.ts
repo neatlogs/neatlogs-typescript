@@ -47,6 +47,16 @@ describe('neatlogs trace get', () => {
     expect(await runTraceCli(['trace', 'get'], io(() => json({})).overrides)).toBe(4);
     expect(await runTraceCli(['trace', 'get', 't1'], io(() => json({}, 500)).overrides)).toBe(5);
   });
+  it('treats a 409 as a permanent failure, not a retry', async () => {
+    const t = io(() => json({}, 409));
+    expect(await runTraceCli(['trace', 'get', 't1'], t.overrides)).toBe(5);
+    expect(t.err.join()).toContain('retrying will not help');
+  });
+  it('lets a trace with zero reported tokens pass', async () => {
+    const zero = { ...good, totalTokensUsed: 0 };
+    const t = io(() => json(zero));
+    expect(await runTraceCli(['trace', 'get', 't1', '--json'], t.overrides)).toBe(0);
+  });
   it('honours NEATLOGS_ENDPOINT and encodes the id', async () => {
     const t = io(() => json(good), { NEATLOGS_API_KEY: 'k', NEATLOGS_ENDPOINT: 'http://localhost:9' });
     await runTraceCli(['trace', 'get', 'a/b'], t.overrides);
