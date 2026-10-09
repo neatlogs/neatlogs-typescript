@@ -19,6 +19,7 @@ import {
 } from './media.js';
 import { DisabledUploadAuthority, type UploadAuthority } from './upload-authority.js';
 import { isHttpSpan } from './http-span.js';
+import { captureExportSettled } from '../dataset/capture-scope.js';
 
 const MEDIA_RESOLUTION_CONCURRENCY = 4;
 
@@ -216,11 +217,13 @@ export class FilteringExporter implements SpanExporter {
           // Diagnostics must never affect application telemetry delivery.
         }
         if (filtered.length === 0) {
+          captureExportSettled(spans, filtered, true);
           resultCallback({ code: ExportResultCode.SUCCESS });
           return;
         }
         try {
           this._delegate.export(filtered, (result) => {
+            captureExportSettled(spans, filtered, result.code === ExportResultCode.SUCCESS && mediaFailures === 0);
             if (result.code === ExportResultCode.SUCCESS && mediaFailures > 0) {
               this.diagnostics?.recordExportFailure('span', mediaFailures);
               resultCallback({
@@ -232,6 +235,7 @@ export class FilteringExporter implements SpanExporter {
             resultCallback(result);
           });
         } catch {
+          captureExportSettled(spans, filtered, false);
           this.diagnostics?.recordExportFailure('span', filtered.length);
           resultCallback({
             code: ExportResultCode.FAILED,
@@ -240,6 +244,7 @@ export class FilteringExporter implements SpanExporter {
         }
       },
       () => {
+        captureExportSettled(spans, [], false);
         this.diagnostics?.recordExportFailure('span', spans.length);
         resultCallback({
           code: ExportResultCode.FAILED,
