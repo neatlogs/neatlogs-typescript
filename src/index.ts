@@ -42,6 +42,11 @@ export {
 export { span, Span } from "./decorators/index.js";
 export { trace, setTraceOutput } from "./core/context.js";
 export { log } from "./core/log.js";
+export {
+  datasets, DatasetCaptureHandle, DatasetCaptureError, getDatasetCaptureHandle,
+  type DatasetCaptureOptions, type DatasetCaptureResult, type DatasetCaptureStatusOptions, type DatasetCaptureWaitOptions,
+  type DatasetCaptureDestination, type DatasetCaptureState, type DatasetCaptureStatus, type DatasetCaptureFailure,
+} from './dataset/capture.js';
 
 // Request-scoped session & end-user identity (per-request, not process-global).
 export { identify, type IdentifyOptions } from "./core/identity.js";
