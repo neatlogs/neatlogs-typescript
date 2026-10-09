@@ -85,6 +85,7 @@ export function captureSpanStarted(span: ReadableSpan): void {
 }
 
 export function captureSpanEnded(span: ReadableSpan): void {
+  if (state.owners.size === 0) return;
   const record = state.owners.get(spanKey(span))?.spans.get(spanKey(span));
   if (!record) return;
   record.ended = true;
@@ -96,6 +97,7 @@ export function captureExportSettled(
   prepared: readonly ReadableSpan[],
   succeeded: boolean,
 ): void {
+  if (state.owners.size === 0) return;
   const exported = new Set(prepared.map(spanKey));
   for (const span of original) {
     const id = spanKey(span);
