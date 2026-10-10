@@ -54,6 +54,80 @@ documented Neatlogs wrapper, hook, processor, or telemetry helper.
 | `log()` | Capture timestamped log steps within the active trace |
 | `shutdown()` | Flush all pending data and shut down the SDK gracefully |
 
+## Capture executions into a dataset
+
+Use `datasets.capture()` around local or CI agent runs. Keep your existing
+`span()`, `trace()`, and provider wrappers: traces still use normal ingestion,
+masking, and export. Capture registers the destination before calling your
+agent, flushes the recorded spans, and submits their IDs for dataset capture.
+It does not add a trace, fabricate outputs, or run an evaluator.
+
+```typescript
+import { datasets, init, span } from 'neatlogs';
+
+async function main() {
+  await init({ apiKey: process.env.NEATLOGS_API_KEY });
+  const agent = span({ kind: 'WORKFLOW', name: 'support-agent' }, async (query: string) => {
+    // Use your existing instrumented agent here.
+    return answerCustomer(query);
+  });
+
+  const capture = await datasets.capture(
+    { kind: 'name', name: 'Support regression examples', createIfMissing: true },
+    () => agent('Can I return a damaged item?'),
+    {
+      token: process.env.NEATLOGS_DATASET_TOKEN!,
+      projectId: process.env.NEATLOGS_PROJECT_ID!,
+      baseUrl: process.env.NEATLOGS_API_ORIGIN!,
+      environment: 'local',
+    },
+  );
+
+  console.log(capture.result); // The agent's actual return value.
+  const status = await capture.wait({ timeoutMillis: 60_000 });
+  console.log(status.datasetId, status.datasetVersionId, status.state);
+}
+```
+
+`baseUrl` is an explicit API origin such as your Neatlogs deployment's origin,
+without `/api/v1`. HTTPS is required except on loopback. `token` must be a user or service-account token with dataset
+write permission; the ingestion API key is never reused. For an existing dataset,
+use `{ kind: 'existing', datasetId }`. A name must resolve unambiguously;
+creation happens only with explicit `createIfMissing: true`.
+
+The SDK requires a Neatlogs-owned provider configured with `sampleRate: 1`.
+Await all traced work inside the callback. Captures can run concurrently; nested
+captures are rejected. Each captured trace must start inside the callback.
+Transport spans and completion markers are excluded. Open spans, export failure,
+or spans dropped by masking abort capture; normal ingestion remains active.
+An uninstrumented callback records no examples and the server reports failure.
+
+`environment` must be `local`, `ci`, or `production`. Production capture also
+requires `allowProduction: true`; the SDK does not infer your environment from
+an endpoint. Capture submits at most 64 KiB of trace/span IDs and rejects larger
+manifests without truncating them. Individual HTTP phases retry a transient
+network/server failure once with the same idempotency key; the agent callback
+is never automatically replayed.
+
+`capture.status()` refreshes progress. `capture.wait()` returns only on `completed`. Failed, cancelled, and
+`needs_review` jobs reject; inspect `capture.lastStatus` or call `capture.status()`.
+Review required means no partial dataset version is published automatically. Status includes failure details and a `nextCursor`;
+use `capture.status({ after: status.nextCursor })` to read another failure page.
+A published version ID appears only after completion. A wait timeout leaves the
+server job running. If completion returns an uncertain network response, recover
+the handle with `getDatasetCaptureHandle(error)`, inspect `status()`, and use
+`retryCompletion()` to resend the original manifest with the same idempotency
+key. The SDK preserves that manifest and never aborts after attempting completion.
+
+Fully exported agent failures are useful examples: capture still submits them
+and rethrows the original callback exception. Use `getDatasetCaptureHandle(error)`
+to recover its handle. Use `onRegistered(handle)` to retain the handle before
+execution, including callbacks that throw primitives. A capture failure during a
+failed callback is available as `handle.captureError`; the original callback
+exception takes precedence. For successful callbacks, capture errors reject the
+capture promise. Add reference answers or success criteria and run evaluations
+in Neatlogs after the dataset version is published.
+
 ## Doctor v2
 
 Run the local SDK pipeline check without credentials or network access:

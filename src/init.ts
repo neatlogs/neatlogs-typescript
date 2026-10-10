@@ -49,6 +49,7 @@ import {
 } from "./core/observable-batch-processors.js";
 import { _setOtelLogger } from "./core/log.js";
 import { _setSessionConfig } from "./core/context.js";
+import { registerCaptureProvider } from "./dataset/capture-scope.js";
 import { _setNeatlogsProvider } from "./core/provider.js";
 import { getLogger, enableDebugLogging } from "./core/logger.js";
 import {
@@ -584,6 +585,7 @@ async function _performInit(options: InitOptions): Promise<void> {
       }),
     });
   _ownsTracerProvider = options.tracerProvider === undefined;
+  if (_ownsTracerProvider) registerCaptureProvider(provider, sampleRate, flush);
 
   // 11. Add NeatlogsSpanProcessor
   _spanProcessor = new NeatlogsSpanProcessor({
