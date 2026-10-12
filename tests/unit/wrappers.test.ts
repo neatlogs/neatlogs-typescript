@@ -533,6 +533,45 @@ describe('openaiAgentsProcessor', () => {
     for (const span of spans) discardPendingMedia(span as object);
   });
 
+  it('captures only new input turns per response span and caps total input per span', () => {
+    const processor = openaiAgentsProcessor();
+    processor.onTraceStart({ traceId: 'trace-long', name: 'Agent workflow' });
+    const history: any[] = [];
+    for (let turn = 0; turn < 40; turn++) {
+      history.push({ role: 'user', content: `question ${turn} ` + 'q'.repeat(2000) });
+      const id = `r${turn}`;
+      processor.onSpanStart({ spanId: id, traceId: 'trace-long', spanData: { type: 'response' } });
+      processor.onSpanEnd({ spanId: id, traceId: 'trace-long', spanData: { type: 'response', _input: history.slice(), _response: {
+        model: 'gpt-4o-mini',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `answer ${turn}` }] }],
+        usage: { input_tokens: 10, output_tokens: 2 },
+      } } });
+      history.push({ role: 'assistant', content: `answer ${turn}` });
+    }
+    processor.onTraceEnd({ traceId: 'trace-long' });
+
+    const llm = exporter.getFinishedSpans().filter(s => s.attributes['neatlogs.span.kind'] === 'LLM');
+    expect(llm.length).toBe(40);
+    for (const span of llm) {
+      const chars = Object.entries(span.attributes)
+        .filter(([k]) => /^neatlogs\.llm\.input_messages\.\d+\.content$/.test(k))
+        .reduce((n, [, v]) => n + String(v).length, 0);
+      expect(chars).toBeLessThanOrEqual(20000);
+      // Usage and output are still written however long the history is.
+      expect(attr(span, 'neatlogs.llm.token_count.prompt')).toBe(10);
+      expect(attr(span, 'neatlogs.llm.output_messages.0.content')).toMatch(/^answer /);
+    }
+    // The last span holds only the two turns added since the previous span, not the 77 earlier ones.
+    const last = llm[llm.length - 1];
+    const inputKeys = Object.keys(last.attributes).filter(k => /^neatlogs\.llm\.input_messages\.\d+\.content$/.test(k));
+    expect(inputKeys).toEqual(['neatlogs.llm.input_messages.77.content', 'neatlogs.llm.input_messages.78.content']);
+    // Total captured across the trace is about one copy of the history, not one per span.
+    const total = llm.reduce((n, s) => n + Object.entries(s.attributes)
+      .filter(([k]) => /^neatlogs\.llm\.input_messages\.\d+\.content$/.test(k))
+      .reduce((m, [, v]) => m + String(v).length, 0), 0);
+    expect(total).toBeLessThan(40 * 2100 + 40 * 20);
+  });
+
   it('keeps inline media out of response and root text attributes', () => {
     const processor = openaiAgentsProcessor();
     const data = Buffer.alloc(120_000, 0x41).toString('base64');
