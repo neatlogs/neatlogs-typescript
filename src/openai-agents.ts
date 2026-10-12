@@ -31,6 +31,9 @@ class NeatlogsTraceProcessor {
   private _spans: Map<string, Span> = new Map();
   private _startTimes: Map<string, number> = new Map();
   private _rootInputDone: Set<string> = new Set();
+  // Input messages already captured per trace, so a long conversation is not
+  // copied onto every response span.
+  private _inputSeen: Map<string, number> = new Map();
 
   // The @openai/agents SDK passes a Trace object: { traceId, name, groupId, metadata }.
   onTraceStart(traceData: any): void {
@@ -64,6 +67,7 @@ class NeatlogsTraceProcessor {
     this._spans.delete(key);
     this._startTimes.delete(key);
     this._rootInputDone.delete(key);
+    this._inputSeen.delete(key);
   }
 
   // The SDK passes a Span object: { type, spanId, traceId, parentId?, spanData: {...} }.
@@ -189,8 +193,13 @@ class NeatlogsTraceProcessor {
       // Capture it on the LLM span and mirror the first user turn plus latest
       // assistant output onto the WORKFLOW root, which drives trace-list I/O.
       const inputItems = data?._input ?? data?.input;
-      const inputTurns = captureInputMessages(otelSpan, inputItems);
       const traceKey = String(span?.traceId ?? span?.trace_id ?? '');
+      const inputCount = Array.isArray(inputItems) ? inputItems.length : (typeof inputItems === 'string' ? 1 : 0);
+      const seen = this._inputSeen.get(traceKey) ?? 0;
+      // Only the turns added since the previous response span in this trace; a
+      // shorter list means the history was reset, so start over.
+      const inputTurns = captureInputMessages(otelSpan, inputItems, seen <= inputCount ? seen : 0);
+      this._inputSeen.set(traceKey, inputCount);
       const root = this._spans.get(traceKey);
       if (root) {
         if (!this._rootInputDone.has(traceKey)) {
@@ -259,6 +268,7 @@ class NeatlogsTraceProcessor {
     this._spans.clear();
     this._startTimes.clear();
     this._rootInputDone.clear();
+    this._inputSeen.clear();
   }
 
   forceFlush(): void {}
@@ -268,21 +278,41 @@ class NeatlogsTraceProcessor {
 // Utilities
 // ---------------------------------------------------------------------------
 
-function captureInputMessages(span: Span, input: any): Array<{ role: string; text: string }> {
+// Total characters of input text written to one span. Longer input is cut at
+// this budget and the span is flagged, so a long conversation cannot crowd out
+// the response and usage attributes.
+const MAX_INPUT_CHARS_PER_SPAN = 20000;
+
+// Captures messages from index `start` on. Earlier ones were already written to
+// the previous response span of this trace. Indexes stay the same as in the
+// request, so `input_messages.N` always means message N.
+function captureInputMessages(span: Span, input: any, start = 0): Array<{ role: string; text: string }> {
   const messages = Array.isArray(input) ? input : (typeof input === 'string' ? [{ role: 'user', content: input }] : []);
   const turns: Array<{ role: string; text: string }> = [];
+  let budget = MAX_INPUT_CHARS_PER_SPAN;
+  let truncated = false;
   for (let i = 0; i < messages.length; i++) {
+    if (i < start) {
+      turns.push({ role: '', text: '' });
+      continue;
+    }
     const message = messages[i];
     const role = typeof message === 'object' && message ? String(message.role ?? '') : '';
     const content = typeof message === 'object' && message ? message.content : message;
     // Route media through typed capture first, then read text parts only, so
     // inline bytes never reach text attributes.
     const safeContent = captureMedia(span, `neatlogs.llm.input_messages.${i}`, content, 'input');
-    const text = contentText(safeContent);
+    let text = contentText(safeContent);
+    if (text.length > budget) {
+      text = text.slice(0, budget);
+      truncated = true;
+    }
+    budget -= text.length;
     turns.push({ role, text });
     if (role) span.setAttribute(`neatlogs.llm.input_messages.${i}.role`, role);
-    if (text) span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, text.slice(0, 10000));
+    if (text) span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, text);
   }
+  if (truncated) span.setAttribute('neatlogs.llm.input_truncated', true);
   return turns;
 }
 
