@@ -1,6 +1,7 @@
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
 import { createHash } from "node:crypto";
 import { captureMediaWithIndex, sanitizeMediaPayload } from "./media.js";
+import { isAbortError, markCancelled } from "./span-outcome.js";
 import {
   DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
   DEFAULT_MAX_STREAM_CAPTURE_BYTES,
@@ -258,13 +259,20 @@ export class ChoiceAccumulator {
     }
   }
 
+  /** True once any choice has reported why it stopped, i.e. the reply completed. */
+  hasFinishReason(): boolean {
+    for (const choice of this.choices.values()) {
+      if (choice.finishReason !== null) return true;
+    }
+    return false;
+  }
+
   finish(span: Span, interrupted = false): void {
     if (this.finalized) return;
     this.finalized = true;
     this.apply(span);
     if (interrupted) {
-      span.setAttribute("neatlogs.stream.cancelled", true);
-      span.setStatus({ code: SpanStatusCode.UNSET });
+      markCancelled(span);
     } else {
       span.setStatus({ code: SpanStatusCode.OK });
     }
@@ -275,9 +283,8 @@ export class ChoiceAccumulator {
     if (this.finalized) return;
     this.finalized = true;
     this.apply(span);
-    if ((error as any)?.name === "AbortError") {
-      span.setAttribute("neatlogs.stream.cancelled", true);
-      span.setStatus({ code: SpanStatusCode.UNSET });
+    if (isAbortError(error)) {
+      markCancelled(span);
     } else {
       span.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
       if (error instanceof Error) span.recordException(error);
