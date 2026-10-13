@@ -11,6 +11,7 @@
 
 import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
 import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
+import { recordFailure } from './core/span-outcome.js';
 
 const TRACER_NAME = 'neatlogs.openai_agents';
 
@@ -29,6 +30,11 @@ export function openaiAgentsProcessor(): any {
 class NeatlogsTraceProcessor {
   private _spans: Map<string, Span> = new Map();
   private _startTimes: Map<string, number> = new Map();
+  // First error per trace from a span whose failure ends the run.
+  private _runErrors: Map<string, unknown> = new Map();
+  // Tool/function spans and everything nested under them: the run carries on
+  // after a tool fails, so their errors never decide the root status.
+  private _toolScoped: Set<string> = new Set();
 
   // The @openai/agents SDK passes a Trace object: { traceId, name, groupId, metadata }.
   onTraceStart(traceData: any): void {
@@ -57,10 +63,17 @@ class NeatlogsTraceProcessor {
       span.setAttribute('neatlogs.metrics.duration_ms', Date.now() - startTime);
     }
 
-    span.setStatus({ code: SpanStatusCode.OK });
+    // The SDK's Trace object carries no outcome, so the root reflects the
+    // run-ending error recorded while its spans closed.
+    if (this._runErrors.has(key)) {
+      recordFailure(span, this._runErrors.get(key));
+    } else {
+      span.setStatus({ code: SpanStatusCode.OK });
+    }
     span.end();
     this._spans.delete(key);
     this._startTimes.delete(key);
+    this._runErrors.delete(key);
   }
 
   // The SDK passes a Span object: { type, spanId, traceId, parentId?, spanData: {...} }.
@@ -114,7 +127,7 @@ class NeatlogsTraceProcessor {
 
       otelSpan = tracer.startSpan('openai_agents.generation', { attributes: attrs }, parentCtx);
 
-    } else if (spanType === 'function' || spanType === 'tool' || spanType === 'tool_call') {
+    } else if (isToolSpanType(spanType)) {
       const toolName = data?.name ?? data?.function_name ?? 'tool';
       const attrs: Record<string, any> = {
         'neatlogs.span.kind': 'TOOL',
@@ -138,6 +151,10 @@ class NeatlogsTraceProcessor {
     } else {
       const attrs: Record<string, any> = { 'neatlogs.span.kind': 'CHAIN' };
       otelSpan = tracer.startSpan(`openai_agents.${spanType || 'span'}`, { attributes: attrs }, parentCtx);
+    }
+
+    if (isToolSpanType(spanType) || this._toolScoped.has(String(span?.parentId ?? ''))) {
+      this._toolScoped.add(spanId);
     }
 
     this._spans.set(spanId, otelSpan);
@@ -214,11 +231,17 @@ class NeatlogsTraceProcessor {
 
     const error = data?.error ?? span?.error;
     if (error) {
-      if (error instanceof Error) {
-        otelSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-        otelSpan.recordException(error);
-      } else {
-        otelSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
+      // The SDK reports `{ message, data }`, not an Error.
+      recordFailure(otelSpan, error);
+      const traceKey = String(span?.traceId ?? span?.trace_id ?? '');
+      // A handoff error leaves the current agent running, like a tool error.
+      if (
+        traceKey &&
+        spanType !== 'handoff' &&
+        !this._toolScoped.has(spanId) &&
+        !this._runErrors.has(traceKey)
+      ) {
+        this._runErrors.set(traceKey, error);
       }
     } else {
       otelSpan.setStatus({ code: SpanStatusCode.OK });
@@ -231,6 +254,7 @@ class NeatlogsTraceProcessor {
     otelSpan.end();
     this._spans.delete(spanId);
     this._startTimes.delete(spanId);
+    this._toolScoped.delete(spanId);
   }
 
   shutdown(): void {
@@ -240,6 +264,8 @@ class NeatlogsTraceProcessor {
     }
     this._spans.clear();
     this._startTimes.clear();
+    this._runErrors.clear();
+    this._toolScoped.clear();
   }
 
   forceFlush(): void {}
@@ -248,6 +274,10 @@ class NeatlogsTraceProcessor {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+function isToolSpanType(spanType: string): boolean {
+  return spanType === 'function' || spanType === 'tool' || spanType === 'tool_call';
+}
 
 function safeStringify(value: unknown): string {
   try {
