@@ -12,19 +12,20 @@
  */
 
 import {
-  SpanStatusCode,
   type AttributeValue,
   type Context,
   type Span,
   type SpanOptions,
   type Tracer,
 } from '@opentelemetry/api';
+import { DEFAULT_MAX_STREAM_CAPTURE_BYTES, utf8ByteLength } from './constants.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
   getRoutingNeatlogsTracer,
   withNeatlogsSpan,
 } from './core/provider.js';
+import { markCancelled, recordFailure } from './core/span-outcome.js';
 
 const TRACER_NAME = 'neatlogs.ai-sdk';
 
@@ -511,9 +512,13 @@ function createAsyncWrapper(
 // streamText/streamObject return synchronously while the model keeps producing
 // tokens for seconds afterwards. Ending the span in a `finally` (as a plain sync
 // wrapper would) closes it in ~2ms with no output — the output only exists once
-// the stream finishes. Instead we keep the span open and end it from the AI SDK's
-// `onFinish` callback, where the final text/object is available. Any user-provided
-// `onFinish` is preserved and invoked first.
+// the stream finishes. Instead we keep the span open and end it from whichever
+// signal says the stream is over.
+//
+// The AI SDK's end callback alone is not enough: it is skipped when the caller
+// aborts (`onAbort` fires instead), when the consumer stops reading, and when
+// the provider stream breaks mid-way (no callback at all). The returned
+// result's streams are therefore observed too. User callbacks are preserved.
 function createStreamWrapper(
   name: WrappedFunctionName,
   original: (opts: any) => unknown,
@@ -523,7 +528,7 @@ function createStreamWrapper(
     const tracer = getNeatlogsTracer(TRACER_NAME);
     // startSpan + withNeatlogsSpan (see createAsyncWrapper) so streamText's
     // internals never see our span on the global OTel context. The span stays
-    // open past the run scope and is ended from onFinish/onError.
+    // open past the run scope.
     const parentContext = getParentContext();
     const span = tracer.startSpan(
       `ai.${name}`,
@@ -539,32 +544,114 @@ function createStreamWrapper(
           spanEnded = true;
           span.end();
         };
+        // Text seen so far, for a stream that ends without its end event.
+        const partialText: string[] = [];
+        let partialBytes = 0;
+        const applyPartialOutput = () => {
+          const text = partialText.join('');
+          if (text) span.setAttribute('output.value', text);
+        };
+        // A provider error that the SDK may still retry (v7 `streamRetries`).
+        let pendingError: { error: unknown } | undefined;
+        const finish = (event: any) => {
+          if (spanEnded) return;
+          try {
+            setStreamOutputValue(span, event);
+            if (pendingError && event?.finishReason === 'error') {
+              recordSpanError(span, pendingError.error);
+            }
+          } finally {
+            endOnce();
+          }
+        };
+        const fail = (error: unknown) => {
+          if (spanEnded) return;
+          applyPartialOutput();
+          recordSpanError(span, error);
+          endOnce();
+        };
+        const cancel = () => {
+          if (spanEnded) return;
+          applyPartialOutput();
+          markCancelled(span);
+          endOnce();
+        };
+        // The stream closed with no end event: an error that was held back
+        // for a retry is the outcome; otherwise nothing more is known.
+        const close = () => {
+          if (spanEnded) return;
+          if (pendingError) return fail(pendingError.error);
+          applyPartialOutput();
+          endOnce();
+        };
         try {
           setInputValue(span, opts);
           const merged = mergeTelemetry(opts, telemetryKey);
-          const userOnFinish = opts?.onFinish;
+          // v7 streamText renamed `onFinish` to `onEnd` and ignores `onFinish`
+          // once `onEnd` is set, so hook the name this call actually uses.
+          const endKey =
+            name === 'streamText' && telemetryKey === 'telemetry'
+              ? 'onEnd'
+              : 'onFinish';
+          const userOnEnd =
+            (endKey === 'onEnd' ? opts?.onEnd : undefined) ?? opts?.onFinish;
           const userOnError = opts?.onError;
-          const wrappedOpts = {
+          const userOnAbort = opts?.onAbort;
+          const userOnChunk = opts?.onChunk;
+          const retriesStream = Number(opts?.streamRetries) > 0;
+          const wrappedOpts: Record<string, unknown> = {
             ...merged,
-            onFinish: async (event: any) => {
-              try {
-                setStreamOutputValue(span, event);
-              } finally {
-                endOnce();
-              }
-              if (typeof userOnFinish === 'function') {
-                return userOnFinish(event);
+            [endKey]: async (event: any) => {
+              finish(event);
+              if (typeof userOnEnd === 'function') {
+                return userOnEnd(event);
               }
             },
             onError: (event: any) => {
-              recordSpanError(span, (event && event.error) ?? event);
-              endOnce();
-              if (typeof userOnError === 'function') {
-                return userOnError(event);
-              }
+              const error = (event && event.error) ?? event;
+              const settle = (result: any) => {
+                if (retriesStream || result?.retry === true) pendingError = { error };
+                else fail(error);
+                return result;
+              };
+              const result =
+                typeof userOnError === 'function' ? userOnError(event) : undefined;
+              return typeof result?.then === 'function'
+                ? result.then(settle, (err: unknown) => {
+                    settle(undefined);
+                    throw err;
+                  })
+                : settle(result);
             },
           };
-          return original(wrappedOpts);
+          if (endKey === 'onEnd') delete wrappedOpts.onFinish;
+          if (name === 'streamText') {
+            wrappedOpts.onAbort = (event: any) => {
+              cancel();
+              if (typeof userOnAbort === 'function') {
+                return userOnAbort(event);
+              }
+            };
+            wrappedOpts.onChunk = (event: any) => {
+              const chunk = event?.chunk;
+              const text =
+                chunk?.type === 'text-delta'
+                  ? (chunk.text ?? chunk.textDelta ?? chunk.delta)
+                  : undefined;
+              if (typeof text === 'string' && text) {
+                const remaining = DEFAULT_MAX_STREAM_CAPTURE_BYTES - partialBytes;
+                const bytes = utf8ByteLength(text, remaining);
+                if (bytes <= remaining) {
+                  partialText.push(text);
+                  partialBytes += bytes;
+                }
+              }
+              if (typeof userOnChunk === 'function') {
+                return userOnChunk(event);
+              }
+            };
+          }
+          return observeResultStreams(original(wrappedOpts), { fail, cancel, close });
         } catch (err) {
           // Synchronous throw (e.g. bad arguments) — the stream never started.
           recordSpanError(span, err);
@@ -575,6 +662,150 @@ function createStreamWrapper(
       parentContext,
     );
   };
+}
+
+interface StreamOutcome {
+  fail(error: unknown): void;
+  cancel(): void;
+  close(): void;
+}
+
+// Every way of consuming a stream result (iteration, `consumeStream()`,
+// `toUIMessageStream*`, awaiting `text`) reads through one of these getters.
+const RESULT_STREAM_GETTERS = [
+  'textStream',
+  'fullStream',
+  'stream',
+  'partialOutputStream',
+  'experimental_partialOutputStream',
+  'partialObjectStream',
+  'elementStream',
+] as const;
+
+/**
+ * Shadow the result's stream getters so a read that rejects, or a consumer
+ * that stops reading, ends the span. The getters are redefined on the instance
+ * (not through a Proxy) so the SDK's own methods keep their `this`.
+ */
+function observeResultStreams(result: any, outcome: StreamOutcome): any {
+  if (!result || typeof result !== 'object') return result;
+  let reading = 0;
+  // v7's `textStream` reads `this.stream`; observe only the outermost getter.
+  let insideGetter = false;
+  const observer: StreamObserver = {
+    opened: () => {
+      reading += 1;
+    },
+    closed: () => {
+      reading -= 1;
+      outcome.close();
+    },
+    failed: (error) => {
+      reading -= 1;
+      outcome.fail(error);
+    },
+    // Another branch of the same stream may still be read to its end.
+    cancelled: () => {
+      reading -= 1;
+      if (reading <= 0) outcome.cancel();
+    },
+  };
+  for (const key of RESULT_STREAM_GETTERS) {
+    const getter = findGetter(result, key);
+    if (!getter) continue;
+    try {
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: false,
+        get() {
+          if (insideGetter) return getter.call(result);
+          insideGetter = true;
+          try {
+            return observeStream(getter.call(result), observer);
+          } finally {
+            insideGetter = false;
+          }
+        },
+      });
+    } catch {
+      /* frozen result: the SDK callbacks still end the span */
+    }
+  }
+  return result;
+}
+
+function findGetter(target: object, key: string): (() => unknown) | undefined {
+  for (
+    let proto = Object.getPrototypeOf(target);
+    proto && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto)
+  ) {
+    const descriptor = Object.getOwnPropertyDescriptor(proto, key);
+    if (descriptor) return descriptor.get;
+  }
+  return undefined;
+}
+
+interface StreamObserver {
+  opened(): void;
+  closed(): void;
+  failed(error: unknown): void;
+  cancelled(): void;
+}
+
+/** Forward `source` unchanged through a real ReadableStream that reports how it ended. */
+function observeStream(source: any, observer: StreamObserver): any {
+  if (
+    !source ||
+    typeof source.getReader !== 'function' ||
+    typeof ReadableStream !== 'function'
+  ) {
+    return source;
+  }
+  let reader: any;
+  let settled = false;
+  const settle = (report: () => void) => {
+    if (settled) return;
+    settled = true;
+    report();
+  };
+  const observed: any = new ReadableStream(
+    {
+      async pull(controller) {
+        if (!reader) {
+          reader = source.getReader();
+          observer.opened();
+        }
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            settle(observer.closed);
+            controller.close();
+            return;
+          }
+          controller.enqueue(value);
+        } catch (error) {
+          settle(() => observer.failed(error));
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        if (!reader) {
+          reader = source.getReader();
+          observer.opened();
+        }
+        settle(observer.cancelled);
+        await reader.cancel(reason);
+      },
+    },
+    // No read-ahead: the source is pulled only when the consumer reads.
+    { highWaterMark: 0 },
+  );
+  // AI SDK streams are async iterables through their own iterator; keep it.
+  if (Object.prototype.hasOwnProperty.call(source, Symbol.asyncIterator)) {
+    observed[Symbol.asyncIterator] = source[Symbol.asyncIterator];
+  }
+  return observed;
 }
 
 function createMirroredSpan(primary: Span, secondary: Span): Span {
@@ -780,10 +1011,5 @@ function mergeTelemetry(
 }
 
 function recordSpanError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
 }
