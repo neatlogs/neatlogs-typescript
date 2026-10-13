@@ -35,6 +35,7 @@ import {
   getNeatlogsTracer,
   withNeatlogsSpan,
 } from './core/provider.js';
+import { isAbortError, markCancelled, recordFailure } from './core/span-outcome.js';
 
 const TRACER_NAME = 'neatlogs.mastra';
 const PATCH_FLAG = '_neatlogs_patched';
@@ -356,8 +357,15 @@ function patchRunMethod(run: any, method: 'start' | 'resume', workflowName: stri
         span.setAttribute('output.value', toOutputValue(result));
       }
       return result;
-    });
+    }, workflowFailure);
   };
+}
+
+/** A failed run resolves with `status: 'failed'` instead of throwing. */
+function workflowFailure(result: any): unknown {
+  return result?.status === 'failed'
+    ? (result.error ?? new Error('workflow failed'))
+    : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -508,35 +516,58 @@ function wrapStreamingOutput(output: any, span: Span): any {
   }
 
   let ended = false;
-  const endOnce = (err?: unknown) => {
+  // `keepOutput`: the span already carries what the stream delivered.
+  const endOnce = (err?: unknown, keepOutput = false) => {
     if (ended) return;
     ended = true;
-    if (err) recordError(span, err);
+    if (err) recordError(span, err, keepOutput);
     else span.setStatus({ code: SpanStatusCode.OK });
+    span.end();
+  };
+  const endCancelled = () => {
+    if (ended) return;
+    ended = true;
+    markCancelled(span);
     span.end();
   };
 
   // MastraModelOutput: has awaitable .text (thenable). Tap completion promises.
   if (output.text && typeof output.text.then === 'function') {
+    // Mastra rejects these promises when the stream fails. Keep each outcome:
+    // a rejection is the failure to record, not a missing value.
+    const settled = (value: unknown) =>
+      Promise.resolve(value).then(
+        (resolved) => ({ value: resolved as any, error: undefined as unknown }),
+        (error: unknown) => ({ value: undefined as any, error }),
+      );
     const finalize = async () => {
       try {
         const [text, usage, finishReason] = await Promise.all([
-          Promise.resolve(output.text).catch(() => undefined),
-          Promise.resolve(output.usage).catch(() => undefined),
-          Promise.resolve(output.finishReason).catch(() => undefined),
+          settled(output.text),
+          settled(output.usage),
+          settled(output.finishReason),
         ]);
-        if (typeof text === 'string' && text) {
+        const hasText = typeof text.value === 'string' && text.value !== '';
+        const failure =
+          text.error ??
+          usage.error ??
+          finishReason.error ??
+          output.error ??
+          (normalizeFinishReason(finishReason.value) === 'error'
+            ? new Error('Mastra stream finished with reason "error"')
+            : undefined);
+        if (hasText) {
           span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          span.setAttribute('neatlogs.llm.output_messages.0.content', text);
-          span.setAttribute('output.value', text);
-        } else {
+          span.setAttribute('neatlogs.llm.output_messages.0.content', text.value);
+          span.setAttribute('output.value', text.value);
+        } else if (!failure) {
           span.setAttribute('output.value', safeStringify({
-            finishReason: finishReason ?? 'completed',
+            finishReason: finishReason.value ?? 'completed',
           }));
         }
-        if (usage) recordUsage(span, usage);
-        if (finishReason) span.setAttribute('neatlogs.llm.stop_reason', normalizeFinishReason(finishReason));
-        endOnce();
+        if (usage.value) recordUsage(span, usage.value);
+        if (finishReason.value) span.setAttribute('neatlogs.llm.stop_reason', normalizeFinishReason(finishReason.value));
+        endOnce(failure, hasText);
       } catch (err) {
         endOnce(err);
       }
@@ -557,15 +588,16 @@ function wrapStreamingOutput(output: any, span: Span): any {
     Object.assign(wrapped, output);
     wrapped[Symbol.asyncIterator] = function () {
       const iterator = origIterator();
+      const applyText = (): boolean => {
+        if (!textParts.length) return false;
+        const text = textParts.join('');
+        span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
+        span.setAttribute('neatlogs.llm.output_messages.0.content', text);
+        span.setAttribute('output.value', text);
+        return true;
+      };
       const finish = () => {
-        if (textParts.length) {
-          const text = textParts.join('');
-          span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          span.setAttribute('neatlogs.llm.output_messages.0.content', text);
-          span.setAttribute('output.value', text);
-        } else {
-          span.setAttribute('output.value', safeStringify({ streamCompleted: true }));
-        }
+        if (!applyText()) span.setAttribute('output.value', safeStringify({ streamCompleted: true }));
         endOnce();
       };
       return {
@@ -578,14 +610,15 @@ function wrapStreamingOutput(output: any, span: Span): any {
             else if (chunk?.text) textParts.push(chunk.text);
             else if (chunk?.delta) textParts.push(chunk.delta);
             return r;
-          } catch (err) { endOnce(err); throw err; }
+          } catch (err) { endOnce(err, applyText()); throw err; }
         },
         async return(value?: any): Promise<IteratorResult<any>> {
-          finish();
+          applyText();
+          endCancelled();
           return iterator.return?.(value) ?? { done: true, value: undefined };
         },
         async throw(err?: any): Promise<IteratorResult<any>> {
-          endOnce(err);
+          endOnce(err, applyText());
           return iterator.throw?.(err) ?? { done: true, value: undefined };
         },
       };
@@ -745,6 +778,8 @@ interface ModelStreamCapture {
   toolCalls: any[];
   finishReason?: unknown;
   usage?: unknown;
+  /** Set by an in-stream `error` part: the provider failed without throwing. */
+  error?: { error: unknown };
 }
 
 /**
@@ -787,15 +822,19 @@ function wrapModelStreamingResult(result: any, span: Span): any {
 
   const capture: ModelStreamCapture = { textParts: [], toolCalls: [] };
   let ended = false;
-  const endOnce = (err?: unknown) => {
+  const endOnce = (outcome?: { error: unknown } | 'cancelled') => {
     if (ended) return;
     ended = true;
-    if (err) {
-      recordError(span, err);
-    } else {
-      finalizeModelStreamSpan(span, capture);
-      span.setStatus({ code: SpanStatusCode.OK });
-    }
+    const failure =
+      outcome === 'cancelled'
+        ? undefined
+        : (outcome ?? capture.error ?? reportedStreamFailure(capture));
+    // Apply what streamed first, so a failed or cancelled call keeps it.
+    const hasOutput = capture.textParts.length > 0 || capture.toolCalls.length > 0;
+    if (hasOutput || !failure) finalizeModelStreamSpan(span, capture);
+    if (failure) recordError(span, failure.error, hasOutput);
+    else if (outcome === 'cancelled') markCancelled(span);
+    else span.setStatus({ code: SpanStatusCode.OK });
     span.end();
   };
 
@@ -812,16 +851,16 @@ function wrapModelStreamingResult(result: any, span: Span): any {
         captureModelStreamPart(span, capture, next.value);
         controller.enqueue(next.value);
       } catch (err) {
-        endOnce(err);
+        endOnce({ error: err });
         controller.error(err);
       }
     },
     async cancel(reason) {
       try {
         await withNeatlogsSpan(span, () => sourceReader.cancel(reason));
-        endOnce();
+        endOnce('cancelled');
       } catch (err) {
-        endOnce(err);
+        endOnce({ error: err });
         throw err;
       }
     },
@@ -860,6 +899,7 @@ function captureModelStreamPart(
     capture.finishReason = part.finishReason;
     capture.usage = part.usage;
   }
+  if (type === 'error' && !capture.error) capture.error = { error: part.error };
   if (part?.usage) capture.usage = part.usage;
   if (part?.finishReason !== undefined) capture.finishReason = part.finishReason;
 }
@@ -887,6 +927,13 @@ function finalizeModelStreamSpan(span: Span, capture: ModelStreamCapture): void 
     ...(capture.toolCalls.length ? { toolCalls: capture.toolCalls } : {}),
     finishReason: capture.finishReason ?? 'completed',
   }));
+}
+
+/** A stream that ends with finish reason `error` failed even with no `error` part. */
+function reportedStreamFailure(capture: ModelStreamCapture): { error: unknown } | undefined {
+  return normalizeFinishReason(capture.finishReason) === 'error'
+    ? { error: new Error('Model stream finished with reason "error"') }
+    : undefined;
 }
 
 function normalizeFinishReason(fr: any): string {
@@ -1032,7 +1079,13 @@ function recordUsage(span: Span, usage: any): void {
  * Open a span as the ACTIVE span for the duration of `fn`, so any spans created
  * inside `fn` (model calls, tool executions, workflow steps) nest under it.
  */
-function withActiveSpan<T>(name: string, attrs: Record<string, any>, fn: (span: Span) => Promise<T>): Promise<T> {
+function withActiveSpan<T>(
+  name: string,
+  attrs: Record<string, any>,
+  fn: (span: Span) => Promise<T>,
+  // For calls that report failure in their result instead of throwing.
+  failureOf?: (result: T) => unknown,
+): Promise<T> {
   const tracer = getNeatlogsTracer(TRACER_NAME);
   const span = tracer.startSpan(
     name,
@@ -1042,7 +1095,9 @@ function withActiveSpan<T>(name: string, attrs: Record<string, any>, fn: (span: 
   return withNeatlogsSpan(span, async () => {
     try {
       const result = await fn(span);
-      span.setStatus({ code: SpanStatusCode.OK });
+      const failure = failureOf?.(result);
+      if (failure) recordError(span, failure, true);
+      else span.setStatus({ code: SpanStatusCode.OK });
       return result;
     } catch (err) {
       recordError(span, err);
@@ -1119,16 +1174,14 @@ function toOutputValue(value: unknown): string {
   return safeStringify(value === undefined ? { completed: true } : value);
 }
 
-function recordError(span: Span, err: unknown): void {
-  span.setAttribute('output.value', safeStringify({
-    error: err instanceof Error
-      ? { name: err.name, message: err.message }
-      : { message: String(err) },
-  }));
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+function recordError(span: Span, err: unknown, keepOutput = false): void {
+  if (!keepOutput && !isAbortError(err)) {
+    const message = (err as { message?: unknown } | null)?.message;
+    span.setAttribute('output.value', safeStringify({
+      error: err instanceof Error
+        ? { name: err.name, message: err.message }
+        : { message: typeof message === 'string' ? message : String(err) },
+    }));
   }
+  recordFailure(span, err);
 }
