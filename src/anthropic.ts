@@ -22,6 +22,7 @@ import {
 } from './constants.js';
 import { getProviderTracer } from './core/auto-root.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
+import { markCancelled, recordFailure } from './core/span-outcome.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -187,7 +188,13 @@ function tracedMessagesStream(original: (...args: any[]) => any) {
     setTools(span, opts?.tools);
     setInvocationParams(span, opts);
 
-    const messageStream = withNeatlogsSpan(span, () => original(opts, ...rest));
+    let messageStream: any;
+    try {
+      messageStream = withNeatlogsSpan(span, () => original(opts, ...rest));
+    } catch (err) {
+      recordError(span, err);
+      throw err;
+    }
 
     return wrapMessageStream(messageStream, span);
   };
@@ -199,6 +206,7 @@ function tracedMessagesStream(original: (...args: any[]) => any) {
 
 function wrapStreamIterable(stream: any, span: Span): any {
   const accumulated = newAnthropicStreamAccumulator();
+  let cancellationRequested = false;
   const originalAsyncIterator = stream[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
@@ -206,6 +214,11 @@ function wrapStreamIterable(stream: any, span: Span): any {
     span.end();
     return stream;
   }
+
+  // The SDK ends the iterator quietly when the request is aborted. Without a
+  // stop reason that is a cancelled reply, not a completed one.
+  const abortedBySdk = () =>
+    !accumulated.stopReason && stream.controller?.signal?.aborted === true;
 
   const wrapped = Object.create(Object.getPrototypeOf(stream));
   Object.assign(wrapped, stream);
@@ -217,26 +230,32 @@ function wrapStreamIterable(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamEvents(span, accumulated);
+            finalizeStreamEvents(span, accumulated, cancellationRequested || abortedBySdk());
             return result;
           }
           addStreamEvent(span, accumulated, result.value);
           return result;
         } catch (err) {
-          recordError(span, err);
+          failStreamEvents(span, accumulated, err);
           throw err;
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
+        cancellationRequested = true;
         markStreamIncomplete(accumulated, 'consumer_cancelled');
         span.setAttribute('neatlogs.stream.cancelled', true);
-        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-        if (result.done) finalizeStreamEvents(span, accumulated);
-        else addStreamEvent(span, accumulated, result.value);
-        return result;
+        try {
+          const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+          if (result.done) finalizeStreamEvents(span, accumulated, true);
+          else addStreamEvent(span, accumulated, result.value);
+          return result;
+        } catch (err) {
+          failStreamEvents(span, accumulated, err);
+          throw err;
+        }
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
-        recordError(span, err);
+        failStreamEvents(span, accumulated, err);
         return iterator.throw?.(err) ?? { done: true, value: undefined };
       },
     };
@@ -257,19 +276,31 @@ function wrapStreamIterable(stream: any, span: Span): any {
 // ---------------------------------------------------------------------------
 
 function wrapMessageStream(messageStream: any, span: Span): any {
+  let finalized = false;
   const origOn = messageStream.on?.bind(messageStream);
   if (origOn) {
-    origOn('end', () => {
-      const finalMsg = messageStream._finalMessage ?? messageStream.currentMessage;
-      if (finalMsg) {
-        finalizeMessageResponse(span, finalMsg);
-      } else {
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.end();
-      }
-    });
+    // The SDK emits 'error' or 'abort' first and always 'end' last. Abort is
+    // read from `aborted` in 'end' rather than through its own listener: a
+    // listener there would silence the SDK's unhandled-rejection warning.
     origOn('error', (err: any) => {
-      if (span.isRecording()) recordError(span, err);
+      if (finalized) return;
+      finalized = true;
+      applyMessageResponse(span, messageStream.currentMessage);
+      recordError(span, err);
+    });
+    origOn('end', () => {
+      if (finalized) return;
+      finalized = true;
+      // The in-progress snapshot is cleared when the reply completes; the
+      // finished message is then the last entry of receivedMessages.
+      const message =
+        messageStream.receivedMessages?.at?.(-1) ??
+        messageStream._finalMessage ??
+        messageStream.currentMessage;
+      applyMessageResponse(span, message);
+      if (messageStream.aborted) markCancelled(span);
+      else span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
     });
   }
 
@@ -277,7 +308,8 @@ function wrapMessageStream(messageStream: any, span: Span): any {
     const origFinal = messageStream.finalMessage.bind(messageStream);
     messageStream.finalMessage = async function () {
       const result = await origFinal();
-      if (span.isRecording()) {
+      if (!finalized && span.isRecording()) {
+        finalized = true;
         finalizeMessageResponse(span, result);
       }
       return result;
@@ -308,6 +340,7 @@ interface AnthropicStreamAccumulator {
   droppedBytes: number;
   droppedItems: number;
   incompleteReasons: Set<string>;
+  finalized: boolean;
 }
 
 function newAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
@@ -328,6 +361,7 @@ function newAnthropicStreamAccumulator(): AnthropicStreamAccumulator {
     droppedBytes: 0,
     droppedItems: 0,
     incompleteReasons: new Set(),
+    finalized: false,
   };
 }
 
@@ -407,7 +441,32 @@ function addStreamEvent(
   }
 }
 
-function finalizeStreamEvents(span: Span, accumulated: AnthropicStreamAccumulator): void {
+function finalizeStreamEvents(
+  span: Span,
+  accumulated: AnthropicStreamAccumulator,
+  cancelled = false,
+): void {
+  if (accumulated.finalized) return;
+  accumulated.finalized = true;
+  applyStreamEvents(span, accumulated);
+  if (cancelled) markCancelled(span);
+  else span.setStatus({ code: SpanStatusCode.OK });
+  span.end();
+}
+
+/** A broken stream keeps what it had already delivered. */
+function failStreamEvents(
+  span: Span,
+  accumulated: AnthropicStreamAccumulator,
+  err: unknown,
+): void {
+  if (accumulated.finalized) return;
+  accumulated.finalized = true;
+  applyStreamEvents(span, accumulated);
+  recordError(span, err);
+}
+
+function applyStreamEvents(span: Span, accumulated: AnthropicStreamAccumulator): void {
   if (accumulated.currentToolName) {
     markStreamIncomplete(accumulated, 'unterminated_tool_call');
     if (accumulated.toolCalls.length < DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
@@ -453,9 +512,6 @@ function finalizeStreamEvents(span: Span, accumulated: AnthropicStreamAccumulato
   if (accumulated.stopReason) span.setAttribute('neatlogs.llm.stop_reason', accumulated.stopReason);
   setUsageAttrs(span, accumulated.usage);
   applyStreamDiagnostics(span, accumulated);
-
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +519,12 @@ function finalizeStreamEvents(span: Span, accumulated: AnthropicStreamAccumulato
 // ---------------------------------------------------------------------------
 
 function finalizeMessageResponse(span: Span, response: any): void {
+  applyMessageResponse(span, response);
+  span.setStatus({ code: SpanStatusCode.OK });
+  span.end();
+}
+
+function applyMessageResponse(span: Span, response: any): void {
   const content: any[] = response?.content ?? [];
   const captured = captureMedia(
     span,
@@ -504,9 +566,6 @@ function finalizeMessageResponse(span: Span, response: any): void {
   setUsageAttrs(span, response?.usage);
   if (response?.model) span.setAttribute('neatlogs.llm.model_name', response.model);
   if (response?.stop_reason) span.setAttribute('neatlogs.llm.stop_reason', response.stop_reason);
-
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -652,11 +711,6 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
   span.end();
 }
