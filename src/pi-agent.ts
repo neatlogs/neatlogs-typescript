@@ -46,6 +46,7 @@ import {
   type Context,
 } from '@opentelemetry/api';
 import { getNeatlogsTracer, getNeatlogsParentContext } from './core/provider.js';
+import { markCancelled, recordReportedFailure } from './core/span-outcome.js';
 
 const TRACER_NAME = 'neatlogs.pi-agent';
 const PATCH_FLAG = '_neatlogs_patched';
@@ -800,11 +801,15 @@ function handleEvent(
     }
 
     case 'agent_end': {
+      const err = state.runError ?? terminalErrorFrom(event.messages);
+      // The caller stopped the run: what was still open was cancelled, not broken.
+      const aborted = err?.stopReason === 'aborted';
       // Close any tool spans that never received an end event, then the LLM span
       // (an abort can end the run mid-stream), the turn span, and the run span.
       for (const ts of state.toolSpans.values()) {
         try {
-          ts.setStatus({ code: SpanStatusCode.ERROR, message: 'run ended before tool completed' });
+          if (aborted) markCancelled(ts);
+          else ts.setStatus({ code: SpanStatusCode.ERROR, message: 'run ended before tool completed' });
           ts.end();
         } catch {
           /* ignore */
@@ -815,7 +820,8 @@ function handleEvent(
       if (state.llm) {
         try {
           state.llm.span.setAttribute('output.value', '[incomplete] run ended mid-stream');
-          state.llm.span.setStatus({ code: SpanStatusCode.ERROR, message: 'run ended mid-stream' });
+          if (aborted) markCancelled(state.llm.span);
+          else state.llm.span.setStatus({ code: SpanStatusCode.ERROR, message: 'run ended mid-stream' });
           state.llm.span.end();
         } catch {
           /* ignore */
@@ -844,7 +850,6 @@ function handleEvent(
         // Output = final assistant text. On an aborted/errored run there may be
         // none, so fall back to the terminal reason rather than leaving it blank.
         const finalText = lastAssistantText(event.messages);
-        const err = state.runError ?? terminalErrorFrom(event.messages);
         if (finalText) {
           state.agentSpan.setAttribute('output.value', finalText);
         } else if (err) {
@@ -854,7 +859,8 @@ function handleEvent(
         if (err) {
           state.agentSpan.setAttribute('neatlogs.agent.stop_reason', err.stopReason);
           if (err.message) state.agentSpan.setAttribute('neatlogs.error.message', err.message);
-          state.agentSpan.setStatus({ code: SpanStatusCode.ERROR, message: err.message ?? err.stopReason });
+          if (aborted) markCancelled(state.agentSpan);
+          else recordReportedFailure(state.agentSpan, 'error', err.message ?? err.stopReason);
         } else {
           state.agentSpan.setStatus({ code: SpanStatusCode.OK });
         }
@@ -931,11 +937,17 @@ function terminalSummary(msg: PiAssistantMessage | undefined): string {
   return `[${reason}]${msg?.errorMessage ? ` ${msg.errorMessage}` : ''}`;
 }
 
-/** `aborted` / `error` stop reasons must not report OK. */
+/**
+ * `aborted` / `error` stop reasons must not report OK. An abort is the caller
+ * stopping the run, so it is cancelled rather than failed; `error` is a
+ * provider failure that Pi reports on the message instead of throwing.
+ */
 function applyStopReasonStatus(span: Span, msg: PiAssistantMessage | undefined): void {
   const reason = msg?.stopReason;
-  if (reason === 'aborted' || reason === 'error') {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: msg?.errorMessage ?? reason });
+  if (reason === 'aborted') {
+    markCancelled(span);
+  } else if (reason === 'error') {
+    recordReportedFailure(span, 'error', msg?.errorMessage ?? reason);
   } else {
     span.setStatus({ code: SpanStatusCode.OK });
   }
