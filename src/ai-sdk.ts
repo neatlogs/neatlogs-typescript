@@ -544,6 +544,7 @@ function createStreamWrapper(
           const merged = mergeTelemetry(opts, telemetryKey);
           const userOnFinish = opts?.onFinish;
           const userOnError = opts?.onError;
+          const userOnAbort = opts?.onAbort;
           const wrappedOpts = {
             ...merged,
             onFinish: async (event: any) => {
@@ -561,6 +562,18 @@ function createStreamWrapper(
               endOnce();
               if (typeof userOnError === 'function') {
                 return userOnError(event);
+              }
+            },
+            // An aborted stream (abortSignal) never calls onFinish or onError,
+            // so without this the root span stays open and is never exported.
+            onAbort: (event: any) => {
+              try {
+                recordSpanError(span, new Error('stream aborted'));
+              } finally {
+                endOnce();
+              }
+              if (typeof userOnAbort === 'function') {
+                return userOnAbort(event);
               }
             },
           };
