@@ -30,6 +30,11 @@ import {
   utf8ByteLength,
 } from './constants.js';
 import { getProviderTracer } from './core/auto-root.js';
+import {
+  markCancelled,
+  recordFailure,
+  recordReportedFailure,
+} from './core/span-outcome.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import {
   getNeatlogsTracer,
@@ -426,7 +431,10 @@ function wrapStream(stream: any, span: Span): any {
     droppedBytes: 0,
     droppedItems: 0,
     incompleteReasons: new Set(),
+    promptFeedback: undefined,
+    finalized: false,
   };
+  let cancellationRequested = false;
   const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
@@ -444,31 +452,32 @@ function wrapStream(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamChunks(span, accumulated);
+            finalizeStreamChunks(span, accumulated, cancellationRequested);
             return result;
           }
           addStreamChunk(span, accumulated, result.value);
           return result;
         } catch (err) {
-          recordError(span, err);
+          failStreamChunks(span, accumulated, err);
           throw err;
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
+        cancellationRequested = true;
         markStreamIncomplete(accumulated, 'consumer_cancelled');
         span.setAttribute('neatlogs.stream.cancelled', true);
         try {
           const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-          if (result.done) finalizeStreamChunks(span, accumulated);
+          if (result.done) finalizeStreamChunks(span, accumulated, true);
           else addStreamChunk(span, accumulated, result.value);
           return result;
         } catch (err) {
-          recordError(span, err);
+          failStreamChunks(span, accumulated, err);
           throw err;
         }
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
-        recordError(span, err);
+        failStreamChunks(span, accumulated, err);
         return iterator.throw?.(err) ?? { done: true, value: undefined };
       },
     };
@@ -493,6 +502,8 @@ interface StreamAccumulator {
   droppedBytes: number;
   droppedItems: number;
   incompleteReasons: Set<string>;
+  promptFeedback: any;
+  finalized: boolean;
 }
 
 function candidateBucket(accumulated: StreamAccumulator, index: number): CandidateAccumulator {
@@ -565,9 +576,48 @@ function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any):
     }
   }
   if (chunk?.usageMetadata) accumulated.usage = chunk.usageMetadata;
+  if (chunk?.promptFeedback?.blockReason) accumulated.promptFeedback = chunk.promptFeedback;
 }
 
-function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void {
+function finalizeStreamChunks(
+  span: Span,
+  accumulated: StreamAccumulator,
+  cancelled = false,
+): void {
+  if (accumulated.finalized) return;
+  accumulated.finalized = true;
+  applyStreamChunks(span, accumulated);
+  const blocked = accumulated.candidates.size === 0 ? accumulated.promptFeedback : undefined;
+  if (blocked?.blockReason) recordBlockedPrompt(span, blocked);
+  else if (cancelled) markCancelled(span);
+  else span.setStatus({ code: SpanStatusCode.OK });
+  span.end();
+}
+
+/** A broken stream keeps what it had already delivered. */
+function failStreamChunks(span: Span, accumulated: StreamAccumulator, err: unknown): void {
+  if (accumulated.finalized) return;
+  accumulated.finalized = true;
+  applyStreamChunks(span, accumulated);
+  recordError(span, err);
+}
+
+/**
+ * The API refused the prompt: no candidates, only `promptFeedback.blockReason`.
+ * Nothing is thrown, so without this the call would end OK with no output.
+ */
+function recordBlockedPrompt(span: Span, promptFeedback: any): void {
+  const reason = String(promptFeedback.blockReason);
+  const detail = promptFeedback.blockReasonMessage;
+  span.setAttribute('neatlogs.llm.finish_reason', reason);
+  recordReportedFailure(
+    span,
+    'BlockedPrompt',
+    detail ? `Prompt blocked: ${reason} (${detail})` : `Prompt blocked: ${reason}`,
+  );
+}
+
+function applyStreamChunks(span: Span, accumulated: StreamAccumulator): void {
   const indexes = [...accumulated.candidates.keys()].sort((a, b) => a - b);
   let flattenedToolIndex = 0;
   for (const candidateIndex of indexes) {
@@ -601,9 +651,6 @@ function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void 
   }
   setUsage(span, accumulated.usage);
   applyStreamDiagnostics(span, accumulated);
-
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -667,7 +714,11 @@ function finalizeResponse(span: Span, response: any): void {
 
   setUsage(span, response?.usageMetadata);
 
-  span.setStatus({ code: SpanStatusCode.OK });
+  if (candidates.length === 0 && response?.promptFeedback?.blockReason) {
+    recordBlockedPrompt(span, response.promptFeedback);
+  } else {
+    span.setStatus({ code: SpanStatusCode.OK });
+  }
   span.end();
 }
 
@@ -758,11 +809,6 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
   span.end();
 }
