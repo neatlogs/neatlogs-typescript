@@ -54,7 +54,13 @@ class NeatlogsTraceProcessor {
   }
 
   onTraceEnd(traceData: any): void {
-    const key = String(traceData?.traceId ?? traceData?.trace_id ?? '');
+    this._endTrace(String(traceData?.traceId ?? traceData?.trace_id ?? ''));
+  }
+
+  // Ends the trace's root span once. The SDK never calls onTraceEnd when
+  // run() throws, so a failed run ends it from its closing `task` span; the
+  // later onTraceEnd, if any, finds nothing left to end.
+  private _endTrace(key: string): void {
     const span = this._spans.get(key);
     if (!span) return;
 
@@ -229,7 +235,7 @@ class NeatlogsTraceProcessor {
       }
     }
 
-    const error = data?.error ?? span?.error;
+    const error = reportedError(data?.error ?? span?.error);
     if (error) {
       // The SDK reports `{ message, data }`, not an Error.
       recordFailure(otelSpan, error);
@@ -255,6 +261,10 @@ class NeatlogsTraceProcessor {
     this._spans.delete(spanId);
     this._startTimes.delete(spanId);
     this._toolScoped.delete(spanId);
+
+    if (error && spanType === 'task') {
+      this._endTrace(String(span?.traceId ?? span?.trace_id ?? ''));
+    }
   }
 
   shutdown(): void {
@@ -274,6 +284,13 @@ class NeatlogsTraceProcessor {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+// The SDK reports a failure as `{ message: "Error in agent run", data: { error: "Error: model down" } }`;
+// the cause is in `data.error`, so use it when it is there.
+function reportedError(error: any): any {
+  const cause = error?.data?.error;
+  return typeof cause === 'string' && cause ? { ...error, message: cause } : error;
+}
 
 function isToolSpanType(spanType: string): boolean {
   return spanType === 'function' || spanType === 'tool' || spanType === 'tool_call';
