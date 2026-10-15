@@ -201,7 +201,7 @@ describe('dataset capture through real SDK providers', () => {
         await handle!.abort();
         return 'finished normally';
       },
-    ), { ...options, onRegistered: (registered) => { handle = registered; } }))).rejects.toThrow('aborted before completion');
+    ), { ...options, onRegistered: (registered) => { handle = registered; } }))).rejects.toThrow('Dataset capture was aborted.');
     expect(http.requests.find((request) => request.url.endsWith('/abort'))?.body).toEqual({ reason: 'cancelled' });
     expect(http.requests.some((request) => request.url.endsWith('/complete'))).toBe(false);
     expect(exporter.spans.some((span) => span.name === 'agent-aborted')).toBe(true);
