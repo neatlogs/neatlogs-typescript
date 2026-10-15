@@ -102,7 +102,14 @@ export function captureSpanEnded(span: ReadableSpan): void {
   if (!record) return;
   record.ended = true;
   record.excluded = isHttpSpan(span) || span.instrumentationLibrary.name === 'next.js';
-  if (!record.excluded && scope && (span.droppedAttributesCount > 0 || span.droppedEventsCount > 0 || span.droppedLinksCount > 0)) scope.exportFailed = true;
+  if (!record.excluded && scope && spanEvidenceIncomplete(span)) scope.exportFailed = true;
+}
+
+function spanEvidenceIncomplete(span: ReadableSpan): boolean {
+  return span.droppedAttributesCount > 0 || span.droppedEventsCount > 0 || span.droppedLinksCount > 0 ||
+    span.attributes['neatlogs.capture.truncated'] === true ||
+    span.attributes['neatlogs.capture_fidelity'] === 'truncated' ||
+    span.attributes['neatlogs.stream.incomplete'] === true;
 }
 
 export function captureExportSettled(
@@ -129,7 +136,7 @@ export function captureExportSettled(
       (/\.media\.\d+\.state$/.test(name) && (value === 'failed' || value === 'pending-upload')) ||
       (typeof value === 'string' && value.includes('[REDACTED_MEDIA_STRUCTURE]')),
     );
-    record.delivered = succeeded && exported.has(id) && !incompleteMedia;
+    record.delivered = succeeded && preparedSpan !== undefined && !spanEvidenceIncomplete(preparedSpan) && !incompleteMedia;
     if (!record.delivered) scope.exportFailed = true;
   }
 }

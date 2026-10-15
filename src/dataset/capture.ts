@@ -157,7 +157,8 @@ async function capture<T>(destination: DatasetCaptureDestination, run: () => T |
       try { await handle._abort('incomplete_execution', new DatasetCaptureError('Capture registration callback failed before agent execution.')); } catch { /* The original callback error takes precedence. */ }
       throw error;
     }
-    if (handle.state !== 'recording') {
+    const registeredState = handle.state;
+    if (registeredState !== 'recording') {
       const error = new DatasetCaptureError('Dataset capture was aborted before agent execution.');
       associate(error, handle);
       throw error;
