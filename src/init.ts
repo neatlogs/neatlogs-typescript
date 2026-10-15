@@ -22,7 +22,7 @@ import {
   type SpanExporter,
 } from "@opentelemetry/sdk-trace-base";
 import { ExportResultCode } from "@opentelemetry/core";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { OTLPTraceExporter } from "./core/otlp-trace-exporter.js";
 import { CompressionAlgorithm } from "@opentelemetry/otlp-exporter-base";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
@@ -34,6 +34,7 @@ import {
 import { addVerificationMarkerResourceAttribute } from "./core/resource.js";
 import { spanLimitsForCaptureEverything } from "./constants.js";
 import { getRegisteredClients } from "./core/client-registry.js";
+import { registerCaptureProvider } from './dataset/capture-scope.js';
 import { FilteringExporter } from "./core/filtering-exporter.js";
 import { capturePreparedSpans, clearDoctorCapture } from "./core/doctor-capture.js";
 import { ByteLimitedSpanExporter } from "./core/byte-limited-exporter.js";
@@ -668,6 +669,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   // 13. Store privately. Neatlogs never registers an OTel provider globally.
   _tracerProvider = provider;
   _setNeatlogsProvider(provider);
+  if (!disableExportResolved && _ownsTracerProvider) registerCaptureProvider(provider, _spanProcessor, sampleRate, flush);
 
   if (options.debug) {
     logger.debug("Neatlogs tracer provider initialized");
