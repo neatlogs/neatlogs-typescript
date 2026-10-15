@@ -33,6 +33,10 @@ export {
   getDeliveryDiagnostics,
 } from "./init.js";
 export { Client, type ClientOptions } from "./core/client.js";
+export { datasets, DatasetCaptureHandle, DatasetCaptureError, getDatasetCaptureHandle } from './dataset/capture.js';
+export type { DatasetCaptureOptions, DatasetCaptureResult, DatasetCaptureWaitOptions, DatasetCaptureStatusOptions, DatasetCaptureDestination, DatasetCaptureState, DatasetCaptureStatus, DatasetCaptureFailure } from './dataset/capture.js';
+export type { DatasetApiOptions, DatasetJson } from './dataset/api.js';
+export type { CreateDatasetInput, DatasetCaseInput, DatasetMutationOptions, DatasetVersion, DatasetOutcomeChange } from './dataset/mutations.js';
 export {
   NeatlogsConfigurationError,
   type NeatlogsConfigurationErrorCode,

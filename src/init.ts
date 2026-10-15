@@ -34,6 +34,7 @@ import {
 import { addVerificationMarkerResourceAttribute } from "./core/resource.js";
 import { spanLimitsForCaptureEverything } from "./constants.js";
 import { getRegisteredClients } from "./core/client-registry.js";
+import { registerCaptureProvider } from './dataset/capture-scope.js';
 import { FilteringExporter } from "./core/filtering-exporter.js";
 import { capturePreparedSpans, clearDoctorCapture } from "./core/doctor-capture.js";
 import { ByteLimitedSpanExporter } from "./core/byte-limited-exporter.js";
@@ -668,6 +669,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   // 13. Store privately. Neatlogs never registers an OTel provider globally.
   _tracerProvider = provider;
   _setNeatlogsProvider(provider);
+  if (!disableExportResolved && _ownsTracerProvider) registerCaptureProvider(provider, sampleRate, flush);
 
   if (options.debug) {
     logger.debug("Neatlogs tracer provider initialized");
