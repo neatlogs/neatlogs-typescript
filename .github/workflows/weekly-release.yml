@@ -7,20 +7,60 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: weekly-npm-release-${{ github.repository }}
   cancel-in-progress: false
 
+# plan runs daily without secrets. Only when a release is due does release wait
+# for approval in the `release` environment (main only, required reviewers),
+# which holds RELEASE_APP_PRIVATE_KEY. publish then waits in the `npm`
+# environment, the only identity npm's trusted publisher accepts.
 jobs:
-  release:
+  plan:
+    name: Decide whether a release is due
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     outputs:
       action: ${{ steps.plan.outputs.action }}
       version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Plan without changing the tree
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/weekly-release.mjs > "$RUNNER_TEMP/weekly-release-plan.json"
+          cat "$RUNNER_TEMP/weekly-release-plan.json"
+          action=$(jq -r .action "$RUNNER_TEMP/weekly-release-plan.json")
+          version=$(jq -r .version "$RUNNER_TEMP/weekly-release-plan.json")
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$action" == publish ]]; then
+            echo "Release due: ${GITHUB_REPOSITORY} ${version}. Approve the \`release\` deployment, then \`npm\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    name: Tag the approved release
+    needs: plan
+    if: needs.plan.outputs.action == 'publish'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    outputs:
+      action: ${{ steps.plan.outputs.action }}
+      version: ${{ steps.plan.outputs.version }}
+      package_name: ${{ steps.pack.outputs.package_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,15 +80,24 @@ jobs:
       - name: Use npm with trusted publishing support
         run: npm install --global npm@11
 
-      - name: Decide whether a release is due
+      - name: Apply the approved plan
         id: plan
         shell: bash
+        env:
+          APPROVED_ACTION: ${{ needs.plan.outputs.action }}
+          APPROVED_VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
           node scripts/weekly-release.mjs --apply > "$RUNNER_TEMP/weekly-release-plan.json"
           cat "$RUNNER_TEMP/weekly-release-plan.json"
-          echo "action=$(jq -r .action "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
-          echo "version=$(jq -r .version "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
+          action=$(jq -r .action "$RUNNER_TEMP/weekly-release-plan.json")
+          version=$(jq -r .version "$RUNNER_TEMP/weekly-release-plan.json")
+          if [[ "$action" != "$APPROVED_ACTION" || "$version" != "$APPROVED_VERSION" ]]; then
+            echo "::error::The plan changed after approval (approved ${APPROVED_ACTION} ${APPROVED_VERSION}, now ${action} ${version}); rerun the workflow" >&2
+            exit 1
+          fi
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "bump=$(jq -r '.bump // false' "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
           echo "commit=$(jq -r '.commit // false' "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
           echo "retry_tag=$(jq -r '.retry_tag // empty' "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
@@ -60,7 +109,6 @@ jobs:
         run: git checkout --detach "$RETRY_TAG"
 
       - name: Build and validate the exact package to publish
-        if: steps.plan.outputs.action == 'publish'
         shell: bash
         run: |
           set -euo pipefail
@@ -94,7 +142,6 @@ jobs:
           esac
 
       - name: Verify release App configuration
-        if: steps.plan.outputs.action == 'publish'
         shell: bash
         env:
           RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
@@ -104,7 +151,6 @@ jobs:
           test -n "$RELEASE_APP_PRIVATE_KEY" || { echo 'RELEASE_APP_PRIVATE_KEY secret is missing' >&2; exit 1; }
 
       - name: Create a repository-scoped release token
-        if: steps.plan.outputs.action == 'publish'
         id: release-token
         uses: actions/create-github-app-token@v2
         with:
@@ -113,7 +159,6 @@ jobs:
           permission-contents: write
 
       - name: Commit synchronized version and tag the release
-        if: steps.plan.outputs.action == 'publish'
         shell: bash
         env:
           RELEASE_TOKEN: ${{ steps.release-token.outputs.token }}
@@ -150,22 +195,70 @@ jobs:
           fi
           git push origin "refs/tags/${tag}"
 
+      - name: Pack the tagged source tree
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination "$RUNNER_TEMP/npm-package"
+          git diff --exit-code
+          echo "package_name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the packed tarball to the publish job
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/npm-package/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to npm
+    needs: release
+    if: needs.release.outputs.action == 'publish'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/${{ needs.release.outputs.package_name }}/v/${{ needs.release.outputs.version }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+
+      - name: Use npm with trusted publishing support
+        run: npm install --global npm@11
+
+      - name: Download the tested tarball
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: npm-package
+          path: npm-package
+
       - name: Publish through npm trusted publishing
-        if: steps.plan.outputs.action == 'publish'
         # A version commit created inside this run changes HEAD after the
         # workflow's GITHUB_SHA was set. Avoid an incorrect source attestation.
         env:
           NPM_CONFIG_PROVENANCE: 'false'
-        run: npm publish --access public
-
-      - name: Verify the published version
-        if: steps.plan.outputs.action == 'publish'
         shell: bash
-        env:
-          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
         run: |
           set -euo pipefail
-          package_name=$(node -p "require('./package.json').name")
+          tarballs=(npm-package/*.tgz)
+          test "${#tarballs[@]}" -eq 1 && test -f "${tarballs[0]}"
+          npm publish "${tarballs[0]}" --access public
+
+      - name: Verify the published version
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ needs.release.outputs.package_name }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
           deadline=$((SECONDS + 600))
           attempt=0
           while :; do
@@ -173,25 +266,25 @@ jobs:
             # npm publish can return while the public registry is still
             # processing the package. Revalidate online until it exposes the
             # exact version, without trusting a cached response.
-            published=$(npm view "${package_name}@${RELEASE_VERSION}" version \
+            published=$(npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version \
               --registry=https://registry.npmjs.org/ --prefer-online \
               --fetch-retries=0 --fetch-timeout=15000 \
               --cache "$RUNNER_TEMP/npm-release-verify-cache" 2>/dev/null || true)
             if [[ "$published" == "$RELEASE_VERSION" ]]; then
-              echo "Published ${package_name}@${RELEASE_VERSION}"
+              echo "Published ${PACKAGE_NAME}@${RELEASE_VERSION}"
               exit 0
             fi
             if (( SECONDS >= deadline )); then break; fi
-            echo "npm has not confirmed ${package_name}@${RELEASE_VERSION} (check ${attempt}); retrying in 15 seconds"
+            echo "npm has not confirmed ${PACKAGE_NAME}@${RELEASE_VERSION} (check ${attempt}); retrying in 15 seconds"
             sleep 15
           done
-          echo "::error::npm publish succeeded, but the registry did not confirm exact version ${package_name}@${RELEASE_VERSION} within 10 minutes; inspect the package before retrying" >&2
+          echo "::error::npm publish succeeded, but the registry did not confirm exact version ${PACKAGE_NAME}@${RELEASE_VERSION} within 10 minutes; inspect the package before retrying" >&2
           exit 1
 
   notify:
     name: Notify Slack after verified npm publication
-    needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.action == 'publish'
+    needs: [release, publish]
+    if: needs.publish.result == 'success'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
