@@ -1,3 +1,4 @@
+import { registerCaptureProvider, useCaptureProvider } from '../dataset/capture-scope.js';
 import { spanLimitsForCaptureEverything } from '../constants.js';
 import {
   INVALID_SPAN_CONTEXT,
@@ -190,6 +191,7 @@ export class Client {
         root: new TraceIdRatioBasedSampler(sampleRate),
       }),
     });
+    registerCaptureProvider(this.tracerProvider, sampleRate, () => this.flush());
     this.spanProcessor = new NeatlogsSpanProcessor({
       debug: options.debug ?? false,
       mask: options.mask,
@@ -309,6 +311,7 @@ export class Client {
   }
 
   activate<T>(fn: () => T): T {
+    useCaptureProvider(this.tracerProvider);
     if (!this.isRunning()) throw new Error("Client is closing or closed");
     return runWithClient(this, () => runWithFreshNeatlogsContext(fn));
   }
