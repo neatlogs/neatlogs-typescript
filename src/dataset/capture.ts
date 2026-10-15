@@ -117,14 +117,14 @@ export class DatasetCaptureHandle {
   /** Stop dataset publication without cancelling the caller's agent or trace ingestion. */
   async abort(): Promise<void> {
     try {
-      await this._abort('incomplete_execution', new DatasetCaptureError('Dataset capture was aborted.'));
+      await this._abort('cancelled', new DatasetCaptureError('Dataset capture was aborted.'));
     } catch (error) {
       associate(error, this);
       throw error;
     }
   }
   /** @internal Aborts metadata capture without interrupting normal trace ingestion. */
-  async _abort(reason: 'export_failed' | 'incomplete_execution', error: DatasetCaptureError): Promise<void> {
+  async _abort(reason: 'export_failed' | 'incomplete_execution' | 'cancelled', error: DatasetCaptureError): Promise<void> {
     this.failure = error;
     const receipt = parseReceipt(await this.#api.request('POST', `/dataset-capture-jobs/${this.captureId}/abort`, { reason }, this.abortKey));
     if (receipt.captureId !== this.captureId || receipt.datasetId !== this.datasetId) throw new DatasetCaptureError('Abort belongs to a different dataset capture.');
@@ -144,9 +144,30 @@ async function capture<T>(destination: DatasetCaptureDestination, run: () => T |
   if (typeof run !== 'function') throw new DatasetCaptureError('Dataset capture requires an execution callback.');
   const flushTimeout = positive(options.flushTimeoutMillis ?? 30_000, 'flushTimeoutMillis');
   const api = new DatasetApi(options);
-  const receipt = parseReceipt(await api.request('POST', '/dataset-capture-jobs', { destination: validateDestination(destination) }, uuid(options.idempotencyKey ?? randomUUID(), 'idempotencyKey')));
-  if (receipt.state !== 'recording') throw new DatasetCaptureError('The registered capture is no longer recording; execution was not started.');
+  const registration = await api.requestSerializedWithMetadata(
+    'POST',
+    '/dataset-capture-jobs',
+    serializeCaptureBody({ destination: validateDestination(destination) }),
+    uuid(options.idempotencyKey ?? randomUUID(), 'idempotencyKey'),
+  );
+  const receipt = parseReceipt(registration.data);
   const handle = new DatasetCaptureHandle(api, receipt);
+  if (registration.idempotencyReplayed) {
+    try {
+      await handle.status();
+    } catch (error) {
+      associate(error, handle);
+      throw error;
+    }
+    const error = new DatasetCaptureError('Dataset registration was replayed; execution was not started.');
+    associate(error, handle);
+    throw error;
+  }
+  if (receipt.state !== 'recording') {
+    const error = new DatasetCaptureError('The registered capture is no longer recording; execution was not started.');
+    associate(error, handle);
+    throw error;
+  }
   // Explicit keys can replay the original admission receipt after publication.
   if (options.idempotencyKey !== undefined) {
     await handle.status();
@@ -180,12 +201,12 @@ async function capture<T>(destination: DatasetCaptureDestination, run: () => T |
       scope.accepting = false;
     }
     let failure: DatasetCaptureError | null = null;
-    let reason: 'export_failed' | 'incomplete_execution' = 'export_failed';
+    let reason: 'export_failed' | 'incomplete_execution' | 'cancelled' = 'export_failed';
     let completionAttempted = false;
     const incomplete = captureScopeIncomplete(scope);
     const flushed = await flushCaptureScope(scope, flushTimeout);
     if (handle.captureError !== null || handle.state !== 'recording') {
-      reason = 'incomplete_execution';
+      reason = handle.state === 'cancelled' ? 'cancelled' : 'incomplete_execution';
       failure = handle.captureError ?? new DatasetCaptureError('Dataset capture was aborted before completion.');
     } else if (incomplete) {
       reason = 'incomplete_execution';

@@ -32,7 +32,7 @@ function client(extra: Partial<ConstructorParameters<typeof Client>[0]> = {}) {
   return { instance, exporter };
 }
 interface Request { url: string; body: Record<string, unknown>; headers: Headers; }
-function api(state: 'recording' | 'completed' | 'needs_review' | 'failed' | 'running' = 'completed') {
+function api(state: 'recording' | 'completed' | 'needs_review' | 'failed' | 'running' = 'completed', registrationReplayed = false) {
   const requests: Request[] = [];
   const registered: string[] = [];
   const fetchMock = vi.fn(async (input: string | URL | RequestInfo, init?: RequestInit) => {
@@ -46,7 +46,15 @@ function api(state: 'recording' | 'completed' | 'needs_review' | 'failed' | 'run
     let id: string;
     if (url.endsWith('/complete') || url.endsWith('/abort')) id = url.split('/').at(-2)!;
     else { id = randomUUID(); registered.push(id); }
-    return Response.json({ success: true, data: { captureId: id, datasetId, state: url.endsWith('/complete') ? 'queued' : url.endsWith('/abort') ? 'cancelled' : 'recording' } });
+    const responseState = url.endsWith('/complete')
+      ? 'queued'
+      : url.endsWith('/abort')
+        ? body.reason === 'cancelled' ? 'cancelled' : 'failed'
+        : 'recording';
+    const headers = registrationReplayed && url.endsWith('/dataset-capture-jobs')
+      ? { 'Idempotency-Replayed': 'true' }
+      : undefined;
+    return Response.json({ success: true, data: { captureId: id, datasetId, state: responseState } }, { headers });
   });
   vi.stubGlobal('fetch', fetchMock);
   return { requests, registered, fetchMock };
@@ -72,6 +80,19 @@ describe('dataset capture through real SDK providers', () => {
     expect(http.registered).toHaveLength(1);
     expect(http.requests).toHaveLength(2);
     expect(http.requests.some((request) => /\/(complete|abort)$/.test(request.url))).toBe(false);
+  });
+
+  it('never executes a replayed registration while its current status is recording', async () => {
+    const http = api('recording', true);
+    const { instance } = client();
+    const run = vi.fn();
+    await expect(instance.activate(() => datasets.capture(destination, run, {
+      ...options,
+      idempotencyKey: randomUUID(),
+    }))).rejects.toThrow('registration was replayed');
+    expect(run).not.toHaveBeenCalled();
+    expect(http.requests).toHaveLength(2);
+    expect(http.requests.some((request) => request.url.endsWith('/complete'))).toBe(false);
   });
 
   it('executes a fresh explicit registration only after confirming its recording status', async () => {
@@ -167,7 +188,23 @@ describe('dataset capture through real SDK providers', () => {
     const { instance } = client();
     let handle: DatasetCaptureHandle | undefined;
     await expect(instance.activate(() => datasets.capture(destination, () => { throw 'failed'; }, { ...options, onRegistered: (value) => { handle = value; } }))).rejects.toBe('failed');
-    expect(handle?.state).toBe('cancelled');
+    expect(handle?.state).toBe('failed');
+  });
+
+  it('uses the cancelled state for explicit abort and never completes afterward', async () => {
+    const http = api();
+    const { instance, exporter } = client();
+    let handle: DatasetCaptureHandle | undefined;
+    await expect(instance.activate(() => datasets.capture(destination, () => trace(
+      { name: 'agent-aborted', kind: 'WORKFLOW' },
+      async () => {
+        await handle!.abort();
+        return 'finished normally';
+      },
+    ), { ...options, onRegistered: (registered) => { handle = registered; } }))).rejects.toThrow('aborted before completion');
+    expect(http.requests.find((request) => request.url.endsWith('/abort'))?.body).toEqual({ reason: 'cancelled' });
+    expect(http.requests.some((request) => request.url.endsWith('/complete'))).toBe(false);
+    expect(exporter.spans.some((span) => span.name === 'agent-aborted')).toBe(true);
   });
 
   it('aborts an open span instead of completing partial execution', async () => {

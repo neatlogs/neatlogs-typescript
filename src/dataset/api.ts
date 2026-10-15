@@ -96,6 +96,10 @@ export class DatasetApi {
   }
 
   async requestSerialized(method: 'GET' | 'POST', path: string, serialized?: string, idempotencyKey?: string, timeoutMillis = this.timeout): Promise<unknown> {
+    return (await this.requestSerializedWithMetadata(method, path, serialized, idempotencyKey, timeoutMillis)).data;
+  }
+
+  async requestSerializedWithMetadata(method: 'GET' | 'POST', path: string, serialized?: string, idempotencyKey?: string, timeoutMillis = this.timeout): Promise<{ data: unknown; idempotencyReplayed: boolean }> {
     if (!/^\/(datasets|dataset-capture-jobs)(\/|\?|$)/.test(path) || path.includes('..')) {
       throw new DatasetCaptureError('Invalid dataset API path.');
     }
@@ -129,7 +133,10 @@ export class DatasetApi {
         }
         const envelope = record(await response.json());
         if (envelope.success !== true || !('data' in envelope)) throw new DatasetCaptureError('Invalid dataset API envelope.');
-        return envelope.data;
+        return {
+          data: envelope.data,
+          idempotencyReplayed: response.headers.get('Idempotency-Replayed') === 'true',
+        };
       }
     } catch (error) {
       if (error instanceof DatasetCaptureError) throw error;
