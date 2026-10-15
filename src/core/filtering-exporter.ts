@@ -19,6 +19,7 @@ import {
 } from './media.js';
 import { DisabledUploadAuthority, type UploadAuthority } from './upload-authority.js';
 import { isHttpSpan } from './http-span.js';
+import { captureExportSettled } from '../dataset/capture-scope.js';
 
 const MEDIA_RESOLUTION_CONCURRENCY = 4;
 
@@ -156,6 +157,10 @@ export class FilteringExporter implements SpanExporter {
   ) {}
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
+    const complete = (prepared: readonly ReadableSpan[], result: ExportResult): void => {
+      captureExportSettled(spans, prepared, result.code === ExportResultCode.SUCCESS);
+      resultCallback(result);
+    };
     void mapWithConcurrency(spans, MEDIA_RESOLUTION_CONCURRENCY, async (span) => {
       if (isHttpSpan(span)) {
         discardPendingMedia(span as object);
@@ -216,24 +221,24 @@ export class FilteringExporter implements SpanExporter {
           // Diagnostics must never affect application telemetry delivery.
         }
         if (filtered.length === 0) {
-          resultCallback({ code: ExportResultCode.SUCCESS });
+          complete(filtered, { code: ExportResultCode.SUCCESS });
           return;
         }
         try {
           this._delegate.export(filtered, (result) => {
             if (result.code === ExportResultCode.SUCCESS && mediaFailures > 0) {
               this.diagnostics?.recordExportFailure('span', mediaFailures);
-              resultCallback({
+              complete(filtered, {
                 code: ExportResultCode.FAILED,
                 error: new Error('one or more typed media uploads failed'),
               });
               return;
             }
-            resultCallback(result);
+            complete(filtered, result);
           });
         } catch {
           this.diagnostics?.recordExportFailure('span', filtered.length);
-          resultCallback({
+          complete(filtered, {
             code: ExportResultCode.FAILED,
             error: new Error('span exporter failed synchronously'),
           });
@@ -241,7 +246,7 @@ export class FilteringExporter implements SpanExporter {
       },
       () => {
         this.diagnostics?.recordExportFailure('span', spans.length);
-        resultCallback({
+        complete([], {
           code: ExportResultCode.FAILED,
           error: new Error('span preparation failed'),
         });

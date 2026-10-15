@@ -22,6 +22,7 @@ import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 
 import { runWithClient } from "./active-client.js";
+import { registerCaptureProvider, useCaptureProvider } from '../dataset/capture-scope.js';
 import { registerClient, unregisterClient } from "./client-registry.js";
 import { FilteringExporter } from "./filtering-exporter.js";
 import { ByteLimitedSpanExporter } from "./byte-limited-exporter.js";
@@ -281,6 +282,7 @@ export class Client {
       this.logProvider = null;
     }
     this.otelLogger = this.logProvider?.getLogger("neatlogs") ?? null;
+    if (!disableExport) registerCaptureProvider(this.tracerProvider, sampleRate, () => this.flush());
     registerClient(this);
   }
 
@@ -310,6 +312,7 @@ export class Client {
 
   activate<T>(fn: () => T): T {
     if (!this.isRunning()) throw new Error("Client is closing or closed");
+    useCaptureProvider(this.tracerProvider);
     return runWithClient(this, () => runWithFreshNeatlogsContext(fn));
   }
 
