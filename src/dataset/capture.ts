@@ -147,6 +147,15 @@ async function capture<T>(destination: DatasetCaptureDestination, run: () => T |
   const receipt = parseReceipt(await api.request('POST', '/dataset-capture-jobs', { destination: validateDestination(destination) }, uuid(options.idempotencyKey ?? randomUUID(), 'idempotencyKey')));
   if (receipt.state !== 'recording') throw new DatasetCaptureError('The registered capture is no longer recording; execution was not started.');
   const handle = new DatasetCaptureHandle(api, receipt);
+  // Explicit keys can replay the original admission receipt after publication.
+  if (options.idempotencyKey !== undefined) {
+    await handle.status();
+    if (handle.state !== 'recording') {
+      const error = new DatasetCaptureError('The registered capture is no longer recording; execution was not started.');
+      associate(error, handle);
+      throw error;
+    }
+  }
   const scope = createCaptureScope(provider);
   let execution: { ok: true; result: T } | { ok: false; error: unknown };
   try {
@@ -175,9 +184,9 @@ async function capture<T>(destination: DatasetCaptureDestination, run: () => T |
     let completionAttempted = false;
     const incomplete = captureScopeIncomplete(scope);
     const flushed = await flushCaptureScope(scope, flushTimeout);
-    if (handle.state === 'cancelled') {
+    if (handle.captureError !== null || handle.state !== 'recording') {
       reason = 'incomplete_execution';
-      failure = new DatasetCaptureError('Dataset capture was aborted before completion.');
+      failure = handle.captureError ?? new DatasetCaptureError('Dataset capture was aborted before completion.');
     } else if (incomplete) {
       reason = 'incomplete_execution';
       failure = new DatasetCaptureError('Capture execution left spans open; await all traced work before returning.');
@@ -201,7 +210,7 @@ async function capture<T>(destination: DatasetCaptureDestination, run: () => T |
     }
     if (failure) {
       handle._setError(failure);
-      if (!completionAttempted) {
+      if (!completionAttempted && handle.state === 'recording') {
         try { await handle._abort(reason, failure); } catch { /* The handle retains the failure and status() can reconcile the job. */ }
       }
     }

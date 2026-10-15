@@ -17,7 +17,7 @@ function server() {
   const requests: string[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     requests.push(url);
-    return Response.json({ success: true, data: { captureId: '53f5bc6f-2cc5-4e03-8c26-d0df0283845e', datasetId, state: url.endsWith('/abort') ? 'cancelled' : url.endsWith('/complete') ? 'queued' : 'recording' } });
+    return Response.json({ success: true, data: { captureId: '53f5bc6f-2cc5-4e03-8c26-d0df0283845e', datasetId, state: url.endsWith('/abort') ? 'failed' : url.endsWith('/complete') ? 'queued' : 'recording' } });
   }));
   return requests;
 }
@@ -57,6 +57,26 @@ describe('capture publication requires complete delivered evidence', () => {
     expect(spans.some((span) => span.droppedAttributesCount > 0)).toBe(true);
     expect(requests.at(-1)).toMatch(/\/abort$/);
     expect(requests.some((url) => url.endsWith('/complete'))).toBe(false);
+  });
+
+  it.each([0, 1])('checks nested link attribute loss independently of span counters, dropped=%s', async (droppedAttributesCount) => {
+    const requests = server();
+    const { instance, spans } = client();
+    const capturing = instance.activate(() => datasets.capture(destination, () => {
+      const root = getNeatlogsTracer('neatlogs.test').startSpan('linked-agent');
+      root.addLink({ context: root.spanContext(), attributes: {}, droppedAttributesCount });
+      root.end();
+    }, options));
+    if (droppedAttributesCount > 0) {
+      await expect(capturing).rejects.toThrow('delivery failed');
+      expect(requests.at(-1)).toMatch(/\/abort$/);
+      expect(requests.some((url) => url.endsWith('/complete'))).toBe(false);
+    } else {
+      await expect(capturing).resolves.toMatchObject({ state: 'queued' });
+    }
+    const exported = spans.find((span) => span.name === 'linked-agent');
+    expect(exported?.droppedAttributesCount).toBe(0);
+    expect(exported?.links[0].droppedAttributesCount).toBe(droppedAttributesCount);
   });
 
   it('rejects providers configured to clip attribute values before executing', async () => {
@@ -147,9 +167,12 @@ describe('capture publication requires complete delivered evidence', () => {
     } catch (error) { caught = error; }
     expect(finished).toHaveBeenCalledOnce();
     expect(getDatasetCaptureHandle(caught)).toBe(handle);
-    expect(handle?.state).toBe('cancelled');
+    expect(handle?.state).toBe('failed');
+    expect(caught).toBeInstanceOf(Error);
+    expect(handle?.captureError?.message).toContain('aborted');
     expect(spans.some((span) => span.name === 'cancelled-agent')).toBe(true);
     expect(requests.some((url) => url.endsWith('/complete'))).toBe(false);
+    expect(requests.filter((url) => url.endsWith('/abort'))).toHaveLength(1);
     await expect(handle!.retryCompletion()).rejects.toThrow('no exported completion manifest');
   });
 

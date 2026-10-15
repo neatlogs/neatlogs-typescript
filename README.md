@@ -219,6 +219,11 @@ Use an initialized SDK or an active `Client` with `sampleRate: 1` and export
 enabled. Existing instrumentation supplies the root traces and their inputs
 and outputs. Await all traced work inside the callback.
 
+An explicit capture registration `idempotencyKey` checks the job's current status
+before execution, so an older cached `recording` receipt cannot restart a sealed
+capture. This does not serialize concurrent captures using the same key. Recover
+an uncertain completion with `retryCompletion()` instead of calling capture again.
+
 ```typescript
 import { init, shutdown, trace, datasets } from 'neatlogs';
 

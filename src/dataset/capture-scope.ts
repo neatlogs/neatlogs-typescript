@@ -117,6 +117,8 @@ export function captureSpanEnded(span: ReadableSpan): void {
 
 function spanEvidenceIncomplete(span: ReadableSpan): boolean {
   return span.droppedAttributesCount > 0 || span.droppedEventsCount > 0 || span.droppedLinksCount > 0 ||
+    span.events.some((event) => (event.droppedAttributesCount ?? 0) > 0) ||
+    span.links.some((link) => (link.droppedAttributesCount ?? 0) > 0) ||
     span.attributes['neatlogs.capture.truncated'] === true ||
     span.attributes['neatlogs.capture_fidelity'] === 'truncated' ||
     span.attributes['neatlogs.stream.incomplete'] === true;

@@ -32,7 +32,7 @@ function client(extra: Partial<ConstructorParameters<typeof Client>[0]> = {}) {
   return { instance, exporter };
 }
 interface Request { url: string; body: Record<string, unknown>; headers: Headers; }
-function api(state: 'completed' | 'needs_review' | 'failed' | 'running' = 'completed') {
+function api(state: 'recording' | 'completed' | 'needs_review' | 'failed' | 'running' = 'completed') {
   const requests: Request[] = [];
   const registered: string[] = [];
   const fetchMock = vi.fn(async (input: string | URL | RequestInfo, init?: RequestInit) => {
@@ -58,6 +58,46 @@ afterEach(async () => {
 });
 
 describe('dataset capture through real SDK providers', () => {
+  it('rejects a cached recording registration when its current status is already completed', async () => {
+    const http = api();
+    const { instance } = client();
+    const run = vi.fn();
+    let error: unknown;
+    try {
+      await instance.activate(() => datasets.capture(destination, run, { ...options, idempotencyKey: randomUUID() }));
+    } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(DatasetCaptureError);
+    expect(getDatasetCaptureHandle(error)?.state).toBe('completed');
+    expect(run).not.toHaveBeenCalled();
+    expect(http.registered).toHaveLength(1);
+    expect(http.requests).toHaveLength(2);
+    expect(http.requests.some((request) => /\/(complete|abort)$/.test(request.url))).toBe(false);
+  });
+
+  it('executes a fresh explicit registration only after confirming its recording status', async () => {
+    const http = api('recording');
+    const { instance } = client();
+    const run = vi.fn(() => trace({ name: 'fresh-key-agent', kind: 'WORKFLOW' }, () => 'actual'));
+    await expect(instance.activate(() => datasets.capture(destination, run, { ...options, idempotencyKey: randomUUID() }))).resolves.toMatchObject({ state: 'queued' });
+    expect(run).toHaveBeenCalledOnce();
+    expect(http.requests).toHaveLength(3);
+    expect(http.requests[1].body).toEqual({});
+    expect(http.requests[2].url).toMatch(/\/complete$/);
+  });
+
+  it('refuses execution and leaves the job untouched when explicit registration status is unavailable', async () => {
+    const http = api();
+    const original = http.fetchMock.getMockImplementation()!;
+    http.fetchMock.mockImplementation(async (input, init) => init?.method === 'GET'
+      ? Response.json({ error: 'forbidden' }, { status: 403 })
+      : original(input, init));
+    const { instance } = client();
+    const run = vi.fn();
+    await expect(instance.activate(() => datasets.capture(destination, run, { ...options, idempotencyKey: randomUUID() }))).rejects.toMatchObject({ statusCode: 403 });
+    expect(run).not.toHaveBeenCalled();
+    expect(http.requests).toHaveLength(1);
+  });
+
   it('registers before executing and completes only after normal export with root and awaited descendants', async () => {
     const http = api();
     const { instance, exporter } = client();
