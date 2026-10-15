@@ -24,6 +24,7 @@ import {
 } from './constants.js';
 import { getProviderTracer } from './core/auto-root.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
+import { markCancelled, recordFailure } from './core/span-outcome.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -340,6 +341,24 @@ function wrapConverseStream(response: any, span: Span): any {
     if (ev?.metadata?.usage) usage = ev.metadata.usage;
   };
 
+  let finalized = false;
+  let cancellationRequested = false;
+  const finish = (cancelled: boolean) => {
+    if (finalized) return;
+    finalized = true;
+    applyConverseStream(span, textParts, toolCalls, finishReason, usage, budget);
+    if (cancelled) markCancelled(span);
+    else span.setStatus({ code: SpanStatusCode.OK });
+    span.end();
+  };
+  // A broken stream keeps what it had already delivered.
+  const fail = (err: unknown) => {
+    if (finalized) return;
+    finalized = true;
+    applyConverseStream(span, textParts, toolCalls, finishReason, usage, budget);
+    recordError(span, err);
+  };
+
   const wrappedStream = {
     [Symbol.asyncIterator]() {
       const iterator = originalIterator();
@@ -348,26 +367,29 @@ function wrapConverseStream(response: any, span: Span): any {
           try {
             const result = await iterator.next();
             if (result.done) {
-              finalizeConverseStream(span, textParts, toolCalls, finishReason, usage, budget);
+              finish(cancellationRequested);
               return result;
             }
             addEvent(result.value);
             return result;
           } catch (err) {
-            recordError(span, err);
+            fail(err);
             throw err;
           }
         },
         async return(value?: any): Promise<IteratorResult<any>> {
+          cancellationRequested = true;
           markStreamIncomplete(budget, 'consumer_cancelled');
           span.setAttribute('neatlogs.stream.cancelled', true);
-          const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-          if (result.done) {
-            finalizeConverseStream(span, textParts, toolCalls, finishReason, usage, budget);
-          } else {
-            addEvent(result.value);
+          try {
+            const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+            if (result.done) finish(true);
+            else addEvent(result.value);
+            return result;
+          } catch (err) {
+            fail(err);
+            throw err;
           }
-          return result;
         },
       };
     },
@@ -377,7 +399,7 @@ function wrapConverseStream(response: any, span: Span): any {
   return response;
 }
 
-function finalizeConverseStream(
+function applyConverseStream(
   span: Span,
   textParts: string[],
   toolCalls: Record<number, { id: string; name: string; arguments: string[]; incomplete: boolean }>,
@@ -410,8 +432,6 @@ function finalizeConverseStream(
   if (finishReason) span.setAttribute('neatlogs.llm.finish_reason', String(finishReason));
   setConverseUsage(span, usage);
   applyStreamDiagnostics(span, budget);
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +707,7 @@ function wrapInvokeStream(response: any, span: Span, vendor: string): any {
     }
   };
 
-  const finalize = () => {
+  const apply = () => {
     const full = textParts.join('');
     if (full) {
       span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
@@ -697,8 +717,24 @@ function wrapInvokeStream(response: any, span: Span, vendor: string): any {
     if (completionTokens != null) span.setAttribute('neatlogs.llm.token_count.completion', completionTokens);
     if (finishReason) span.setAttribute('neatlogs.llm.finish_reason', String(finishReason));
     applyStreamDiagnostics(span, budget);
-    span.setStatus({ code: SpanStatusCode.OK });
+  };
+
+  let finalized = false;
+  let cancellationRequested = false;
+  const finish = (cancelled: boolean) => {
+    if (finalized) return;
+    finalized = true;
+    apply();
+    if (cancelled) markCancelled(span);
+    else span.setStatus({ code: SpanStatusCode.OK });
     span.end();
+  };
+  // A broken stream keeps what it had already delivered.
+  const fail = (err: unknown) => {
+    if (finalized) return;
+    finalized = true;
+    apply();
+    recordError(span, err);
   };
 
   const wrappedBody = {
@@ -709,23 +745,29 @@ function wrapInvokeStream(response: any, span: Span, vendor: string): any {
           try {
             const result = await iterator.next();
             if (result.done) {
-              finalize();
+              finish(cancellationRequested);
               return result;
             }
             addChunk(result.value?.chunk);
             return result;
           } catch (err) {
-            recordError(span, err);
+            fail(err);
             throw err;
           }
         },
         async return(value?: any): Promise<IteratorResult<any>> {
+          cancellationRequested = true;
           markStreamIncomplete(budget, 'consumer_cancelled');
           span.setAttribute('neatlogs.stream.cancelled', true);
-          const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-          if (result.done) finalize();
-          else addChunk(result.value?.chunk);
-          return result;
+          try {
+            const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+            if (result.done) finish(true);
+            else addChunk(result.value?.chunk);
+            return result;
+          } catch (err) {
+            fail(err);
+            throw err;
+          }
         },
       };
     },
@@ -838,11 +880,6 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
   span.end();
 }

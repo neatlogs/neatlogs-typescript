@@ -22,6 +22,11 @@ import { getProviderTracer } from './core/auto-root.js';
 import { captureMedia } from './core/media.js';
 import { ChoiceAccumulator } from './core/choice-accumulator.js';
 import {
+  finalizeResponsesResponse,
+  wrapResponsesAsyncIterableStream,
+} from './core/openai-responses.js';
+import { recordFailure } from './core/span-outcome.js';
+import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
   withNeatlogsSpan,
@@ -198,6 +203,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
   return function (opts: any, ...rest: any[]): any {
     const tracer = getProviderTracer(TRACER_NAME);
     const model = opts?.model ?? '';
+    const isStream = opts?.stream === true;
 
     const span = tracer.startSpan('azure_openai.responses.create', {
       attributes: {
@@ -205,6 +211,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         'neatlogs.llm.provider': PROVIDER,
         'neatlogs.llm.system': SYSTEM,
         'neatlogs.llm.model_name': model,
+        'neatlogs.llm.is_streaming': isStream,
         'input.value': '',
       },
     }, getNeatlogsParentContext());
@@ -221,25 +228,10 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
 
     return promise.then(
       (response: any) => {
-        const capturedOutput = captureMedia(
-          span,
-          'neatlogs.llm.output_messages.0',
-          response?.output,
-          'output',
-        );
-        if (response?.output_text) {
-          span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-          span.setAttribute('neatlogs.llm.output_messages.0.content', response.output_text);
-        } else if (response?.output) {
-          span.setAttribute('output.value', safeStringify(capturedOutput));
+        if (isStream) {
+          return wrapResponsesAsyncIterableStream(response, span);
         }
-        if (response?.model) span.setAttribute('neatlogs.llm.model_name', response.model);
-        if (response?.usage) {
-          if (response.usage.input_tokens != null) span.setAttribute('neatlogs.llm.token_count.prompt', response.usage.input_tokens);
-          if (response.usage.output_tokens != null) span.setAttribute('neatlogs.llm.token_count.completion', response.usage.output_tokens);
-        }
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.end();
+        finalizeResponsesResponse(span, response);
         return response;
       },
       (err: any) => {
@@ -276,7 +268,14 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            accumulator.finish(safeSpan, cancellationRequested);
+            // The SDK ends the iterator quietly on an abort; a chunk with a
+            // finish_reason means the reply did complete first.
+            accumulator.finish(
+              safeSpan,
+              cancellationRequested ||
+                (stream.controller?.signal?.aborted === true &&
+                  !accumulator.hasFinishReason()),
+            );
             return result;
           }
           accumulator.addChunk(span, result.value);
@@ -288,10 +287,15 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
       },
       async return(value?: any): Promise<IteratorResult<any>> {
         cancellationRequested = true;
-        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-        if (result.done) accumulator.finish(safeSpan, true);
-        else accumulator.addChunk(span, result.value);
-        return result;
+        try {
+          const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+          if (result.done) accumulator.finish(safeSpan, true);
+          else accumulator.addChunk(span, result.value);
+          return result;
+        } catch (err) {
+          accumulator.fail(safeSpan, err);
+          throw err;
+        }
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
         accumulator.fail(safeSpan, err);
@@ -427,11 +431,6 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
   span.end();
 }

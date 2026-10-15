@@ -80,6 +80,8 @@ interface SessionState {
   systemPrompt?: string;
   /** Latest assistant text — the AGENT root's output on close. */
   lastAssistantText: string;
+  /** Error of the turn's last assistant message (or session), if it failed. */
+  turnError?: any;
 }
 
 export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, any>> => {
@@ -140,7 +142,7 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
         startTimeUnixNano: st.rootSpan.startNano,
         endTimeUnixNano: nowNanoString(),
         attributes: attrs,
-        status: { code: SpanStatusCode.OK },
+        status: statusFor(attrs, st.turnError),
       });
       // Completion marker — the backend only finalizes (simplifies → UI) a trace
       // once it sees a `neatlogs.trace.complete` span. Parented to the root.
@@ -165,6 +167,7 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
     st.traceId = undefined;
     st.currentInput = '';
     st.lastAssistantText = '';
+    st.turnError = undefined;
     st.processed.clear();
     st.outputParts.clear();
     st.toolCalls.clear();
@@ -263,41 +266,7 @@ export const NeatlogsOpencodePlugin = async (_ctx: any): Promise<Record<string, 
         st.toolStarts.delete(callID);
         if (!st.traceId) return;
 
-        const attrs: OtlpKeyValue[] = [
-          { key: 'neatlogs.span.kind', value: { stringValue: 'TOOL' } },
-          { key: 'neatlogs.tool.name', value: { stringValue: start.tool } },
-          { key: 'neatlogs.conversation.id', value: { stringValue: sessionID } },
-        ];
-        if (start.args !== undefined) {
-          // The shipper bypasses the SDK attribute-processor, so emit the
-          // already-namespaced keys the backend consumer reads directly
-          // (neatlogs.tool.input / .output and the generic neatlogs.input.value),
-          // not the raw input.value/output.value the processor would map.
-          setIO(attrs, 'TOOL', safeStringify(start.args), undefined);
-          push(attrs, attrStr('neatlogs.tool.input', safeStringify(start.args)));
-        }
-        if (result?.title) push(attrs, attrStr('neatlogs.tool.title', String(result.title)));
-        const out = result?.output ?? result?.result;
-        if (out !== undefined) {
-          const o = typeof out === 'string' ? out : safeStringify(out);
-          setIO(attrs, 'TOOL', undefined, o);
-          push(attrs, attrStr('neatlogs.tool.output', o));
-        }
-        if (result?.metadata !== undefined) {
-          push(attrs, attrStr('neatlogs.tool.metadata', safeStringify(result.metadata)));
-        }
-
-        shipper.enqueue({
-          traceId: st.traceId,
-          spanId: start.spanId,
-          parentSpanId: st.rootSpan?.spanId,
-          name: `opencode.tool.${start.tool}`,
-          kind: 1,
-          startTimeUnixNano: start.startNano,
-          endTimeUnixNano: nowNanoString(),
-          attributes: attrs,
-          status: { code: SpanStatusCode.OK },
-        });
+        emitToolSpan(shipper, st, sessionID, start, result);
       } catch {
         /* ignore */
       }
@@ -341,6 +310,16 @@ function handleEvent(
       if (existing) existing.input = input;
       else list.push({ name: String(part.tool), input, callID });
       st.toolCalls.set(String(messageID), list);
+      // `tool.execute.after` only fires for a tool that returned; a failed
+      // tool is reported here, so its span is closed from this event.
+      const start = st.toolStarts.get(callID);
+      if (part?.state?.status === 'error' && start && st.traceId) {
+        st.toolStarts.delete(callID);
+        emitToolSpan(shipper, st, String(sessionID), start, undefined, {
+          name: 'ToolError',
+          data: { message: String(part.state.error ?? 'tool failed') },
+        });
+      }
     }
     return undefined;
   }
@@ -353,14 +332,23 @@ function handleEvent(
     if (info?.role !== 'assistant') return undefined;
     const completed = info?.time?.completed ?? info?.completed;
     const id = String(info?.id ?? '');
-    if (!completed || !id) return undefined;
+    // A failed message carries `error`; it is as final as a completed one.
+    if ((!completed && !info?.error) || !id) return undefined;
     const st = stateFor(String(sessionID));
     if (st.processed.has(id)) return undefined;
     st.processed.add(id);
     startRoot(st, String(sessionID));
+    // The turn ends as its last message did: a later success clears the error.
+    st.turnError = info?.error;
     emitLlmSpan(shipper, st, info, String(sessionID));
     // Incremental persistence: ship this turn's spans now (don't wait for idle).
     return shipper.flush().catch(() => undefined);
+  }
+
+  if (type === 'session.error') {
+    const st = props.sessionID ? sessions.get(String(props.sessionID)) : undefined;
+    if (st && props.error && !st.turnError) st.turnError = props.error;
+    return undefined;
   }
 
   // Session finished → end root, send completion marker, final flush.
@@ -453,7 +441,7 @@ function emitLlmSpan(shipper: TraceShipper, st: SessionState, info: any, session
     startTimeUnixNano: startNano,
     endTimeUnixNano: nowNanoString(),
     attributes: attrs,
-    status: { code: SpanStatusCode.OK },
+    status: statusFor(attrs, info?.error),
   });
 
   // Reset accumulated parts for the next turn.
@@ -463,9 +451,75 @@ function emitLlmSpan(shipper: TraceShipper, st: SessionState, info: any, session
   }
 }
 
+/** Enqueue a finished TOOL span (parented to the turn root). */
+function emitToolSpan(
+  shipper: TraceShipper,
+  st: SessionState,
+  sessionID: string,
+  start: { spanId: Uint8Array; startNano: string; tool: string; args: any },
+  result: any,
+  error?: any,
+): void {
+  if (!st.traceId) return;
+  const attrs: OtlpKeyValue[] = [
+    { key: 'neatlogs.span.kind', value: { stringValue: 'TOOL' } },
+    { key: 'neatlogs.tool.name', value: { stringValue: start.tool } },
+    { key: 'neatlogs.conversation.id', value: { stringValue: sessionID } },
+  ];
+  if (start.args !== undefined) {
+    // The shipper bypasses the SDK attribute-processor, so emit the
+    // already-namespaced keys the backend consumer reads directly
+    // (neatlogs.tool.input / .output and the generic neatlogs.input.value),
+    // not the raw input.value/output.value the processor would map.
+    setIO(attrs, 'TOOL', safeStringify(start.args), undefined);
+    push(attrs, attrStr('neatlogs.tool.input', safeStringify(start.args)));
+  }
+  if (result?.title) push(attrs, attrStr('neatlogs.tool.title', String(result.title)));
+  const out = result?.output ?? result?.result;
+  if (out !== undefined) {
+    const o = typeof out === 'string' ? out : safeStringify(out);
+    setIO(attrs, 'TOOL', undefined, o);
+    push(attrs, attrStr('neatlogs.tool.output', o));
+  }
+  if (result?.metadata !== undefined) {
+    push(attrs, attrStr('neatlogs.tool.metadata', safeStringify(result.metadata)));
+  }
+
+  shipper.enqueue({
+    traceId: st.traceId,
+    spanId: start.spanId,
+    parentSpanId: st.rootSpan?.spanId,
+    name: `opencode.tool.${start.tool}`,
+    kind: 1,
+    startTimeUnixNano: start.startNano,
+    endTimeUnixNano: nowNanoString(),
+    attributes: attrs,
+    status: statusFor(attrs, error),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Span status for an opencode error (`{ name, data: { message } }`), which is
+ * reported on the message or session instead of being thrown. A user abort is
+ * a deliberate stop, not a failure. The shipper has no span events, so the
+ * error type and message go on as attributes.
+ */
+function statusFor(attrs: OtlpKeyValue[], error: any): { code: number; message?: string } {
+  if (!error) return { code: SpanStatusCode.OK };
+  const name = String(error.name ?? 'Error');
+  if (name === 'MessageAbortedError') {
+    attrs.push({ key: 'neatlogs.stream.cancelled', value: { boolValue: true } });
+    return { code: SpanStatusCode.UNSET };
+  }
+  const message = String(error.data?.message ?? error.message ?? name);
+  push(attrs, attrStr('neatlogs.error.type', name));
+  push(attrs, attrStr('neatlogs.error.message', message));
+  return { code: SpanStatusCode.ERROR, message };
+}
 
 function push(arr: OtlpKeyValue[], kv: OtlpKeyValue | undefined): void {
   if (kv) arr.push(kv);

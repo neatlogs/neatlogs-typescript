@@ -9,6 +9,7 @@ import {
   type Span as OtelSpan,
 } from "@opentelemetry/api";
 import { getLogger } from "../core/logger.js";
+import { isAbortError, markCancelled } from "../core/span-outcome.js";
 import { registerMask } from "../core/mask.js";
 import { applyEndUserAttributes, isRootSpan } from "../core/end-user.js";
 import { applySessionAttributes } from "../core/session.js";
@@ -278,13 +279,12 @@ export function decorateSpan<TArgs extends any[], TReturn>(
       const finishError = (error: any): void => {
         if (finished) return;
         finished = true;
-        if (error?.name === "AbortError") {
-          span.setAttribute("neatlogs.stream.cancelled", true);
+        if (isAbortError(error)) {
           if (totalStreamChunks > 0) {
             setStreamCounts();
             captureResult(streamCaptureValue());
           }
-          span.setStatus({ code: SpanStatusCode.UNSET });
+          markCancelled(span);
           span.end();
           return;
         }
@@ -359,9 +359,8 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         }
         if (finished) return;
         finished = true;
-        span.setAttribute("neatlogs.stream.cancelled", true);
         captureResult(streamCaptureValue());
-        span.setStatus({ code: SpanStatusCode.UNSET });
+        markCancelled(span);
         span.end();
       };
 

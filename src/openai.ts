@@ -14,15 +14,15 @@
  */
 
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
-import {
-  DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
-  DEFAULT_MAX_STREAM_CAPTURE_BYTES,
-  DEFAULT_MAX_STREAM_CAPTURE_ITEMS,
-  utf8ByteLength,
-} from "./constants.js";
 import { getProviderTracer } from "./core/auto-root.js";
 import { ChoiceAccumulator } from "./core/choice-accumulator.js";
 import { captureMedia } from "./core/media.js";
+import {
+  finalizeResponsesResponse,
+  sanitizedJsonToolArguments,
+  wrapResponsesAsyncIterableStream,
+} from "./core/openai-responses.js";
+import { recordFailure } from "./core/span-outcome.js";
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -308,228 +308,6 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
   };
 }
 
-/**
- * Keep a Responses API LLM span open until a streamed response is consumed.
- * `responses.create({ stream: true })` resolves to an async iterable immediately;
- * the assistant text and usage arrive later in `response.*` events.
- */
-function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
-  const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
-
-  if (!originalAsyncIterator) {
-    // Be defensive about clients that ignore `stream: true` and return a normal
-    // response object.
-    finalizeResponsesResponse(span, stream);
-    return stream;
-  }
-
-  const textParts: string[] = [];
-  const streamBudget = newStreamCaptureBudget();
-  let completedResponse: any;
-  let finalized = false;
-  let eventCount = 0;
-  let cancellationRequested = false;
-
-  const setEventCounts = () => {
-    span.setAttribute("neatlogs.stream.chunk_count", eventCount);
-    if (eventCount > DEFAULT_MAX_SEMANTIC_STREAM_EVENTS) {
-      span.setAttribute(
-        "neatlogs.stream.events_dropped",
-        eventCount - DEFAULT_MAX_SEMANTIC_STREAM_EVENTS,
-      );
-    }
-    applyStreamDiagnostics(span, streamBudget);
-  };
-
-  const finalize = (interrupted = false) => {
-    if (finalized) return;
-    finalized = true;
-    setEventCounts();
-    finalizeResponsesResponse(
-      span,
-      completedResponse,
-      textParts.join(""),
-      interrupted,
-    );
-  };
-
-  const fail = (error: unknown) => {
-    if (finalized) return;
-    finalized = true;
-    setEventCounts();
-    applyResponsesResponseAttributes(
-      span,
-      completedResponse,
-      textParts.join(""),
-    );
-    if ((error as any)?.name === "AbortError") {
-      span.setAttribute("neatlogs.stream.cancelled", true);
-      span.setStatus({ code: SpanStatusCode.UNSET });
-      span.end();
-      return;
-    }
-    recordError(span, error);
-  };
-
-  const addEvent = (event: any) => {
-    const index = eventCount++;
-    if (index < DEFAULT_MAX_SEMANTIC_STREAM_EVENTS) {
-      const delta = typeof event?.delta === "string" ? event.delta : "";
-      span.addEvent("neatlogs.stream.chunk", {
-        "neatlogs.stream.chunk.index": index,
-        "neatlogs.stream.chunk.summary": safeStringify({
-          type: event?.type ?? "unknown",
-          delta_bytes: utf8ByteLength(delta, DEFAULT_MAX_STREAM_CAPTURE_BYTES),
-          has_response: event?.response != null,
-        }),
-      });
-    }
-    if (
-      event?.type === "response.output_text.delta" &&
-      typeof event.delta === "string"
-    ) {
-      retainStreamString(streamBudget, event.delta, (value) => {
-        textParts.push(value);
-      });
-    } else if (event?.type === "response.completed") {
-      completedResponse = event.response;
-    }
-  };
-
-  // A proxy preserves the OpenAI stream's public surface. Binding methods back
-  // to the original object also avoids breaking SDK classes with private fields.
-  return new Proxy(stream, {
-    get(target, prop) {
-      if (prop === Symbol.asyncIterator) {
-        return () => {
-          const iterator = originalAsyncIterator();
-          return {
-            async next(): Promise<IteratorResult<any>> {
-              try {
-                const result = await iterator.next();
-                if (result.done) {
-                  finalize(cancellationRequested);
-                  return result;
-                }
-                addEvent(result.value);
-                return result;
-              } catch (err) {
-                fail(err);
-                throw err;
-              }
-            },
-            async return(value?: any): Promise<IteratorResult<any>> {
-              cancellationRequested = true;
-              const result = await (iterator.return?.(value) ?? {
-                done: true,
-                value,
-              });
-              if (result.done) finalize(true);
-              else addEvent(result.value);
-              return result;
-            },
-            async throw(err?: any): Promise<IteratorResult<any>> {
-              fail(err);
-              if (iterator.throw) return iterator.throw(err);
-              throw err;
-            },
-          };
-        };
-      }
-
-      const value = Reflect.get(target, prop, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-}
-
-function finalizeResponsesResponse(
-  span: Span,
-  response: any,
-  streamedText = "",
-  interrupted = false,
-): void {
-  applyResponsesResponseAttributes(span, response, streamedText);
-  if (interrupted) {
-    span.setAttribute("neatlogs.stream.cancelled", true);
-    span.setStatus({ code: SpanStatusCode.UNSET });
-  } else {
-    span.setStatus({ code: SpanStatusCode.OK });
-  }
-  span.end();
-}
-
-function applyResponsesResponseAttributes(
-  span: Span,
-  response: any,
-  streamedText = "",
-): void {
-  const capturedOutput = response?.output
-    ? captureMedia(
-        span,
-        "neatlogs.llm.output_messages.0",
-        response.output,
-        "output",
-      )
-    : response?.output;
-  const text =
-    response?.output_text ||
-    streamedText ||
-    extractResponsesOutputText(response?.output);
-  if (text) {
-    span.setAttribute("neatlogs.llm.output_messages.0.role", "assistant");
-    span.setAttribute("neatlogs.llm.output_messages.0.content", text);
-    span.setAttribute("output.value", text);
-  } else if (response?.output) {
-    // Tool-call-only responses still have a meaningful structured output.
-    span.setAttribute("output.value", safeStringify(capturedOutput));
-  }
-
-  if (response?.model)
-    span.setAttribute("neatlogs.llm.model_name", response.model);
-  if (response?.status)
-    span.setAttribute("neatlogs.llm.finish_reason", response.status);
-
-  const usage = response?.usage;
-  if (usage) {
-    if (usage.input_tokens != null)
-      span.setAttribute("neatlogs.llm.token_count.prompt", usage.input_tokens);
-    if (usage.output_tokens != null)
-      span.setAttribute(
-        "neatlogs.llm.token_count.completion",
-        usage.output_tokens,
-      );
-    if (usage.total_tokens != null)
-      span.setAttribute("neatlogs.llm.token_count.total", usage.total_tokens);
-    if (usage.input_tokens_details?.cached_tokens != null) {
-      span.setAttribute(
-        "neatlogs.llm.token_count.cache_read",
-        usage.input_tokens_details.cached_tokens,
-      );
-    }
-    if (usage.output_tokens_details?.reasoning_tokens != null) {
-      span.setAttribute(
-        "neatlogs.llm.token_count.reasoning",
-        usage.output_tokens_details.reasoning_tokens,
-      );
-    }
-  }
-}
-
-function extractResponsesOutputText(output: any): string {
-  if (!Array.isArray(output)) return "";
-  const parts: string[] = [];
-  for (const item of output) {
-    if (item?.type !== "message" || !Array.isArray(item.content)) continue;
-    for (const content of item.content) {
-      if (content?.type === "output_text" && typeof content.text === "string") {
-        parts.push(content.text);
-      }
-    }
-  }
-  return parts.join("");
-}
-
 // ---------------------------------------------------------------------------
 // Streaming support
 // ---------------------------------------------------------------------------
@@ -556,7 +334,14 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
               try {
                 const result = await iterator.next();
                 if (result.done) {
-                  accumulator.finish(safeSpan, cancellationRequested);
+                  // The SDK ends the iterator quietly on an abort; a chunk with
+                  // a finish_reason means the reply did complete first.
+                  accumulator.finish(
+                    safeSpan,
+                    cancellationRequested ||
+                      (stream.controller?.signal?.aborted === true &&
+                        !accumulator.hasFinishReason()),
+                  );
                   return result;
                 }
                 accumulator.addChunk(span, result.value);
@@ -568,13 +353,18 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
             },
             async return(value?: any): Promise<IteratorResult<any>> {
               cancellationRequested = true;
-              const result = await (iterator.return?.(value) ?? {
-                done: true,
-                value: undefined,
-              });
-              if (result.done) accumulator.finish(safeSpan, true);
-              else accumulator.addChunk(span, result.value);
-              return result;
+              try {
+                const result = await (iterator.return?.(value) ?? {
+                  done: true,
+                  value: undefined,
+                });
+                if (result.done) accumulator.finish(safeSpan, true);
+                else accumulator.addChunk(span, result.value);
+                return result;
+              } catch (err) {
+                accumulator.fail(safeSpan, err);
+                throw err;
+              }
             },
             async throw(err?: any): Promise<IteratorResult<any>> {
               accumulator.fail(safeSpan, err);
@@ -603,86 +393,6 @@ function finalizeChatResponse(span: Span, response: any): void {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
-
-interface StreamCaptureBudget {
-  capturedBytes: number;
-  capturedItems: number;
-  droppedBytes: number;
-  droppedItems: number;
-  incompleteReasons: Set<string>;
-}
-
-function newStreamCaptureBudget(): StreamCaptureBudget {
-  return {
-    capturedBytes: 0,
-    capturedItems: 0,
-    droppedBytes: 0,
-    droppedItems: 0,
-    incompleteReasons: new Set(),
-  };
-}
-
-function retainStreamString(
-  budget: StreamCaptureBudget,
-  value: string,
-  retain: (value: string) => void,
-): void {
-  const remaining = Math.max(0, DEFAULT_MAX_STREAM_CAPTURE_BYTES - budget.capturedBytes);
-  const bytes = utf8ByteLength(value, remaining);
-  if (budget.capturedItems >= DEFAULT_MAX_STREAM_CAPTURE_ITEMS) {
-    budget.droppedItems += 1;
-    budget.droppedBytes += bytes;
-    budget.incompleteReasons.add("item_limit_exceeded");
-    return;
-  }
-  if (budget.capturedBytes + bytes > DEFAULT_MAX_STREAM_CAPTURE_BYTES) {
-    budget.droppedItems += 1;
-    budget.droppedBytes += bytes;
-    budget.incompleteReasons.add("byte_limit_exceeded");
-    return;
-  }
-  retain(value);
-  budget.capturedItems += 1;
-  budget.capturedBytes += bytes;
-}
-
-function applyStreamDiagnostics(span: Span, budget: StreamCaptureBudget): void {
-  span.setAttribute("neatlogs.stream.capture_bytes", budget.capturedBytes);
-  span.setAttribute("neatlogs.stream.capture_items", budget.capturedItems);
-  if (budget.incompleteReasons.size === 0) return;
-  span.setAttribute("neatlogs.stream.incomplete", true);
-  span.setAttribute(
-    "neatlogs.stream.incomplete_reason",
-    [...budget.incompleteReasons].sort().join(","),
-  );
-  if (budget.droppedBytes > 0) {
-    span.setAttribute("neatlogs.stream.dropped_bytes", budget.droppedBytes);
-    span.setAttribute("neatlogs.stream.dropped_bytes_is_lower_bound", true);
-  }
-  span.setAttribute("neatlogs.stream.dropped_items", budget.droppedItems);
-  span.setAttribute("neatlogs.capture_fidelity", "truncated");
-}
-
-function sanitizedJsonToolArguments(
-  span: Span,
-  prefix: string,
-  value: unknown,
-): string {
-  if (typeof value !== "string") {
-    return safeStringify(captureMedia(span, prefix, value, "output"));
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    span.setAttribute("neatlogs.stream.incomplete", true);
-    span.setAttribute("neatlogs.stream.incomplete_reason", "invalid_tool_arguments");
-    return "[incomplete: invalid tool arguments omitted]";
-  }
-  const original = safeStringify(parsed);
-  const sanitized = safeStringify(captureMedia(span, prefix, parsed, "output"));
-  return original === sanitized ? value : sanitized;
-}
 
 function mediaSafeAccumulatorSpan(span: Span): Span {
   return new Proxy(span, {
@@ -725,11 +435,6 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
   span.end();
 }

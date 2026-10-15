@@ -13,6 +13,8 @@ import { trace, SpanStatusCode, type Span, type Context } from '@opentelemetry/a
 import { maybeOpenAutoRoot, endAutoRoot } from './core/auto-root.js';
 import { getNeatlogsTracer, getNeatlogsBaseContext } from './core/provider.js';
 import { captureMedia } from './core/media.js';
+import { markCancelled, recordFailure } from './core/span-outcome.js';
+import { DEFAULT_MAX_STREAM_CAPTURE_BYTES, utf8ByteLength } from './constants.js';
 
 const TRACER_NAME = 'neatlogs.langchain';
 
@@ -37,6 +39,10 @@ class NeatlogsCallbackHandler {
   private _spans: Map<string, Span> = new Map();
   // Auto-root spans keyed by the run-id of the child that triggered them.
   private _autoRoots: Map<string, Span> = new Map();
+  // Child run-ids per parent run-id, to close runs LangChain never ends.
+  private _children: Map<string, Set<string>> = new Map();
+  // Streamed tokens per LLM run-id, for a call that ends without handleLLMEnd.
+  private _tokens: Map<string, { parts: string[]; bytes: number }> = new Map();
   private _workflowName: string | undefined;
 
   constructor(opts?: LangchainHandlerOptions) {
@@ -57,7 +63,10 @@ class NeatlogsCallbackHandler {
     // solely from our own run-id → span map.
     const base = getNeatlogsBaseContext();
     const parentSpan = parentRunId ? this._spans.get(parentRunId) : undefined;
-    if (parentSpan) {
+    if (parentRunId && parentSpan) {
+      let children = this._children.get(parentRunId);
+      if (!children) this._children.set(parentRunId, (children = new Set()));
+      children.add(runId);
       return trace.setSpan(base, parentSpan);
     }
     const tracer = getNeatlogsTracer(TRACER_NAME);
@@ -72,6 +81,40 @@ class NeatlogsCallbackHandler {
       endAutoRoot(root);
       this._autoRoots.delete(runId);
     }
+  }
+
+  private _endRun(runId: string, span: Span): void {
+    this._cancelOpenChildren(runId);
+    span.end();
+    this._spans.delete(runId);
+    this._tokens.delete(runId);
+    this._endAutoRoot(runId);
+  }
+
+  /**
+   * LangChain fires no end or error callback for a run whose stream the caller
+   * stopped reading (break) or aborted, so its span would stay open forever.
+   * Once the parent run is over such a child can no longer finish: close it
+   * as cancelled, with whatever it had streamed.
+   */
+  private _cancelOpenChildren(runId: string): void {
+    const children = this._children.get(runId);
+    if (!children) return;
+    this._children.delete(runId);
+    for (const childId of children) {
+      const child = this._spans.get(childId);
+      if (!child) continue;
+      this._applyStreamedTokens(childId, child);
+      markCancelled(child);
+      this._endRun(childId, child);
+    }
+  }
+
+  private _applyStreamedTokens(runId: string, span: Span): void {
+    const text = this._tokens.get(runId)?.parts.join('');
+    if (!text) return;
+    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
+    span.setAttribute('neatlogs.llm.output_messages.0.content', text);
   }
 
   // --- Chain/Graph callbacks ---
@@ -110,9 +153,7 @@ class NeatlogsCallbackHandler {
 
     if (outputs) span.setAttribute('output.value', safeStringify(outputs));
     span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    this._endRun(runId, span);
   }
 
   async handleChainError(
@@ -122,11 +163,8 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.recordException(error);
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    recordFailure(span, error);
+    this._endRun(runId, span);
   }
 
   // --- LLM callbacks ---
@@ -251,16 +289,23 @@ class NeatlogsCallbackHandler {
     }
 
     span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    this._endRun(runId, span);
   }
 
   async handleLLMNewToken(
-    _token: string,
+    token: string,
     _idx: any,
-    _runId: string,
-  ): Promise<void> {}
+    runId: string,
+  ): Promise<void> {
+    if (!token || !this._spans.has(runId)) return;
+    let kept = this._tokens.get(runId);
+    if (!kept) this._tokens.set(runId, (kept = { parts: [], bytes: 0 }));
+    const remaining = DEFAULT_MAX_STREAM_CAPTURE_BYTES - kept.bytes;
+    const bytes = utf8ByteLength(token, remaining);
+    if (bytes > remaining) return;
+    kept.parts.push(token);
+    kept.bytes += bytes;
+  }
 
   async handleLLMError(
     error: Error,
@@ -269,11 +314,9 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.recordException(error);
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    this._applyStreamedTokens(runId, span);
+    recordFailure(span, error);
+    this._endRun(runId, span);
   }
 
   // --- Tool callbacks ---
@@ -320,9 +363,7 @@ class NeatlogsCallbackHandler {
 
     span.setAttribute('output.value', toolOutputToString(output, span));
     span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    this._endRun(runId, span);
   }
 
   async handleToolError(
@@ -332,11 +373,8 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.recordException(error);
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    recordFailure(span, error);
+    this._endRun(runId, span);
   }
 
   // --- Retriever callbacks ---
@@ -380,9 +418,7 @@ class NeatlogsCallbackHandler {
     }
 
     span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    this._endRun(runId, span);
   }
 
   async handleRetrieverError(
@@ -392,11 +428,8 @@ class NeatlogsCallbackHandler {
     const span = this._spans.get(runId);
     if (!span) return;
 
-    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.recordException(error);
-    span.end();
-    this._spans.delete(runId);
-    this._endAutoRoot(runId);
+    recordFailure(span, error);
+    this._endRun(runId, span);
   }
 }
 

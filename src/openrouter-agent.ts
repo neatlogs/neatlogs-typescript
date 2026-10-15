@@ -27,6 +27,7 @@ import {
   getNeatlogsParentContext,
   withNeatlogsSpan,
 } from './core/provider.js';
+import { markCancelled, recordFailure } from './core/span-outcome.js';
 
 const TRACER_NAME = 'neatlogs.openrouter_agent';
 const PROVIDER = 'openrouter';
@@ -161,9 +162,10 @@ function startLlmSpan(opts: any): Span {
 
 /**
  * Wrap a ModelResult so the span is finalized exactly once, when the caller
- * consumes the result. We patch the common consumption methods (getText,
- * getMessage, then) so finalization happens on first use; a result that is
- * never consumed never finalizes (matching SDK semantics).
+ * consumes the result. We patch the consumption methods (getText,
+ * getResponse, getToolCalls, the get*Stream iterables, then) so finalization
+ * happens on first use; a result that is never consumed never finalizes
+ * (matching SDK semantics).
  */
 function instrumentModelResult(result: any, span: Span): any {
   if (!result || (typeof result !== 'object' && typeof result !== 'function')) {
@@ -184,10 +186,91 @@ function instrumentModelResult(result: any, span: Span): any {
       span.end();
     }
   };
+  // Text seen through getTextStream(), for a stream that ends early.
+  const streamedText: string[] = [];
+  const applyStreamedText = () => {
+    const text = streamedText.join('');
+    if (!text) return;
+    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
+    span.setAttribute('neatlogs.llm.output_messages.0.content', text);
+    span.setAttribute('output.value', text);
+  };
   const finalizeError = (err: unknown) => {
     if (finalized) return;
     finalized = true;
+    applyStreamedText();
     recordError(span, err);
+  };
+  const finalizeCancelled = () => {
+    if (finalized) return;
+    finalized = true;
+    applyStreamedText();
+    markCancelled(span);
+    span.end();
+  };
+  // A drained stream carries no usage; the full response does. getResponse()
+  // also rejects when the API reported the response as failed.
+  const finalizeFromStream = async (obj: any) => {
+    if (finalized) return;
+    let resp: any;
+    try {
+      resp = typeof obj?.getResponse === 'function' ? await obj.getResponse() : undefined;
+    } catch (err) {
+      finalizeError(err);
+      return;
+    }
+    const text = streamedText.join('');
+    finalizeFromResult(resp ? (text ? { ...resp, text } : resp) : { text });
+  };
+
+  // The span must end however a stream is left: drained, broken or abandoned.
+  const traceStream = (obj: any, source: any, collectText: boolean): any => {
+    if (!source || typeof source[Symbol.asyncIterator] !== 'function') return source;
+    let proxy: any;
+    let iterator: any;
+    const inner = () => (iterator ??= source[Symbol.asyncIterator]());
+    proxy = new Proxy(source, {
+      get(target, property) {
+        if (property === Symbol.asyncIterator) return () => proxy;
+        if (property === 'next') {
+          return async (...args: any[]) => {
+            try {
+              const item = await inner().next(...args);
+              if (item.done) await finalizeFromStream(obj);
+              else if (collectText && typeof item.value === 'string') streamedText.push(item.value);
+              return item;
+            } catch (err) {
+              finalizeError(err);
+              throw err;
+            }
+          };
+        }
+        if (property === 'return') {
+          return async (...args: any[]) => {
+            try {
+              const item = inner().return
+                ? await inner().return(...args)
+                : { done: true, value: args[0] };
+              if (item.done) finalizeCancelled();
+              return item;
+            } catch (err) {
+              finalizeError(err);
+              throw err;
+            }
+          };
+        }
+        if (property === 'throw') {
+          return async (...args: any[]) => {
+            finalizeError(args[0]);
+            if (inner().throw) return inner().throw(...args);
+            throw args[0];
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return proxy;
   };
 
   // The @openrouter/agent ModelResult is consumed via getText()/getResponse()/
@@ -239,6 +322,27 @@ function instrumentModelResult(result: any, span: Span): any {
         };
       }
 
+      if (typeof prop === 'string' && STREAM_METHODS.has(prop) && typeof value === 'function') {
+        return function (...args: any[]) {
+          return traceStream(obj, value.apply(obj, args), prop === 'getTextStream');
+        };
+      }
+
+      if (prop === 'getToolCalls' && typeof value === 'function') {
+        return function (...args: any[]) {
+          return Promise.resolve(value.apply(obj, args)).then(
+            async (toolCalls: any) => {
+              await finalizeFromStream(obj);
+              return toolCalls;
+            },
+            (err: any) => {
+              finalizeError(err);
+              throw err;
+            },
+          );
+        };
+      }
+
       if (prop === 'then' && typeof value === 'function') {
         // Result is awaitable directly: await result.
         return function (onFulfilled?: any, onRejected?: any) {
@@ -260,6 +364,17 @@ function instrumentModelResult(result: any, span: Span): any {
     },
   });
 }
+
+// ModelResult methods that hand back an async iterable instead of a promise.
+const STREAM_METHODS = new Set([
+  'getTextStream',
+  'getFullResponsesStream',
+  'getItemsStream',
+  'getNewMessagesStream',
+  'getReasoningStream',
+  'getToolStream',
+  'getToolCallsStream',
+]);
 
 /** Stamp usage from an @openrouter/agent OpenResponsesResult (inputTokens/outputTokens/...). */
 function setOpenResponsesUsage(span: Span, resp: any): void {
@@ -313,7 +428,13 @@ function finalizeLlm(span: Span, result: any): void {
   const responseId = result?.id ?? result?.response?.id;
   if (responseId) span.setAttribute('neatlogs.llm.response_id', String(responseId));
 
-  const finishReason = result?.finishReason ?? result?.finish_reason ?? result?.choices?.[0]?.finish_reason;
+  // An incomplete response has no finish reason of its own; say why it stopped.
+  const finishReason =
+    result?.finishReason ??
+    result?.finish_reason ??
+    result?.choices?.[0]?.finish_reason ??
+    result?.incompleteDetails?.reason ??
+    (result?.status === 'incomplete' ? result.status : undefined);
   if (finishReason) span.setAttribute('neatlogs.llm.finish_reason', String(finishReason));
 
   // Usage — OpenResponsesResult uses inputTokens/outputTokens; also handle the
@@ -349,11 +470,6 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
   span.end();
 }
