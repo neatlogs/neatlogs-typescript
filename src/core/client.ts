@@ -16,7 +16,7 @@ import {
   type BasicTracerProvider,
   type SpanExporter,
 } from "@opentelemetry/sdk-trace-base";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { OTLPTraceExporter } from "./otlp-trace-exporter.js";
 import { CompressionAlgorithm } from "@opentelemetry/otlp-exporter-base";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";

@@ -1,6 +1,15 @@
 import { defineConfig } from 'vitest/config';
+import { createRequire } from 'node:module';
+
+const nodeRequire = createRequire(import.meta.url);
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // The dependency's ESM entry contains lazy CommonJS transport imports.
+      '@opentelemetry/otlp-exporter-base/node-http': nodeRequire.resolve('@opentelemetry/otlp-exporter-base/node-http'),
+    },
+  },
   test: {
     globals: true,
     environment: 'node',

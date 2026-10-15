@@ -30,7 +30,7 @@ vi.mock('@opentelemetry/sdk-trace-base', () => ({
   TraceIdRatioBasedSampler: vi.fn().mockImplementation((rate) => ({ rate })),
 }));
 
-vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
+vi.mock('../../src/core/otlp-trace-exporter.js', () => ({
   OTLPTraceExporter: vi.fn().mockImplementation(() => ({})),
 }));
 
@@ -251,7 +251,7 @@ describe('init() edge cases', () => {
 
   it('with NEATLOGS_DISABLE_EXPORT="1" disables export', async () => {
     process.env.NEATLOGS_DISABLE_EXPORT = '1';
-    const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-proto');
+    const { OTLPTraceExporter } = await import('../../src/core/otlp-trace-exporter.js');
     (OTLPTraceExporter as any).mockClear();
 
     await init({ apiKey: 'test-key' });
@@ -261,7 +261,7 @@ describe('init() edge cases', () => {
 
   it('with NEATLOGS_DISABLE_EXPORT="yes" disables export', async () => {
     process.env.NEATLOGS_DISABLE_EXPORT = 'yes';
-    const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-proto');
+    const { OTLPTraceExporter } = await import('../../src/core/otlp-trace-exporter.js');
     (OTLPTraceExporter as any).mockClear();
 
     await init({ apiKey: 'test-key' });
