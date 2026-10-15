@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { AsyncResource } from 'node:async_hooks';
+import { ROOT_CONTEXT, trace as otelTrace } from '@opentelemetry/api';
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import type { ExportResult } from '@opentelemetry/core';
 import { Client } from '../../src/core/client.js';
 import { trace } from '../../src/core/context.js';
-import { getNeatlogsTracer } from '../../src/core/provider.js';
+import { getActiveNeatlogsSpan, getNeatlogsTracer } from '../../src/core/provider.js';
 import { datasets, DatasetCaptureError, getDatasetCaptureHandle, type DatasetCaptureHandle } from '../../src/dataset/capture.js';
 
 const datasetId = randomUUID();
@@ -135,6 +137,53 @@ describe('dataset capture through real SDK providers', () => {
     await expect(instance.activate(() => datasets.capture(destination, () => { open = getNeatlogsTracer('neatlogs.test').startSpan('still-running'); }, options))).rejects.toThrow('left spans open');
     expect(http.requests.at(-1)?.body).toEqual({ reason: 'incomplete_execution' });
     open?.end();
+  });
+
+  it.each([false, true])('follows a same-provider child with an explicit OTel parent after capture context is lost, ended=%s', async (ended) => {
+    const http = api();
+    const { instance, exporter } = client();
+    const detached = new AsyncResource('outside-capture');
+    let child: ReturnType<ReturnType<typeof getNeatlogsTracer>['startSpan']> | undefined;
+    try {
+      const capturing = instance.activate(() => datasets.capture(destination, () => trace({ name: 'agent', kind: 'WORKFLOW' }, () => {
+        const parent = getActiveNeatlogsSpan()!;
+        detached.runInAsyncScope(() => {
+          child = instance.tracerProvider.getTracer('neatlogs.callback').startSpan('detached-child', {}, otelTrace.setSpan(ROOT_CONTEXT, parent));
+          if (ended) child.end();
+        });
+        return 'actual';
+      }), options));
+      if (ended) {
+        await expect(capturing).resolves.toMatchObject({ state: 'queued' });
+        const delivered = exporter.spans.filter((span) => span.name !== 'neatlogs.trace.complete');
+        expect(delivered.map((span) => span.name).sort()).toEqual(['agent', 'detached-child']);
+        expect(http.requests.at(-1)?.body).toEqual({ traces: [{ traceId: child!.spanContext().traceId, spanIds: expect.arrayContaining(delivered.map((span) => span.spanContext().spanId)) }] });
+        expect((http.requests.at(-1)?.body.traces as Array<{ spanIds: string[] }>)[0].spanIds).toHaveLength(2);
+      } else {
+        await expect(capturing).rejects.toThrow('left spans open');
+        expect(http.requests.some((request) => request.url.endsWith('/complete'))).toBe(false);
+        expect(http.requests.at(-1)?.body).toEqual({ reason: 'incomplete_execution' });
+      }
+    } finally {
+      child?.end();
+      detached.emitDestroy();
+    }
+  });
+
+  it('does not adopt a different provider child when capture context is lost', async () => {
+    const http = api();
+    const { instance } = client();
+    const foreign = client();
+    const detached = new AsyncResource('outside-capture');
+    try {
+      await instance.activate(() => datasets.capture(destination, () => trace({ name: 'agent', kind: 'WORKFLOW' }, () => {
+        const parent = getActiveNeatlogsSpan()!;
+        detached.runInAsyncScope(() => {
+          foreign.instance.tracerProvider.getTracer('neatlogs.foreign').startSpan('foreign-child', {}, otelTrace.setSpan(ROOT_CONTEXT, parent)).end();
+        });
+      }), options));
+      expect((http.requests.at(-1)?.body.traces as Array<{ spanIds: string[] }>)[0].spanIds).toHaveLength(1);
+    } finally { detached.emitDestroy(); }
   });
 
   it.each(['export', 'mask'] as const)('aborts %s delivery loss while retaining ordinary trace pipeline behavior', async (failure) => {

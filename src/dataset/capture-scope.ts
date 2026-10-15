@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
-import { getNeatlogsProvider } from '../core/provider.js';
 import { isHttpSpan } from '../core/http-span.js';
 
 interface CapturedSpan {
+  processor: object;
   traceId: string;
   spanId: string;
   root: boolean;
@@ -41,12 +41,14 @@ const spanKey = (span: ReadableSpan) => {
   return `${context.traceId}:${context.spanId}`;
 };
 
-export function registerCaptureProvider(provider: object, sampleRate: number, flush: () => Promise<boolean>): void {
+export function registerCaptureProvider(provider: object, processor: object, sampleRate: number, flush: () => Promise<boolean>): void {
   const valueLengthLimited = ['OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT', 'OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT'].some((key) => {
     const value = process.env[key]?.trim();
     return value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0;
   });
-  state.providers.set(provider, { sampleRate, valueLengthLimited, flush });
+  const config = { sampleRate, valueLengthLimited, flush };
+  state.providers.set(provider, config);
+  state.providers.set(processor, config);
 }
 
 export function assertCaptureProvider(provider: object): () => Promise<boolean> {
@@ -74,16 +76,24 @@ export function runInCaptureScope<T>(scope: CaptureScope, run: () => T): T {
   return state.storage.run(scope, run);
 }
 
-export function captureSpanStarted(span: ReadableSpan): void {
-  const scope = state.storage.getStore();
-  if (!scope?.accepting || span.name === 'neatlogs.trace.complete') return;
-  const provider = getNeatlogsProvider();
-  if (provider) useCaptureProvider(provider);
+export function captureSpanStarted(span: ReadableSpan, processor: object): void {
   const context = span.spanContext();
+  const parentKey = span.parentSpanId ? `${context.traceId}:${span.parentSpanId}` : undefined;
+  const parentOwner = parentKey ? state.owners.get(parentKey) : undefined;
+  const parent = parentKey ? parentOwner?.spans.get(parentKey) : undefined;
+  // An OTel parent can survive a callback boundary that loses AsyncLocalStorage.
+  const scope = state.storage.getStore() ?? (parent?.processor === processor ? parentOwner : undefined);
+  if (!scope?.accepting || span.name === 'neatlogs.trace.complete') return;
+  if (parent && (parentOwner !== scope || parent.processor !== processor)) return;
+  const config = state.providers.get(processor);
+  if (!config) return;
+  if (config.sampleRate !== 1 || config.valueLengthLimited) { scope.exportFailed = true; return; }
+  scope.flushers.add(config.flush);
   const id = spanKey(span);
   // A 64 KiB manifest cannot hold 4096 sixteen-character span IDs.
   if (scope.spans.size >= 4096) { scope.oversized = true; return; }
   scope.spans.set(id, {
+    processor,
     traceId: context.traceId,
     spanId: context.spanId,
     root: !span.parentSpanId,

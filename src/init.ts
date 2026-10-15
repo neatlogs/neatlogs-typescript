@@ -669,7 +669,7 @@ async function _performInit(options: InitOptions): Promise<void> {
   // 13. Store privately. Neatlogs never registers an OTel provider globally.
   _tracerProvider = provider;
   _setNeatlogsProvider(provider);
-  if (!disableExportResolved && _ownsTracerProvider) registerCaptureProvider(provider, sampleRate, flush);
+  if (!disableExportResolved && _ownsTracerProvider) registerCaptureProvider(provider, _spanProcessor, sampleRate, flush);
 
   if (options.debug) {
     logger.debug("Neatlogs tracer provider initialized");

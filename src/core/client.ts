@@ -282,7 +282,7 @@ export class Client {
       this.logProvider = null;
     }
     this.otelLogger = this.logProvider?.getLogger("neatlogs") ?? null;
-    if (!disableExport) registerCaptureProvider(this.tracerProvider, sampleRate, () => this.flush());
+    if (!disableExport) registerCaptureProvider(this.tracerProvider, this.spanProcessor, sampleRate, () => this.flush());
     registerClient(this);
   }
 

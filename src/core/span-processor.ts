@@ -327,7 +327,7 @@ export class NeatlogsSpanProcessor implements SpanProcessor {
         scopeName.startsWith('neatlogs') ||
         (span.parentSpanId !== undefined && this._activeSpans.has(span.parentSpanId));
       if (sdkOwned && !isCompletionMarker) {
-        captureSpanStarted(span);
+        captureSpanStarted(span, this);
         setMediaCaptureAvailability(
           span as object,
           this.mediaUploadsAvailable,
