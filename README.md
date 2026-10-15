@@ -181,18 +181,18 @@ is accepted for loopback development servers.
 import { datasets } from 'neatlogs';
 
 const datasetApi = {
-  token: process.env.NEATLOGS_DATASET_TOKEN!,
-  projectId: process.env.NEATLOGS_PROJECT_ID!,
-  baseUrl: process.env.NEATLOGS_API_ORIGIN!,
+	token: process.env.NEATLOGS_DATASET_TOKEN!,
+	projectId: process.env.NEATLOGS_PROJECT_ID!,
+	baseUrl: process.env.NEATLOGS_API_ORIGIN!,
 };
 
 const created = await datasets.create({
-  name: 'Support examples',
-  cases: [{
-    input: { question: 'How do I reset my password?' },
-    observedOutput: 'Use the reset link on the sign-in page.',
-    outcome: { answer: 'Send the password reset instructions.' },
-  }],
+	name: 'Support examples',
+	cases: [{
+		input: { question: 'How do I reset my password?' },
+		observedOutput: 'Use the reset link on the sign-in page.',
+		outcome: { answer: 'Send the password reset instructions.' },
+	}],
 }, datasetApi);
 ```
 
@@ -203,8 +203,8 @@ pass the case and revision UUIDs from the dataset's current version:
 
 ```typescript
 const revised = await datasets.updateOutcomes(created.datasetId, {
-  baseVersionId: created.versionId,
-  changes: [{ caseId, revisionId, outcome: { answer: 'Updated instructions.' } }],
+	baseVersionId: created.versionId,
+	changes: [{ caseId, revisionId, outcome: { answer: 'Updated instructions.' } }],
 }, datasetApi);
 ```
 
@@ -223,21 +223,23 @@ and outputs. Await all traced work inside the callback.
 import { init, shutdown, trace, datasets } from 'neatlogs';
 
 async function main() {
-  await init({ apiKey: process.env.NEATLOGS_API_KEY, sampleRate: 1 });
-  try {
-    const capture = await datasets.capture(
-      { kind: 'existing', datasetId: process.env.NEATLOGS_DATASET_ID! },
-      () => trace({ name: 'support-agent', kind: 'WORKFLOW', input: question },
-        () => supportAgent(question)),
-      { ...datasetApi, environment: 'local' },
-    );
-    console.log(capture.result);
-    const published = await capture.wait({ timeoutMillis: 60_000 });
-    console.log(published.datasetVersionId);
-  } finally {
-    await shutdown();
-  }
+	await init({ apiKey: process.env.NEATLOGS_API_KEY, sampleRate: 1 });
+	try {
+		const capture = await datasets.capture(
+			{ kind: 'existing', datasetId: process.env.NEATLOGS_DATASET_ID! },
+			() => trace({ name: 'support-agent', kind: 'WORKFLOW', input: question },
+				() => supportAgent(question)),
+			{ ...datasetApi, environment: 'local' },
+		);
+		console.log(capture.result);
+		const published = await capture.wait({ timeoutMillis: 60_000 });
+		console.log(published.datasetVersionId);
+	} finally {
+		await shutdown();
+	}
 }
+
+main().catch(console.error);
 ```
 
 A name destination requires an explicit creation choice, for example
