@@ -200,6 +200,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # npm pack does not create its destination and fails with ENOENT.
+          # ci.yml runs this script as written, so pass values in through env.
+          mkdir -p "$RUNNER_TEMP/npm-package"
           npm pack --pack-destination "$RUNNER_TEMP/npm-package"
           git diff --exit-code
           echo "package_name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
