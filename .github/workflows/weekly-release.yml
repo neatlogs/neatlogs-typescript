@@ -61,18 +61,22 @@ jobs:
       action: ${{ steps.plan.outputs.action }}
       version: ${{ steps.plan.outputs.version }}
       package_name: ${{ steps.pack.outputs.package_name }}
+    # This job holds the release App key, so every action is pinned to a commit.
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      # pnpm/action-setup v4.3.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         if: github.repository == 'neatlogs/neatlogs-wizard'
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      # actions/setup-node v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
@@ -152,7 +156,8 @@ jobs:
 
       - name: Create a repository-scoped release token
         id: release-token
-        uses: actions/create-github-app-token@v2
+        # actions/create-github-app-token v2.2.2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -227,8 +232,10 @@ jobs:
       url: https://www.npmjs.com/package/${{ needs.release.outputs.package_name }}/v/${{ needs.release.outputs.version }}
     permissions:
       id-token: write
+    # This job can publish to npm, so every action is pinned to a commit.
     steps:
-      - uses: actions/setup-node@v4
+      # actions/setup-node v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
