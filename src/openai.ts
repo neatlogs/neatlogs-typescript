@@ -14,6 +14,7 @@
  */
 
 import { SpanStatusCode, type Span } from "@opentelemetry/api";
+import { observeRawResponse } from "./core/raw-response.js";
 import { getProviderTracer } from "./core/auto-root.js";
 import { ChoiceAccumulator } from "./core/choice-accumulator.js";
 import { captureMedia } from "./core/media.js";
@@ -276,21 +277,14 @@ function preserveResponseHelpers(result: any, span: Span, finalize: (value: any)
           try {
             const response = await promise.asResponse();
             if (!traced && span.isRecording()) {
-              if (response.ok && !isStream) {
-                // Parse a copy so a later await still gets traced output.
-                response.clone().json().then(
-                  (body: any) => {
-                    if (!traced && span.isRecording()) finalize(body);
-                  },
-                  () => {
-                    if (!traced && span.isRecording()) {
-                      span.setStatus({ code: SpanStatusCode.OK });
-                      span.end();
-                    }
-                  },
-                );
+              if (response.ok) {
+                observeRawResponse(response, span, {
+                  isStream,
+                  isTraced: () => traced !== undefined,
+                  finalize,
+                });
               } else {
-                span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+                span.setStatus({ code: SpanStatusCode.ERROR });
                 span.end();
               }
             }
