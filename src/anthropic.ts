@@ -21,6 +21,7 @@ import {
   utf8ByteLength,
 } from './constants.js';
 import { getProviderTracer } from './core/auto-root.js';
+import { observeRawResponse } from './core/raw-response.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import { markCancelled, recordFailure } from './core/span-outcome.js';
 import {
@@ -179,21 +180,14 @@ function tracedMessagesCreate(original: (...args: any[]) => any) {
             try {
               const response = await target.asResponse();
               if (!traced && span.isRecording()) {
-                if (response.ok && !isStream) {
-                  // Parse a copy so a later await still gets traced output.
-                  response.clone().json().then(
-                    (body: any) => {
-                      if (!traced && span.isRecording()) finalizeMessageResponse(span, body);
-                    },
-                    () => {
-                      if (!traced && span.isRecording()) {
-                        span.setStatus({ code: SpanStatusCode.OK });
-                        span.end();
-                      }
-                    },
-                  );
+                if (response.ok) {
+                  observeRawResponse(response, span, {
+                    isStream,
+                    isTraced: () => traced !== undefined,
+                    finalize: (body: any) => finalizeMessageResponse(span, body),
+                  });
                 } else {
-                  span.setStatus({ code: response.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+                  span.setStatus({ code: SpanStatusCode.ERROR });
                   span.end();
                 }
               }
