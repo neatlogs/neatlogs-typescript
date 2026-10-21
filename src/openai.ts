@@ -23,6 +23,8 @@ import {
   wrapResponsesAsyncIterableStream,
 } from "./core/openai-responses.js";
 import { recordFailure } from "./core/span-outcome.js";
+import { cachedModelSpan, providerReplay } from './replay/provider.js';
+import { prepareProviderCapture } from './replay/provider-capture.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -226,9 +228,15 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
       }
     }
 
+    const captureResponse = prepareProviderCapture(span, 'openai.chat.completions.create', opts, !isStream && rest.length === 0);
     let result: any;
+    let replayed = false;
     try {
-      result = withNeatlogsSpan(span, () => original(opts, ...rest));
+      result = withNeatlogsSpan(span, () => {
+        const saved = providerReplay('openai.chat.completions.create', opts, !isStream && rest.length === 0);
+        replayed = saved !== undefined;
+        return replayed ? saved : original(opts, ...rest);
+      });
     } catch (err) {
       recordError(span, err);
       throw err;
@@ -239,7 +247,8 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
         if (isStream) {
           return wrapAsyncIterableStream(response, span);
         }
-        finalizeChatResponse(span, response);
+        if (!replayed) captureResponse(response);
+        finalizeChatResponse(replayed ? cachedModelSpan(span) : span, response);
         return response;
       },
       (err: any) => {
@@ -284,9 +293,15 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
     span.setAttribute("input.value", safeStringify(capturedInput ?? ""));
     setInvocationParams(span, opts);
 
+    const captureResponse = prepareProviderCapture(span, 'openai.responses.create', opts, !isStream && rest.length === 0);
     let result: any;
+    let replayed = false;
     try {
-      result = withNeatlogsSpan(span, () => original(opts, ...rest));
+      result = withNeatlogsSpan(span, () => {
+        const saved = providerReplay('openai.responses.create', opts, !isStream && rest.length === 0);
+        replayed = saved !== undefined;
+        return replayed ? saved : original(opts, ...rest);
+      });
     } catch (err) {
       recordError(span, err);
       throw err;
@@ -297,7 +312,8 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         if (isStream) {
           return wrapResponsesAsyncIterableStream(response, span);
         }
-        finalizeResponsesResponse(span, response);
+        if (!replayed) captureResponse(response);
+        finalizeResponsesResponse(replayed ? cachedModelSpan(span) : span, response);
         return response;
       },
       (err: any) => {
