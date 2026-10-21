@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createDataset, updateDatasetOutcomes } from '../../src/dataset/mutations.js';
+import { listDatasetVersions } from '../../src/dataset/history.js';
+import { createDataset, updateDatasetOutcomes, upsertDatasetCases } from '../../src/dataset/mutations.js';
 
 const datasetId = '53f5bc6f-2cc5-4e03-8c26-d0df0283845e';
 const versionId = '442e68ec-d502-489f-8a39-f01493fbcc7d';
@@ -66,4 +67,37 @@ describe('dataset creation and per-case outcomes', () => {
     await expect(updateDatasetOutcomes(datasetId, { baseVersionId: versionId, changes: [{ caseId, revisionId, outcome: 0 }] }, options)).rejects.toMatchObject({ statusCode: 409 });
     expect(fetch).toHaveBeenCalledOnce();
   });
+});
+
+it('preserves external keys in create and publishes keyed replacements with a pinned base', async () => {
+  const fetch = server();
+  await createDataset({ name: 'keys', cases: [{ key: 'sheet/order-42', input: 'before' }] }, options);
+  expect(body(fetch).cases[0].key).toBe('sheet/order-42');
+  fetch.mockClear();
+  await upsertDatasetCases(datasetId, { baseVersionId: versionId, cases: [{ key: 'sheet/order-42', input: 'after', outcome: 'right' }] }, options);
+  expect(body(fetch)).toEqual({ baseVersionId: versionId, idempotencyKey: datasetId, upsertCases: [
+    { key: 'sheet/order-42', input: 'after', expected: { value: 'right', status: 'draft', source: 'human' }, source: { kind: 'import' } },
+  ] });
+  expect(fetch.mock.calls[0]?.[0]).toBe(`https://api.example.test/api/v1/public/datasets/${datasetId}/versions`);
+  expect(body(fetch).createdBy).toBeUndefined();
+});
+it('rejects duplicate or malformed upsert keys before transport', async () => {
+  const fetch = server();
+  for (const keys of [['duplicate', 'duplicate'], [' leading'], ['x'.repeat(129)], ['bad\nkey']]) {
+    await expect(upsertDatasetCases(datasetId, { baseVersionId: versionId, cases: keys.map(key => ({ key, input: 'fixture' })) }, options)).rejects.toThrow();
+  }
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('validates version actors and keeps unknown legacy provenance explicit', async () => {
+  const payload = { dataset: { id: datasetId }, versions: [
+    { id: versionId, version: 2, createdAt: '2026-10-21T00:00:00Z', createdBy: { kind: 'service_account', id: caseId }, tags: ['golden'] },
+    { id: revisionId, version: 1, createdAt: '2026-10-20T00:00:00Z' },
+  ] };
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ success: true, data: payload })));
+  const history = await listDatasetVersions(datasetId, options);
+  expect(history[0]?.createdBy).toEqual({ kind: 'service_account', id: caseId });
+  expect(history[1]?.createdBy).toBeNull();
+  payload.versions[0]!.createdBy!.kind = 'forged';
+  await expect(listDatasetVersions(datasetId, options)).rejects.toThrow('actor');
 });

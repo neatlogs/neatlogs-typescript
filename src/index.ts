@@ -183,5 +183,6 @@ export {
 // Version
 export { __version__ } from "./version.js";
 
+export type { DatasetVersionActor, DatasetVersionSummary } from './dataset/history.js';
 export { Dataset, runEval } from "./evals.js";
 export type { EvalContext, EvalResult, RunEvalOptions } from "./evals.js";

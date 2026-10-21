@@ -1,3 +1,4 @@
+import { listDatasetVersions } from './history.js';
 import { randomUUID } from 'node:crypto';
 import { getNeatlogsProvider, runWithFreshNeatlogsContext } from '../core/provider.js';
 import {
@@ -6,7 +7,7 @@ import {
   type DatasetCaptureReceipt, type DatasetCaptureState, type DatasetCaptureStatus, type DatasetCaptureFailure,
 } from './capture-contracts.js';
 import { DatasetApi, DatasetCaptureError, positive, uuid, serializeCaptureBody, type DatasetApiOptions } from './api.js';
-import { createDataset, updateDatasetOutcomes } from './mutations.js';
+import { createDataset, updateDatasetOutcomes, upsertDatasetCases } from './mutations.js';
 import {
   assertCaptureNotNested, assertCaptureProvider, createCaptureScope, runInCaptureScope,
   flushCaptureScope, captureScopeIncomplete, captureScopeDeliveryFailed, capturedTraces, releaseCaptureScope,
@@ -246,7 +247,7 @@ async function capture<T>(destination: DatasetCaptureDestination, run: () => T |
   }
 }
 
-export const datasets = { create: createDataset, updateOutcomes: updateDatasetOutcomes, capture };
+export const datasets = { create: createDataset, upsert: upsertDatasetCases, versions: listDatasetVersions, updateOutcomes: updateDatasetOutcomes, capture };
 export { DatasetCaptureError };
 export type { DatasetCaptureDestination, DatasetCaptureState, DatasetCaptureStatus, DatasetCaptureFailure };
 
