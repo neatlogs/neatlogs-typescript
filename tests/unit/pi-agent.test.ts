@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
@@ -219,5 +219,23 @@ describe('maintained Pi AgentHarness operations', () => {
     await piAgentHooks(hooked).compact();
     expect(piSpans().filter((span) => kind(span) === 'LLM')).toHaveLength(0);
     expect(piSpans().filter((span) => kind(span) === 'CHAIN')).toHaveLength(1);
+  });
+});
+
+describe('piAgentHooks without subscribe', () => {
+  it('warns once and leaves the object untouched', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const notAnAgent: any = { run: async () => 'ok' };
+      expect(piAgentHooks(notAnAgent)).toBe(notAnAgent);
+      expect(notAnAgent._neatlogs_patched).toBeUndefined();
+      piAgentHooks({ nope: true } as any);
+      const warnings = warn.mock.calls.filter((args) =>
+        String(args[0]).includes('piAgentHooks() received an object without subscribe()'),
+      );
+      expect(warnings).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
