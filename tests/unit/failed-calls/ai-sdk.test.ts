@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import * as aiV7 from 'ai';
 import * as aiV6 from 'ai-v6';
@@ -59,10 +60,23 @@ function wrapperSpan(name: string): ReadableSpan {
   return found[0];
 }
 
+
+// @ai-sdk/otel is an optional dependency with engines >=22, so npm ci silently
+// skips it on Node 18/20 (which package.json still supports). The v7 telemetry
+// integration loads it lazily, so v7 telemetry tests cannot run there.
+const hasAiSdkOtel = (() => {
+  try {
+    createRequire(import.meta.url).resolve('@ai-sdk/otel');
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 describe.each([
-  ['v6', aiV6, MockLanguageModelV3],
-  ['v7', aiV7, MockLanguageModelV4],
-] as const)('wrapAISDK streamText on AI SDK %s', (_version, module, MockModel) => {
+  ['v6', aiV6, MockLanguageModelV3, false] as const,
+  ['v7', aiV7, MockLanguageModelV4, !hasAiSdkOtel] as const,
+] as const)('wrapAISDK streamText on AI SDK %s', (_version, module, MockModel, otelMissing) => {
   const { streamText } = wrapAISDK(module as any) as any;
   const model = (parts: unknown[], ending: Ending) =>
     new (MockModel as any)({
@@ -83,7 +97,7 @@ describe.each([
     }
   }
 
-  it('records a normal finish with its output and calls the caller onFinish', async () => {
+  it.skipIf(otelMissing)('records a normal finish with its output and calls the caller onFinish', async () => {
     const calls: string[] = [];
     const result = streamText({
       model: model([...opening('hello'), ...closing()], 'close'),
@@ -101,7 +115,7 @@ describe.each([
     expect(calls).toEqual(['onFinish']);
   });
 
-  it('records a provider stream that breaks mid-way as an error', async () => {
+  it.skipIf(otelMissing)('records a provider stream that breaks mid-way as an error', async () => {
     const result = streamText({
       model: model(opening('partial'), { error: new Error('socket hang up') }),
       prompt: 'hi',
@@ -116,7 +130,7 @@ describe.each([
     expect(span.attributes['output.value']).toBe('partial');
   });
 
-  it('records a broken provider stream as an error when read through consumeStream()', async () => {
+  it.skipIf(otelMissing)('records a broken provider stream as an error when read through consumeStream()', async () => {
     const result = streamText({
       model: model(opening('partial'), { error: new Error('socket hang up') }),
       prompt: 'hi',
@@ -127,7 +141,7 @@ describe.each([
     expect(wrapperSpan('ai.streamText').status.code).toBe(ERROR);
   });
 
-  it('records an in-stream error part as an error and still calls the caller onError', async () => {
+  it.skipIf(otelMissing)('records an in-stream error part as an error and still calls the caller onError', async () => {
     const calls: string[] = [];
     const result = streamText({
       model: model(
@@ -146,7 +160,7 @@ describe.each([
     expect(calls).toEqual(['onError']);
   });
 
-  it('records a caller abort as cancelled and calls the caller onAbort', async () => {
+  it.skipIf(otelMissing)('records a caller abort as cancelled and calls the caller onAbort', async () => {
     const calls: string[] = [];
     const controller = new AbortController();
     const result = streamText({
@@ -167,7 +181,7 @@ describe.each([
     expect(calls).toEqual(['onAbort']);
   });
 
-  it('records a consumer that stops reading as cancelled', async () => {
+  it.skipIf(otelMissing)('records a consumer that stops reading as cancelled', async () => {
     const result = streamText({
       model: model([...opening('partial'), { type: 'text-delta', id: '1', delta: ' more' }], 'hang'),
       prompt: 'hi',
@@ -182,9 +196,9 @@ describe.each([
 });
 
 describe.each([
-  ['v6', aiV6, MockLanguageModelV3],
-  ['v7', aiV7, MockLanguageModelV4],
-] as const)('wrapAISDK streamObject on AI SDK %s', (_version, module, MockModel) => {
+  ['v6', aiV6, MockLanguageModelV3, false] as const,
+  ['v7', aiV7, MockLanguageModelV4, !hasAiSdkOtel] as const,
+] as const)('wrapAISDK streamObject on AI SDK %s', (_version, module, MockModel, otelMissing) => {
   const { streamObject } = wrapAISDK(module as any) as any;
   const run = (parts: unknown[], ending: Ending, extra: Record<string, unknown> = {}) =>
     streamObject({
@@ -211,7 +225,7 @@ describe.each([
     }
   }
 
-  it('records a normal finish with its output and calls the caller onFinish', async () => {
+  it.skipIf(otelMissing)('records a normal finish with its output and calls the caller onFinish', async () => {
     const calls: string[] = [];
     const result = run([...opening('{"a":1}'), ...closing()], 'close', {
       onFinish: () => void calls.push('onFinish'),
@@ -225,7 +239,7 @@ describe.each([
     expect(calls).toEqual(['onFinish']);
   });
 
-  it('records a provider stream that breaks mid-way as an error', async () => {
+  it.skipIf(otelMissing)('records a provider stream that breaks mid-way as an error', async () => {
     const result = run(opening('{"a":'), { error: new Error('socket hang up') });
     expect(await read(result)).toBe('threw socket hang up');
     await tick(50);
@@ -235,7 +249,7 @@ describe.each([
     expect(exceptionOf(span)).toBeDefined();
   });
 
-  it('records a caller abort as cancelled, not as an error', async () => {
+  it.skipIf(otelMissing)('records a caller abort as cancelled, not as an error', async () => {
     const controller = new AbortController();
     const result = run(opening('{"a":'), 'hang', { abortSignal: controller.signal });
     setTimeout(() => controller.abort(), 30);
@@ -248,7 +262,7 @@ describe.each([
     expect(exceptionOf(span)).toBeUndefined();
   });
 
-  it('records a consumer that stops reading as cancelled', async () => {
+  it.skipIf(otelMissing)('records a consumer that stops reading as cancelled', async () => {
     const result = run([...opening('{"a":'), { type: 'text-delta', id: '1', delta: '1' }], 'hang');
     expect(await read(result, 1)).toBe('completed');
     await tick(50);
@@ -259,7 +273,7 @@ describe.each([
   });
 });
 
-describe('wrapAISDK streamText on AI SDK v7 only', () => {
+describe.skipIf(!hasAiSdkOtel)('wrapAISDK streamText on AI SDK v7 only', () => {
   const { streamText } = wrapAISDK(aiV7 as any) as any;
 
   it('ends the span when the caller uses onEnd instead of the deprecated onFinish', async () => {
@@ -305,5 +319,39 @@ describe('wrapAISDK streamText on AI SDK v7 only', () => {
     expect(span.status.code).toBe(UNSET);
     expect(exceptionOf(span)).toBeUndefined();
     expect(span.attributes['output.value']).toBe('recovered');
+  });
+});
+
+// Regression for the declared Node >=18 floor: where npm ci skips the optional
+// @ai-sdk/otel peer (engines >=22 upstream, so Node 18/20), unsupported v7
+// telemetry must fail explicitly while supported paths keep working. These run
+// only where the peer is absent; on Node 22 the positive tests above cover it.
+describe('wrapAISDK without the optional @ai-sdk/otel dependency', () => {
+  it.skipIf(hasAiSdkOtel)('fails v7 calls with a clear missing-peer error', async () => {
+    const { generateText } = wrapAISDK(aiV7 as any) as any;
+    const model = new MockLanguageModelV4({
+      doGenerate: {
+        content: [{ type: 'text', text: 'hello' }],
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage,
+        warnings: [],
+      },
+    } as any);
+    await expect(generateText({ model, prompt: 'hi' })).rejects.toThrow(
+      /requires the optional @ai-sdk\/otel peer dependency/,
+    );
+  });
+
+  it.skipIf(hasAiSdkOtel)('keeps the v6 path working and traced without the peer', async () => {
+    const { streamText } = wrapAISDK(aiV6 as any) as any;
+    const model = new MockLanguageModelV3({
+      doStream: async () => ({ stream: providerStream([...opening('hello'), ...closing()], 'close') }),
+    } as any);
+    const result = streamText({ model, prompt: 'hi' });
+    let text = '';
+    for await (const delta of result.textStream) text += delta;
+    expect(text).toBe('hello');
+    await tick(50);
+    expect(wrapperSpans('ai.streamText')).toHaveLength(1);
   });
 });
