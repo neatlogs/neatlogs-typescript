@@ -572,6 +572,62 @@ describe('openaiAgentsProcessor', () => {
     expect(total).toBeLessThan(40 * 2100 + 40 * 20);
   });
 
+  it('captures same-length but different input histories on later response spans', () => {
+    // Regression: a trace-wide message count treated a same-length list as an
+    // already captured prefix, so a distinct one-message _input lost its input.
+    const processor = openaiAgentsProcessor();
+    processor.onTraceStart({ traceId: 'trace-sl', name: 'Agent workflow' });
+    processor.onSpanStart({ spanId: 'r1', traceId: 'trace-sl', spanData: { type: 'response' } });
+    processor.onSpanEnd({ spanId: 'r1', traceId: 'trace-sl', spanData: { type: 'response', _input: [
+      { role: 'user', content: 'first prompt' },
+    ], _response: {
+      model: 'gpt-4o-mini',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'first answer' }] }],
+    } } });
+    processor.onSpanStart({ spanId: 'r2', traceId: 'trace-sl', spanData: { type: 'response' } });
+    processor.onSpanEnd({ spanId: 'r2', traceId: 'trace-sl', spanData: { type: 'response', _input: [
+      { role: 'user', content: 'a different prompt' },
+    ], _response: {
+      model: 'gpt-4o-mini',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'second answer' }] }],
+    } } });
+    processor.onTraceEnd({ traceId: 'trace-sl' });
+
+    const llm = exporter.getFinishedSpans().filter(s => s.attributes['neatlogs.span.kind'] === 'LLM');
+    expect(llm.length).toBe(2);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.0.content')).toBe('first prompt');
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.0.content')).toBe('a different prompt');
+  });
+
+  it('captures input on interleaved parallel branches sharing one trace', () => {
+    // Regression: two branches interleave response spans with diverging
+    // histories; only a verified shared prefix may be skipped, so neither
+    // branch loses its turns.
+    const processor = openaiAgentsProcessor();
+    const respond = (id: string, input: any[], answer: string) => {
+      processor.onSpanStart({ spanId: id, traceId: 'trace-cb', spanData: { type: 'response' } });
+      processor.onSpanEnd({ spanId: id, traceId: 'trace-cb', spanData: { type: 'response', _input: input, _response: {
+        model: 'gpt-4o-mini',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: answer }] }],
+      } } });
+    };
+    const shared = { role: 'user', content: 'shared start' };
+    processor.onTraceStart({ traceId: 'trace-cb', name: 'Agent workflow' });
+    respond('a1', [shared, { role: 'user', content: 'branch a turn 1' }], 'a1');
+    respond('b1', [shared, { role: 'user', content: 'branch b turn 1' }], 'b1');
+    respond('a2', [shared, { role: 'user', content: 'branch a turn 1' }, { role: 'assistant', content: 'a1' }, { role: 'user', content: 'branch a turn 2' }], 'a2');
+    processor.onTraceEnd({ traceId: 'trace-cb' });
+
+    const llm = exporter.getFinishedSpans().filter(s => s.attributes['neatlogs.span.kind'] === 'LLM');
+    expect(llm.length).toBe(3);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.0.content')).toBe('shared start');
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.1.content')).toBe('branch a turn 1');
+    // The b branch keeps its own turn even though its list matched a's length.
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.1.content')).toBe('branch b turn 1');
+    // The continued a branch still lands its newest turn.
+    expect(attr(llm[2], 'neatlogs.llm.input_messages.3.content')).toBe('branch a turn 2');
+  });
+
   it('keeps inline media out of response and root text attributes', () => {
     const processor = openaiAgentsProcessor();
     const data = Buffer.alloc(120_000, 0x41).toString('base64');

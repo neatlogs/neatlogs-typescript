@@ -32,9 +32,12 @@ class NeatlogsTraceProcessor {
   private _spans: Map<string, Span> = new Map();
   private _startTimes: Map<string, number> = new Map();
   private _rootInputDone: Set<string> = new Set();
-  // Input messages already captured per trace, so a long conversation is not
-  // copied onto every response span.
-  private _inputSeen: Map<string, number> = new Map();
+  // Fingerprints of input messages already captured per trace, so a long
+  // conversation is not copied onto every response span. Only a verified
+  // shared prefix is skipped: a same-length list whose contents differ is new
+  // input, not an already-seen prefix (parallel branches, fixed-size or reset
+  // histories), so the prefix is recomputed from the fingerprints each time.
+  private _inputSeen: Map<string, string[]> = new Map();
   // First error per trace from a span whose failure ends the run.
   private _runErrors: Map<string, unknown> = new Map();
   // Tool/function spans and everything nested under them: the run carries on
@@ -217,12 +220,15 @@ class NeatlogsTraceProcessor {
       // assistant output onto the WORKFLOW root, which drives trace-list I/O.
       const inputItems = data?._input ?? data?.input;
       const traceKey = String(span?.traceId ?? span?.trace_id ?? '');
-      const inputCount = Array.isArray(inputItems) ? inputItems.length : (typeof inputItems === 'string' ? 1 : 0);
-      const seen = this._inputSeen.get(traceKey) ?? 0;
-      // Only the turns added since the previous response span in this trace; a
-      // shorter list means the history was reset, so start over.
-      const inputTurns = captureInputMessages(otelSpan, inputItems, seen <= inputCount ? seen : 0);
-      this._inputSeen.set(traceKey, inputCount);
+      const messages = Array.isArray(inputItems) ? inputItems : (typeof inputItems === 'string' ? [inputItems] : []);
+      const fingerprints = messages.map(messageFingerprint);
+      // Only the turns past the verified shared prefix with what earlier
+      // response spans of this trace already captured.
+      const previous = this._inputSeen.get(traceKey) ?? [];
+      let start = 0;
+      while (start < previous.length && start < fingerprints.length && previous[start] === fingerprints[start]) start++;
+      const inputTurns = captureInputMessages(otelSpan, inputItems, start);
+      this._inputSeen.set(traceKey, fingerprints);
       const root = this._spans.get(traceKey);
       if (root) {
         if (!this._rootInputDone.has(traceKey)) {
@@ -378,6 +384,31 @@ function assistantOutputText(output: any): string {
     .flatMap((item: any) => Array.isArray(item.content) ? item.content : [item.content])
     .map((content: any) => typeof content === 'string' ? content : content?.text ?? '')
     .join('');
+}
+
+// 53-bit string hash (cyrb53) for input-prefix fingerprints.
+function cyrb53(str: string, seed = 0): string {
+  let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0, ch; i < str.length; i++) {
+    ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+}
+
+// Identity of one input message for prefix verification: role plus text and
+// part types. Inline media payloads stay out of the hash; their bytes are
+// already routed through captureMedia on the span that first saw the turn.
+function messageFingerprint(message: any): string {
+  const role = typeof message === 'object' && message ? String(message.role ?? '') : '';
+  const content = typeof message === 'object' && message ? message.content : message;
+  const text = Array.isArray(content)
+    ? content.map((part: any) => (typeof part === 'string' ? part : `${part?.type ?? ''}:${typeof part?.text === 'string' ? part.text : ''}`)).join(' ')
+    : (typeof content === 'string' ? content : (typeof content?.text === 'string' ? content.text : ''));
+  return cyrb53(`${role} ${text}`);
 }
 
 // Text only: media parts are captured by captureMedia, never stringified here.
