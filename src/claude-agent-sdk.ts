@@ -38,6 +38,7 @@
 
 import { trace, SpanStatusCode, type Span, type Context } from '@opentelemetry/api';
 import { getNeatlogsTracer, getNeatlogsBaseContext, withNeatlogsSpan } from './core/provider.js';
+import { isAbortError, markCancelled, recordFailure } from './core/span-outcome.js';
 
 const TRACER_NAME = 'neatlogs.claude_agent_sdk';
 const ROOT_SCOPE = '__root__';
@@ -229,7 +230,7 @@ function instrumentQueryIterable(
     promptRef,
   };
 
-  const finalizeAgent = (status: 'ok' | 'error', err?: unknown) => {
+  const finalizeAgent = (status: 'ok' | 'error' | 'cancelled', err?: unknown) => {
     if (state.finished) return;
     state.finished = true;
     // Flush every scope's in-progress turn, then close subagent AGENT spans
@@ -251,9 +252,10 @@ function instrumentQueryIterable(
     }
     if (rootScope.finalText) agentSpan.setAttribute('output.value', rootScope.finalText);
     if (status === 'error') {
-      recordError(agentSpan, err);
+      recordError(agentSpan, err, Boolean(rootScope.finalText));
     } else {
-      agentSpan.setStatus({ code: SpanStatusCode.OK });
+      if (status === 'cancelled') markCancelled(agentSpan);
+      else agentSpan.setStatus({ code: SpanStatusCode.OK });
       agentSpan.end();
     }
   };
@@ -283,7 +285,8 @@ function instrumentQueryIterable(
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
-        finalizeAgent('ok');
+        // No-op when the `result` message already closed the run.
+        finalizeAgent('cancelled');
         return iterator.return?.(value) ?? { done: true, value: undefined };
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
@@ -658,17 +661,15 @@ function safeStringify(value: unknown): string {
   }
 }
 
-function recordError(span: Span, err: unknown): void {
-  const message = err instanceof Error ? err.message : String(err);
-  span.setAttribute(
-    'output.value',
-    JSON.stringify({ status: 'error', error: message }),
-  );
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message });
+// `keepOutput`: the span already carries the run's own text.
+function recordError(span: Span, err: unknown, keepOutput = false): void {
+  if (!keepOutput && !isAbortError(err)) {
+    const message = err instanceof Error ? err.message : String(err);
+    span.setAttribute(
+      'output.value',
+      JSON.stringify({ status: 'error', error: message }),
+    );
   }
+  recordFailure(span, err);
   span.end();
 }

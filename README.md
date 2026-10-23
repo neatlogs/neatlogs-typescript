@@ -119,8 +119,6 @@ await init({
 |--------|------|---------|-------------|
 | `apiKey` | `string` | `process.env.NEATLOGS_API_KEY` | Neatlogs API key. Export disabled if not set. |
 | `workflowName` | `string` | Derived from `process.argv[1]` | Name of the workflow being traced. |
-| `sessionId` | `string` | — | Explicit session ID for grouping traces. |
-| `autoSession` | `boolean` | `false` | Auto-generate a session ID if none provided. |
 | `userId` | `string` | — | User identifier for the session. |
 | `tags` | `string[]` | — | Tags attached to all spans. |
 | `metadata` | `Record<string, any>` | — | Custom metadata attached to all spans. |
@@ -169,6 +167,115 @@ await project.shutdown();
 Do not share one activation across unrelated concurrent jobs. Create one Client
 per destination, use `activate()` around each execution, and always await
 `shutdown()` when that Client is no longer needed.
+
+---
+
+### Datasets
+
+Dataset writes use an explicit public API token with dataset write access, a
+project UUID, and the API origin. The SDK does not reuse the ingestion API key.
+`baseUrl` must be an HTTPS origin without a path, query, or credentials. HTTP
+is accepted for loopback development servers.
+
+```typescript
+import { datasets } from 'neatlogs';
+
+const datasetApi = {
+	token: process.env.NEATLOGS_DATASET_TOKEN!,
+	projectId: process.env.NEATLOGS_PROJECT_ID!,
+	baseUrl: process.env.NEATLOGS_API_ORIGIN!,
+};
+
+const created = await datasets.create({
+	name: 'Support examples',
+	cases: [{
+		input: { question: 'How do I reset my password?' },
+		observedOutput: 'Use the reset link on the sign-in page.',
+		outcome: { answer: 'Send the password reset instructions.' },
+	}],
+}, datasetApi);
+```
+
+`outcome` is optional and belongs to each case. It creates a human draft
+expected value. `observedOutput` remains the execution's actual output. An
+omitted outcome leaves it unset; `null` clears it. To edit outcomes later,
+pass the case and revision UUIDs from the dataset's current version:
+
+```typescript
+const revised = await datasets.updateOutcomes(created.datasetId, {
+	baseVersionId: created.versionId,
+	changes: [{ caseId, revisionId, outcome: { answer: 'Updated instructions.' } }],
+}, datasetApi);
+```
+
+Each write returns `{ datasetId, versionId }`. Supply an `idempotencyKey` UUID
+in the options when retrying a create or outcome edit across calls. Reuse the
+same key and input for that operation.
+
+#### Capture an instrumented execution
+
+`datasets.capture()` registers a recording before invoking the callback once.
+Use an initialized SDK or an active `Client` with `sampleRate: 1` and export
+enabled. Existing instrumentation supplies the root traces and their inputs
+and outputs. Await all traced work inside the callback.
+
+An explicit capture registration `idempotencyKey` checks the job's current status
+before execution, so an older cached `recording` receipt cannot restart a sealed
+capture. This does not serialize concurrent captures using the same key. Recover
+an uncertain completion with `retryCompletion()` instead of calling capture again.
+
+```typescript
+import { init, shutdown, trace, datasets } from 'neatlogs';
+
+async function main() {
+	await init({ apiKey: process.env.NEATLOGS_API_KEY, sampleRate: 1 });
+	try {
+		const capture = await datasets.capture(
+			{ kind: 'existing', datasetId: process.env.NEATLOGS_DATASET_ID! },
+			() => trace({ name: 'support-agent', kind: 'WORKFLOW', input: question },
+				() => supportAgent(question)),
+			{ ...datasetApi, environment: 'local' },
+		);
+		console.log(capture.result);
+		const published = await capture.wait({ timeoutMillis: 60_000 });
+		console.log(published.datasetVersionId);
+	} finally {
+		await shutdown();
+	}
+}
+
+main().catch(console.error);
+```
+
+A name destination requires an explicit creation choice, for example
+`{ kind: 'name', name: 'Support examples', createIfMissing: true }`. Ambiguous
+names fail before the callback runs. The `environment` option is required and
+accepts `local`, `ci`, or `production`; production also requires
+`allowProduction: true`.
+
+Capture preserves normal trace ingestion and masking. It completes only after
+the selected SDK providers acknowledge export, including typed media and full
+OTLP overflow uploads. Empty executions, open spans, sampled or clipped
+evidence, dropped spans, and failed uploads abort capture instead of publishing
+a partial dataset version. Capture accepts at most 2000 root traces and a
+64 KiB completion manifest; oversized selections fail without truncation.
+
+The returned handle has `captureId`, `datasetId`, `state`, `datasetVersionId`,
+`status()`, `wait()`, and `abort()`. Only a completed server status supplies a
+published version UUID. `status({ after })` pages failure diagnostics using
+`nextCursor`. `wait()` rejects for `needs_review`, `failed`, or `cancelled`;
+its timeout leaves the server job running. `abort()` cancels dataset
+publication while awaited agent work and ordinary trace ingestion continue.
+
+If the agent throws, capture rethrows the original value. Save the handle with
+`onRegistered: (handle) => { savedHandle = handle; }`, or recover it for an
+object error using `getDatasetCaptureHandle(error)`. Inspect
+`handle.captureError` for a secondary capture failure. If a completion
+acknowledgement is lost, call `handle.status()` and, if needed,
+`handle.retryCompletion()`. The retry uses the frozen manifest bytes and key
+and does not rerun the callback. Failed agent executions can still become
+examples when their complete trace evidence was delivered; capture does not
+invent expected outcomes.
 
 ---
 
@@ -621,7 +728,6 @@ All configuration is passed via `init()` options. See the [InitOptions table](#i
 await init({
   apiKey: process.env.NEATLOGS_API_KEY,
   workflowName: 'my-pipeline',
-  sessionId: 'session-123',
   userId: 'user-456',
   tags: ['production', 'v2'],
   metadata: { environment: 'prod' },

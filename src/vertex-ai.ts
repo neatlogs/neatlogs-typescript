@@ -27,6 +27,11 @@ import {
   utf8ByteLength,
 } from './constants.js';
 import { getProviderTracer } from './core/auto-root.js';
+import {
+  markCancelled,
+  recordFailure,
+  recordReportedFailure,
+} from './core/span-outcome.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import {
   getNeatlogsTracer,
@@ -333,8 +338,8 @@ function setInputAttributes(span: Span, opts: any): void {
   if (typeof contents === 'string') {
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'user');
     span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, contents);
-  } else if (Array.isArray(contents)) {
-    for (const item of contents) {
+  } else if (Array.isArray(contents) || (contents && typeof contents === 'object' && Array.isArray(contents.parts))) {
+    for (const item of Array.isArray(contents) ? contents : [contents]) {
       if (typeof item === 'string') {
         span.setAttribute(`neatlogs.llm.input_messages.${idx}.role`, 'user');
         span.setAttribute(`neatlogs.llm.input_messages.${idx}.content`, item);
@@ -415,9 +420,7 @@ function setInputAttributes(span: Span, opts: any): void {
 
 function wrapStream(stream: any, span: Span): any {
   const accumulated: StreamAccumulator = {
-    textParts: [],
-    toolCalls: [],
-    finishReason: '',
+    candidates: new Map(),
     usage: null,
     mediaCount: 0,
     capturedBytes: 0,
@@ -425,7 +428,10 @@ function wrapStream(stream: any, span: Span): any {
     droppedBytes: 0,
     droppedItems: 0,
     incompleteReasons: new Set(),
+    promptFeedback: undefined,
+    finalized: false,
   };
+  let cancellationRequested = false;
   const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
@@ -443,26 +449,32 @@ function wrapStream(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
-            finalizeStreamChunks(span, accumulated);
+            finalizeStreamChunks(span, accumulated, cancellationRequested);
             return result;
           }
           addStreamChunk(span, accumulated, result.value);
           return result;
         } catch (err) {
-          recordError(span, err);
+          failStreamChunks(span, accumulated, err);
           throw err;
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
+        cancellationRequested = true;
         markStreamIncomplete(accumulated, 'consumer_cancelled');
         span.setAttribute('neatlogs.stream.cancelled', true);
-        const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
-        if (result.done) finalizeStreamChunks(span, accumulated);
-        else addStreamChunk(span, accumulated, result.value);
-        return result;
+        try {
+          const result = await (iterator.return?.(value) ?? { done: true, value: undefined });
+          if (result.done) finalizeStreamChunks(span, accumulated, true);
+          else addStreamChunk(span, accumulated, result.value);
+          return result;
+        } catch (err) {
+          failStreamChunks(span, accumulated, err);
+          throw err;
+        }
       },
       async throw(err?: any): Promise<IteratorResult<any>> {
-        recordError(span, err);
+        failStreamChunks(span, accumulated, err);
         return iterator.throw?.(err) ?? { done: true, value: undefined };
       },
     };
@@ -471,10 +483,15 @@ function wrapStream(stream: any, span: Span): any {
   return wrapped;
 }
 
-interface StreamAccumulator {
+interface CandidateAccumulator {
   textParts: string[];
+  thinkingParts: string[];
   toolCalls: Array<{ id: string; name: string; arguments: string }>;
   finishReason: string;
+}
+
+interface StreamAccumulator {
+  candidates: Map<number, CandidateAccumulator>;
   usage: any;
   mediaCount: number;
   capturedBytes: number;
@@ -482,33 +499,68 @@ interface StreamAccumulator {
   droppedBytes: number;
   droppedItems: number;
   incompleteReasons: Set<string>;
+  promptFeedback: any;
+  finalized: boolean;
+}
+
+function candidateBucket(accumulated: StreamAccumulator, index: number): CandidateAccumulator {
+  let bucket = accumulated.candidates.get(index);
+  if (!bucket) {
+    bucket = { textParts: [], thinkingParts: [], toolCalls: [], finishReason: '' };
+    accumulated.candidates.set(index, bucket);
+  }
+  return bucket;
+}
+
+// Streamed text goes through media capture first so inline data URLs never reach attributes.
+function safeStreamText(span: Span, accumulated: StreamAccumulator, candidateIndex: number, text: unknown): string {
+  const captured = captureMediaWithIndex(
+    span,
+    `neatlogs.llm.output_messages.${candidateIndex}`,
+    String(text),
+    'output',
+    accumulated.mediaCount,
+  );
+  accumulated.mediaCount += captured.count;
+  if (typeof captured.value === 'string') return captured.value;
+  markStreamIncomplete(accumulated, 'media_capture_incomplete');
+  return '';
 }
 
 function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any): void {
-  for (const candidate of chunk?.candidates ?? []) {
+  const chunkCandidates = chunk?.candidates ?? [];
+  for (let position = 0; position < chunkCandidates.length; position++) {
+    const candidate = chunkCandidates[position];
+    const candidateIndex = typeof candidate?.index === 'number' ? candidate.index : position;
+    const bucket = candidateBucket(accumulated, candidateIndex);
     for (const part of candidate?.content?.parts ?? []) {
       if (part?.text && !part?.thought) {
-        retainStreamString(accumulated, String(part.text), (value) => {
-          accumulated.textParts.push(value);
+        const text = safeStreamText(span, accumulated, candidateIndex, part.text);
+        retainStreamString(accumulated, text, (value) => {
+          bucket.textParts.push(value);
         });
-      }
-      if (part?.functionCall) {
+      } else if (part?.thought && part?.text) {
+        const text = safeStreamText(span, accumulated, candidateIndex, part.text);
+        retainStreamString(accumulated, text, (value) => {
+          bucket.thinkingParts.push(value);
+        });
+      } else if (part?.functionCall) {
         const captured = captureMediaWithIndex(
           span,
-          'neatlogs.llm.output_messages.0',
+          `neatlogs.llm.output_messages.${candidateIndex}`,
           part.functionCall.args,
           'output',
           accumulated.mediaCount,
         );
         accumulated.mediaCount += captured.count;
-        retainStreamToolCall(accumulated, {
+        retainStreamToolCall(accumulated, bucket, {
           ...part.functionCall,
           args: captured.value,
         });
       } else if (!part?.text) {
         const captured = captureMediaWithIndex(
           span,
-          'neatlogs.llm.output_messages.0',
+          `neatlogs.llm.output_messages.${candidateIndex}`,
           part,
           'output',
           accumulated.mediaCount,
@@ -517,32 +569,85 @@ function addStreamChunk(span: Span, accumulated: StreamAccumulator, chunk: any):
       }
     }
     if (candidate?.finishReason) {
-      accumulated.finishReason = candidate.finishReason;
+      bucket.finishReason = String(candidate.finishReason);
     }
   }
   if (chunk?.usageMetadata) accumulated.usage = chunk.usageMetadata;
+  if (chunk?.promptFeedback?.blockReason) accumulated.promptFeedback = chunk.promptFeedback;
 }
 
-function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void {
-  const fullText = accumulated.textParts.join('');
-  if (fullText) {
-    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', fullText);
-  }
-  if (accumulated.finishReason) {
-    span.setAttribute('neatlogs.llm.finish_reason', String(accumulated.finishReason));
-  }
-  for (let i = 0; i < accumulated.toolCalls.length; i++) {
-    const tool = accumulated.toolCalls[i];
-    if (tool.id) span.setAttribute(`neatlogs.llm.tool_calls.${i}.id`, tool.id);
-    span.setAttribute(`neatlogs.llm.tool_calls.${i}.name`, tool.name);
-    span.setAttribute(`neatlogs.llm.tool_calls.${i}.arguments`, tool.arguments);
+function finalizeStreamChunks(
+  span: Span,
+  accumulated: StreamAccumulator,
+  cancelled = false,
+): void {
+  if (accumulated.finalized) return;
+  accumulated.finalized = true;
+  applyStreamChunks(span, accumulated);
+  const blocked = accumulated.candidates.size === 0 ? accumulated.promptFeedback : undefined;
+  if (blocked?.blockReason) recordBlockedPrompt(span, blocked);
+  else if (cancelled) markCancelled(span);
+  else span.setStatus({ code: SpanStatusCode.OK });
+  span.end();
+}
+
+/** A broken stream keeps what it had already delivered. */
+function failStreamChunks(span: Span, accumulated: StreamAccumulator, err: unknown): void {
+  if (accumulated.finalized) return;
+  accumulated.finalized = true;
+  applyStreamChunks(span, accumulated);
+  recordError(span, err);
+}
+
+/**
+ * The API refused the prompt: no candidates, only `promptFeedback.blockReason`.
+ * Nothing is thrown, so without this the call would end OK with no output.
+ */
+function recordBlockedPrompt(span: Span, promptFeedback: any): void {
+  const reason = String(promptFeedback.blockReason);
+  const detail = promptFeedback.blockReasonMessage;
+  span.setAttribute('neatlogs.llm.finish_reason', reason);
+  recordReportedFailure(
+    span,
+    'BlockedPrompt',
+    detail ? `Prompt blocked: ${reason} (${detail})` : `Prompt blocked: ${reason}`,
+  );
+}
+
+function applyStreamChunks(span: Span, accumulated: StreamAccumulator): void {
+  const indexes = [...accumulated.candidates.keys()].sort((a, b) => a - b);
+  let flattenedToolIndex = 0;
+  for (const candidateIndex of indexes) {
+    const bucket = accumulated.candidates.get(candidateIndex)!;
+    const prefix = `neatlogs.llm.output_messages.${candidateIndex}`;
+    const fullText = bucket.textParts.join('');
+    const fullThinking = bucket.thinkingParts.join('');
+    if (fullText) {
+      span.setAttribute(`${prefix}.role`, 'assistant');
+      span.setAttribute(`${prefix}.content`, fullText);
+    }
+    if (fullThinking) {
+      span.setAttribute(`${prefix}.thinking`, fullThinking);
+    }
+    if (bucket.finishReason) {
+      span.setAttribute(`neatlogs.llm.choices.${candidateIndex}.finish_reason`, bucket.finishReason);
+      if (candidateIndex === indexes[0]) {
+        span.setAttribute('neatlogs.llm.finish_reason', bucket.finishReason);
+      }
+    }
+    for (let toolIndex = 0; toolIndex < bucket.toolCalls.length; toolIndex++) {
+      const tool = bucket.toolCalls[toolIndex];
+      const toolPrefix = `neatlogs.llm.tool_calls.${flattenedToolIndex}`;
+      if (tool.id) span.setAttribute(`${toolPrefix}.id`, tool.id);
+      span.setAttribute(`${toolPrefix}.name`, tool.name);
+      span.setAttribute(`${toolPrefix}.arguments`, tool.arguments);
+      span.setAttribute(`${toolPrefix}.choice_index`, candidateIndex);
+      span.setAttribute(`${toolPrefix}.tool_call_index`, toolIndex);
+      flattenedToolIndex++;
+    }
   }
   setUsage(span, accumulated.usage);
   applyStreamDiagnostics(span, accumulated);
-
-  span.setStatus({ code: SpanStatusCode.OK });
-  span.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -550,40 +655,67 @@ function finalizeStreamChunks(span: Span, accumulated: StreamAccumulator): void 
 // ---------------------------------------------------------------------------
 
 function finalizeResponse(span: Span, response: any): void {
-  const captured = captureMedia(
-    span,
-    'neatlogs.llm.output_messages.0',
-    response?.candidates,
-    'output',
-  );
-  const capturedCandidates = Array.isArray(captured) ? captured : [];
-  const textParts: string[] = [];
-  let toolIdx = 0;
+  const candidates = response?.candidates ?? [];
+  let flattenedToolIndex = 0;
+  let firstCandidateIndex: number | null = null;
 
-  for (const candidate of capturedCandidates ?? []) {
-    for (const part of candidate?.content?.parts ?? []) {
+  for (let position = 0; position < candidates.length; position++) {
+    const candidate = candidates[position];
+    const candidateIndex = typeof candidate?.index === 'number' ? candidate.index : position;
+    if (firstCandidateIndex === null) firstCandidateIndex = candidateIndex;
+    const prefix = `neatlogs.llm.output_messages.${candidateIndex}`;
+    const captured = captureMedia(span, prefix, [candidate], 'output');
+    // Never fall back to the raw candidate: if sanitization failed or hit its
+    // media limit, keep the typed media records already written and mark the
+    // candidate as incomplete instead of serializing provider bytes.
+    const sanitizedCandidate = Array.isArray(captured) ? captured[0] : undefined;
+    if (!Array.isArray(captured)) {
+      span.setAttribute(`${prefix}.media.incomplete`, true);
+      span.setAttribute(`${prefix}.content`, String(captured));
+    }
+
+    const textParts: string[] = [];
+    const thinkingParts: string[] = [];
+    let toolIndex = 0;
+    for (const part of sanitizedCandidate?.content?.parts ?? []) {
       if (part?.text && !part?.thought) {
         textParts.push(part.text);
       } else if (part?.thought && part?.text) {
-        span.setAttribute('neatlogs.llm.output_messages.0.thinking', part.text);
+        thinkingParts.push(part.text);
       } else if (part?.functionCall) {
         const fc = part.functionCall;
-        span.setAttribute(`neatlogs.llm.tool_calls.${toolIdx}.name`, fc?.name ?? '');
-        span.setAttribute(`neatlogs.llm.tool_calls.${toolIdx}.arguments`, safeStringify(fc?.args ?? {}));
-        toolIdx++;
+        const toolPrefix = `neatlogs.llm.tool_calls.${flattenedToolIndex}`;
+        if (fc?.id) span.setAttribute(`${toolPrefix}.id`, String(fc.id));
+        span.setAttribute(`${toolPrefix}.name`, fc?.name ?? '');
+        span.setAttribute(`${toolPrefix}.arguments`, safeStringify(fc?.args ?? {}));
+        span.setAttribute(`${toolPrefix}.choice_index`, candidateIndex);
+        span.setAttribute(`${toolPrefix}.tool_call_index`, toolIndex);
+        flattenedToolIndex++;
+        toolIndex++;
       }
     }
-    if (candidate?.finishReason) span.setAttribute('neatlogs.llm.finish_reason', String(candidate.finishReason));
-  }
-
-  if (textParts.length) {
-    span.setAttribute('neatlogs.llm.output_messages.0.role', 'assistant');
-    span.setAttribute('neatlogs.llm.output_messages.0.content', textParts.join(''));
+    if (textParts.length) {
+      span.setAttribute(`${prefix}.role`, 'assistant');
+      span.setAttribute(`${prefix}.content`, textParts.join(''));
+    }
+    if (thinkingParts.length) {
+      span.setAttribute(`${prefix}.thinking`, thinkingParts.join(''));
+    }
+    if (candidate?.finishReason) {
+      span.setAttribute(`neatlogs.llm.choices.${candidateIndex}.finish_reason`, String(candidate.finishReason));
+      if (candidateIndex === firstCandidateIndex) {
+        span.setAttribute('neatlogs.llm.finish_reason', String(candidate.finishReason));
+      }
+    }
   }
 
   setUsage(span, response?.usageMetadata);
 
-  span.setStatus({ code: SpanStatusCode.OK });
+  if (candidates.length === 0 && response?.promptFeedback?.blockReason) {
+    recordBlockedPrompt(span, response.promptFeedback);
+  } else {
+    span.setStatus({ code: SpanStatusCode.OK });
+  }
   span.end();
 }
 
@@ -632,14 +764,18 @@ function retainStreamString(
   return true;
 }
 
-function retainStreamToolCall(accumulated: StreamAccumulator, functionCall: any): void {
+function retainStreamToolCall(
+  accumulated: StreamAccumulator,
+  bucket: CandidateAccumulator,
+  functionCall: any,
+): void {
   const id = String(functionCall?.id ?? '');
   const name = String(functionCall?.name ?? '');
   const args = safeStringify(functionCall?.args ?? {});
   const retained = retainStreamString(
     accumulated,
     `${id}\0${name}\0${args}`,
-    () => accumulated.toolCalls.push({ id, name, arguments: args }),
+    () => bucket.toolCalls.push({ id, name, arguments: args }),
   );
   if (!retained) markStreamIncomplete(accumulated, 'tool_call_omitted');
 }
@@ -670,11 +806,6 @@ function safeStringify(value: unknown): string {
 }
 
 function recordError(span: Span, err: unknown): void {
-  if (err instanceof Error) {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-    span.recordException(err);
-  } else {
-    span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-  }
+  recordFailure(span, err);
   span.end();
 }

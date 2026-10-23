@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { gunzipSync } from "node:zlib";
 import { ROOT_CONTEXT } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { OTLPTraceExporter } from "../../src/core/otlp-trace-exporter.js";
 import { CompressionAlgorithm } from "@opentelemetry/otlp-exporter-base";
 import {
   BasicTracerProvider,
@@ -26,13 +26,13 @@ afterEach(async () => {
   );
 });
 
-async function oneSpan(): Promise<ReadableSpan> {
+async function oneSpan(name = "span"): Promise<ReadableSpan> {
   const sink = new InMemorySpanExporter();
   const provider = new BasicTracerProvider();
   provider.addSpanProcessor(new SimpleSpanProcessor(sink));
   provider
     .getTracer("retry-test")
-    .startSpan("span", undefined, ROOT_CONTEXT)
+    .startSpan(name, undefined, ROOT_CONTEXT)
     .end();
   await provider.forceFlush();
   return sink.getFinishedSpans()[0];
@@ -51,7 +51,52 @@ async function listen(server: Server): Promise<number> {
   return (server.address() as { port: number }).port;
 }
 
-describe("upstream OTLP retry and compression", () => {
+describe("acknowledged OTLP export, retry and compression", () => {
+  it.each([
+    { name: "empty acknowledgement", response: [], code: ExportResultCode.SUCCESS },
+    { name: "rejected spans", response: [10, 2, 8, 1], code: ExportResultCode.FAILED },
+    { name: "zero rejected spans with warning", response: [10, 5, 8, 0, 18, 1, 119], code: ExportResultCode.SUCCESS },
+    { name: "malformed protobuf", response: [10, 127], code: ExportResultCode.FAILED },
+    { name: "unknown compatible field", response: [16, 0], code: ExportResultCode.SUCCESS },
+    { name: "int64 rejected count above safe integer range", response: [10, 9, 8, 129, 128, 128, 128, 128, 128, 128, 16], code: ExportResultCode.FAILED },
+  ])("validates $name", async ({ response: body, code }) => {
+    const port = await listen(createServer((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        response.writeHead(200, { "Content-Type": "application/x-protobuf" });
+        response.end(Buffer.from(body));
+      });
+    }));
+    const exporter = new OTLPTraceExporter({ url: `http://127.0.0.1:${port}/v1/traces` });
+    try {
+      const result = await exportOnce(exporter, await oneSpan());
+      expect(result.code, result.error?.message).toBe(code);
+    } finally { await exporter.shutdown(); }
+  });
+
+  it("keeps concurrent out-of-order acknowledgements isolated", async () => {
+    const port = await listen(createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        const rejected = Buffer.concat(chunks).includes(Buffer.from("reject-this-batch"));
+        setTimeout(() => {
+          response.writeHead(200, { "Content-Type": "application/x-protobuf" });
+          response.end(rejected ? Buffer.from([10, 2, 8, 1]) : undefined);
+        }, rejected ? 25 : 1);
+      });
+    }));
+    const exporter = new OTLPTraceExporter({ url: `http://127.0.0.1:${port}/v1/traces`, concurrencyLimit: 2 });
+    try {
+      const [rejected, accepted] = await Promise.all([
+        oneSpan("reject-this-batch").then((span) => exportOnce(exporter, span)),
+        oneSpan("accept-this-batch").then((span) => exportOnce(exporter, span)),
+      ]);
+      expect(rejected.code).toBe(ExportResultCode.FAILED);
+      expect(accepted.code).toBe(ExportResultCode.SUCCESS);
+    } finally { await exporter.shutdown(); }
+  });
+
   it.each([429, 503])(
     "retries transient HTTP %s and sends receiver-compatible gzip",
     async (status) => {

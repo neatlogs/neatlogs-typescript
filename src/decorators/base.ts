@@ -9,6 +9,7 @@ import {
   type Span as OtelSpan,
 } from "@opentelemetry/api";
 import { getLogger } from "../core/logger.js";
+import { isAbortError, markCancelled } from "../core/span-outcome.js";
 import { registerMask } from "../core/mask.js";
 import { applyEndUserAttributes, isRootSpan } from "../core/end-user.js";
 import { applySessionAttributes } from "../core/session.js";
@@ -53,8 +54,17 @@ export function safeJsonDumps(value: any): string {
   }
 }
 
-/** Serialize an object for span attributes. Handles toJSON(), plain objects, primitives. */
+/**
+ * Serialize an object for span attributes. Handles toJSON(), plain objects,
+ * primitives. A reference cycle is replaced with "[Circular]" instead of
+ * recursing until the stack overflows, so tracing a request, an ORM entity or
+ * any self-referencing value can never throw into the caller's code.
+ */
 export function serializeObj(obj: any): any {
+  return serializeInner(obj, new WeakSet());
+}
+
+function serializeInner(obj: any, ancestors: WeakSet<object>): any {
   if (obj === null || obj === undefined) return obj;
   // Preserve binary views until media capture can classify and sanitize them.
   // JSON.stringify retains the previous numeric-object representation for
@@ -67,13 +77,19 @@ export function serializeObj(obj: any): any {
   )
     return obj;
   if (typeof obj.toJSON === "function") return obj.toJSON();
-  if (Array.isArray(obj)) return obj.map(serializeObj);
   if (typeof obj === "object") {
-    const result: Record<string, any> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      result[key] = serializeObj(value);
+    if (ancestors.has(obj)) return "[Circular]";
+    ancestors.add(obj);
+    try {
+      if (Array.isArray(obj)) return obj.map((item) => serializeInner(item, ancestors));
+      const result: Record<string, any> = {};
+      for (const [key, value] of Object.entries(obj)) {
+        result[key] = serializeInner(value, ancestors);
+      }
+      return result;
+    } finally {
+      ancestors.delete(obj);
     }
-    return result;
   }
   return String(obj);
 }
@@ -278,13 +294,12 @@ export function decorateSpan<TArgs extends any[], TReturn>(
       const finishError = (error: any): void => {
         if (finished) return;
         finished = true;
-        if (error?.name === "AbortError") {
-          span.setAttribute("neatlogs.stream.cancelled", true);
+        if (isAbortError(error)) {
           if (totalStreamChunks > 0) {
             setStreamCounts();
             captureResult(streamCaptureValue());
           }
-          span.setStatus({ code: SpanStatusCode.UNSET });
+          markCancelled(span);
           span.end();
           return;
         }
@@ -359,9 +374,8 @@ export function decorateSpan<TArgs extends any[], TReturn>(
         }
         if (finished) return;
         finished = true;
-        span.setAttribute("neatlogs.stream.cancelled", true);
         captureResult(streamCaptureValue());
-        span.setStatus({ code: SpanStatusCode.UNSET });
+        markCancelled(span);
         span.end();
       };
 

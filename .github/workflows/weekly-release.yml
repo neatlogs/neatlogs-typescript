@@ -1,0 +1,213 @@
+name: Daily npm release
+
+on:
+  schedule:
+    - cron: '21 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: weekly-npm-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      action: ${{ steps.plan.outputs.action }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        if: github.repository == 'neatlogs/neatlogs-wizard'
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+
+      - name: Use npm with trusted publishing support
+        run: npm install --global npm@11
+
+      - name: Decide whether a release is due
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/weekly-release.mjs --apply > "$RUNNER_TEMP/weekly-release-plan.json"
+          cat "$RUNNER_TEMP/weekly-release-plan.json"
+          echo "action=$(jq -r .action "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -r .version "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "bump=$(jq -r '.bump // false' "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "commit=$(jq -r '.commit // false' "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "retry_tag=$(jq -r '.retry_tag // empty' "$RUNNER_TEMP/weekly-release-plan.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore exact source of an unpublished tagged release
+        if: steps.plan.outputs.retry_tag != ''
+        env:
+          RETRY_TAG: ${{ steps.plan.outputs.retry_tag }}
+        run: git checkout --detach "$RETRY_TAG"
+
+      - name: Build and validate the exact package to publish
+        if: steps.plan.outputs.action == 'publish'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REPOSITORY" in
+            neatlogs/neatlogs-typescript)
+              npm ci --ignore-scripts --no-audit --no-fund
+              npm run lint
+              npm test
+              npm pack --dry-run
+              ;;
+            neatlogs/neatlogs-wizard)
+              pnpm install --frozen-lockfile
+              pnpm typecheck
+              pnpm test
+              pnpm build
+              pnpm pack --pack-destination "$RUNNER_TEMP"
+              ;;
+            neatlogs/neatlogs-claude-code)
+              npm ci --ignore-scripts --no-audit --no-fund
+              npm run build
+              node -e "const p=require('./package.json');const m=require('./.claude-plugin/plugin.json');if(p.version!==m.version)process.exit(1)"
+              npm pack --dry-run
+              ;;
+            neatlogs/neatlogs-codex)
+              npm ci --ignore-scripts --no-audit --no-fund
+              npm run typecheck
+              npm test
+              npm pack --dry-run
+              ;;
+            *) echo "Unsupported repository: $GITHUB_REPOSITORY" >&2; exit 1 ;;
+          esac
+
+      - name: Verify release App configuration
+        if: steps.plan.outputs.action == 'publish'
+        shell: bash
+        env:
+          RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          test -n "$RELEASE_APP_ID" || { echo 'RELEASE_APP_ID secret is missing' >&2; exit 1; }
+          test -n "$RELEASE_APP_PRIVATE_KEY" || { echo 'RELEASE_APP_PRIVATE_KEY secret is missing' >&2; exit 1; }
+
+      - name: Create a repository-scoped release token
+        if: steps.plan.outputs.action == 'publish'
+        id: release-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Commit synchronized version and tag the release
+        if: steps.plan.outputs.action == 'publish'
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.plan.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git config user.name 'neatlogs-release[bot]'
+          git config user.email 'neatlogs-release[bot]@users.noreply.github.com'
+          git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if [[ "$RELEASE_COMMIT" == 'true' ]]; then
+            case "$GITHUB_REPOSITORY" in
+              neatlogs/neatlogs-typescript) git add package.json package-lock.json src/version.ts ;;
+              neatlogs/neatlogs-wizard) git add package.json pnpm-lock.yaml ;;
+              neatlogs/neatlogs-claude-code) git add package.json package-lock.json .claude-plugin/plugin.json ;;
+              neatlogs/neatlogs-codex) git add package.json package-lock.json .codex-plugin/plugin.json README.md ;;
+            esac
+            git diff --cached --check
+            git commit -m "chore(release): ${RELEASE_VERSION}"
+            # A concurrent merge makes this fast-forward push fail. In that case
+            # the job stops before tagging or publishing a different source tree.
+            git push origin HEAD:refs/heads/main
+          fi
+          # The published artifact must come from the exact tagged source tree.
+          git diff --exit-code
+          tag="v${RELEASE_VERSION}"
+          if git rev-parse --verify "refs/tags/${tag}^{commit}" >/dev/null 2>&1; then
+            test "$(git rev-list -n 1 "$tag")" = "$(git rev-parse HEAD)" || {
+              echo "Existing ${tag} points to another commit" >&2
+              exit 1
+            }
+          else
+            git tag -a "$tag" -m "Release ${RELEASE_VERSION}"
+          fi
+          git push origin "refs/tags/${tag}"
+
+      - name: Publish through npm trusted publishing
+        if: steps.plan.outputs.action == 'publish'
+        # A version commit created inside this run changes HEAD after the
+        # workflow's GITHUB_SHA was set. Avoid an incorrect source attestation.
+        env:
+          NPM_CONFIG_PROVENANCE: 'false'
+        run: npm publish --access public
+
+      - name: Verify the published version
+        if: steps.plan.outputs.action == 'publish'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          package_name=$(node -p "require('./package.json').name")
+          deadline=$((SECONDS + 600))
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
+            # npm publish can return while the public registry is still
+            # processing the package. Revalidate online until it exposes the
+            # exact version, without trusting a cached response.
+            published=$(npm view "${package_name}@${RELEASE_VERSION}" version \
+              --registry=https://registry.npmjs.org/ --prefer-online \
+              --fetch-retries=0 --fetch-timeout=15000 \
+              --cache "$RUNNER_TEMP/npm-release-verify-cache" 2>/dev/null || true)
+            if [[ "$published" == "$RELEASE_VERSION" ]]; then
+              echo "Published ${package_name}@${RELEASE_VERSION}"
+              exit 0
+            fi
+            if (( SECONDS >= deadline )); then break; fi
+            echo "npm has not confirmed ${package_name}@${RELEASE_VERSION} (check ${attempt}); retrying in 15 seconds"
+            sleep 15
+          done
+          echo "::error::npm publish succeeded, but the registry did not confirm exact version ${package_name}@${RELEASE_VERSION} within 10 minutes; inspect the package before retrying" >&2
+          exit 1
+
+  notify:
+    name: Notify Slack after verified npm publication
+    needs: release
+    if: needs.release.result == 'success' && needs.release.outputs.action == 'publish'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Post release notification
+        shell: bash
+        env:
+          # Incoming webhooks are channel-bound; configure this one for #released-artifacts (C0C6P2PU1UN).
+          SLACK_WEBHOOK_URL: ${{ secrets.RELEASE_SLACK_WEBHOOK_URL }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -n "$SLACK_WEBHOOK_URL" || { echo 'RELEASE_SLACK_WEBHOOK_URL is missing' >&2; exit 1; }
+          message=":white_check_mark: *TypeScript SDK neatlogs@${RELEASE_VERSION} published to npm*"
+          message+=$'\n'
+          message+="<https://www.npmjs.com/package/neatlogs/v/${RELEASE_VERSION}|npm package> · <https://github.com/${GITHUB_REPOSITORY}/tree/v${RELEASE_VERSION}|Release tag> · <https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}|Workflow run>"
+          payload=$(jq -n --arg text "$message" '{text: $text}')
+          response=$(curl --fail --silent --show-error --retry 2 --retry-all-errors --max-time 15 \
+            --header 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL")
+          test "$response" = ok || { echo "Slack webhook returned an unexpected response: $response" >&2; exit 1; }

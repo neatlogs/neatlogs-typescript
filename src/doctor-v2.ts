@@ -78,6 +78,17 @@ export type DoctorV2Result = Readonly<{
   checks: readonly DoctorV2Check[];
 }>;
 
+export function summarizeDoctorChecks(
+  checks: readonly Pick<DoctorV2Check, 'status' | 'reason_code'>[],
+): Pick<DoctorV2Result, 'status' | 'first_failure'> {
+  const firstFailure = checks.find((check) => check.status === 'fail');
+  const hasWarning = checks.some((check) => check.status === 'warn');
+  return {
+    status: firstFailure ? 'fail' : hasWarning ? 'warn' : 'pass',
+    first_failure: firstFailure?.reason_code ?? null,
+  };
+}
+
 const TRACE_ID = /^[0-9a-f]{32}$/;
 const SPAN_ID = /^[0-9a-f]{16}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -341,15 +352,13 @@ export function doctorLocalV2(
   if (options.checkPii === true) checks.push(...piiWarnings(envelope));
 
   if (checks.length === 0) checks.push(Object.freeze({ name: 'local_envelope', status: 'pass', reason_code: 'LOCAL_ENVELOPE_VALID', remediation_code: 'NONE', message: 'The final normalized local envelope is valid' }));
-  const first = checks.find((check) => check.status === 'fail');
-  const hasWarning = checks.some((check) => check.status === 'warn');
+  const summary = summarizeDoctorChecks(checks);
   let digest: string | undefined;
   try { digest = doctorSemanticDigest(envelope); } catch { /* an existing JSON failure is safer than emitting a partial digest */ }
   return Object.freeze({
     format_version: DOCTOR_V2_FORMAT_VERSION,
     mode: 'local',
-    status: first ? 'fail' : hasWarning ? 'warn' : 'pass',
-    first_failure: first?.reason_code ?? null,
+    ...summary,
     runtime: Object.freeze({ language: 'typescript', sdk_version: __version__, schema_version: String(TELEMETRY_SCHEMA_VERSION), transport: 'otlp_http_protobuf' }),
     ...(digest && TRACE_ID.test(envelope.trace_id) && SPAN_ID.test(envelope.root_span_id) ? { capture: Object.freeze({ trace_id: envelope.trace_id, root_span_id: envelope.root_span_id, span_count: envelope.spans.length, semantic_digest: digest }) } : {}),
     sampling: Object.freeze({ effective_sampler: options.effectiveSampler ?? 'parentbased_traceidratio', root_sample_rate: options.rootSampleRate ?? 1, sampled: envelope.spans.find((span) => span.sampled !== undefined)?.sampled ?? true }),

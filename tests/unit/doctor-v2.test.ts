@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { doctorLocalV2, doctorSemanticDigest, type DiagnosticEnvelope } from '../../src/doctor-v2.js';
+import { doctorLocalV2, doctorSemanticDigest, summarizeDoctorChecks, type DiagnosticEnvelope } from '../../src/doctor-v2.js';
 
 const CROSS_LANGUAGE_GOLDEN_DIGEST = 'sha256:824650f5fbc6d9f8d92381356411609263417219eaf7fdafbd2ba94795b6c4f7';
 const CROSS_LANGUAGE_RICH_DIGEST = 'sha256:45b1ebe029b272ceb45edb210978f6600d29ac50ca4d9cd0f4ef5abb3eff063e';
@@ -30,6 +30,18 @@ function envelope(): DiagnosticEnvelope {
 }
 
 describe('doctor v2 local envelope', () => {
+  it('uses the first failed check when local and probe checks are combined', () => {
+    const result = summarizeDoctorChecks([
+      { status: 'fail', reason_code: 'LOCAL_CAPTURE_FAILED' },
+      { status: 'fail', reason_code: 'PROBE_READBACK_FAILED' },
+    ]);
+
+    expect(result).toEqual({
+      status: 'fail',
+      first_failure: 'LOCAL_CAPTURE_FAILED',
+    });
+  });
+
   it('matches the shared Python and Go canonical digest fixture', () => {
     expect(doctorSemanticDigest(crossLanguageGoldenEnvelope())).toBe(CROSS_LANGUAGE_GOLDEN_DIGEST);
   });

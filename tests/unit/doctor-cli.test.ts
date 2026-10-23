@@ -39,7 +39,7 @@ function successfulProbeFixture() {
           },
           'doctor.probe.agent': {
             input: 'generated diagnostic input',
-            output: 'Text: generated diagnostic output',
+            output: '{"text":"generated diagnostic output"}',
           },
           'doctor.probe.llm': {
             input: { prompt: 'generated diagnostic input' },
@@ -170,6 +170,34 @@ describe('doctor CLI', () => {
     });
   });
 
+  it('keeps the earliest local failure when the backend probe also fails', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const probeExporter: SpanExporter = {
+      export(_spans, callback) {
+        callback({ code: ExportResultCode.FAILED });
+      },
+      async forceFlush() {},
+      async shutdown() {},
+    };
+    const fetch = vi.fn(async () => new Response(null, { status: 403 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      requestTimeoutMs: 100,
+      probeExporter,
+    });
+
+    expect(code).toBe(3);
+    const result = JSON.parse(value.output[0]!);
+    const firstFailure = result.checks.find((item: { status: string }) => item.status === 'fail');
+    expect(firstFailure?.reason_code).toBe('FLUSH_TIMEOUT');
+    expect(result.first_failure).toBe(firstFailure?.reason_code);
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'probe_transport', reason_code: 'AUTH_FAILED' }),
+    ]));
+  });
+
   it('reports an invalid endpoint without throwing or contacting the backend', async () => {
     const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'not-a-url' });
     const fetch = vi.fn();
@@ -245,6 +273,37 @@ describe('doctor CLI', () => {
     ]));
     expect(value.output[0]).not.toContain('must-not-survive');
     expect(value.output[0]).not.toContain('private-key');
+  });
+
+  it('keeps the earliest local failure when the hosted probe also fails', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const probeExporter: SpanExporter = {
+      export(_spans, callback) {
+        callback({ code: ExportResultCode.FAILED });
+      },
+      async forceFlush() {},
+      async shutdown() {},
+    };
+    const fetch = vi.fn(async () => new Response(null, { status: 403 }));
+
+    const code = await runDoctorCli(['doctor', '--probe', '--json'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      requestTimeoutMs: 1,
+      probeTimeoutMs: 20,
+      pollIntervalMs: 1,
+      probeExporter,
+    });
+
+    expect(code).toBe(3);
+    const result = JSON.parse(value.output[0]!);
+    const firstFailedCheck = result.checks.find((item: { status: string }) => item.status === 'fail');
+    expect(firstFailedCheck?.reason_code).toBe('FLUSH_TIMEOUT');
+    expect(result.first_failure).toBe('FLUSH_TIMEOUT');
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: 'probe_transport',
+      reason_code: 'AUTH_FAILED',
+    }));
   });
 
   it('continues polling when a legacy 404 response is not JSON', async () => {
@@ -394,13 +453,43 @@ describe('doctor CLI', () => {
         redirect: 'BACKEND_HTTP_ERROR',
         client: 'BACKEND_HTTP_ERROR',
       }[terminal]);
-      expect(failure?.details).toEqual(['network', 'server'].includes(terminal) ? {
-        ingestion_state: 'processing',
-        current_stage: 'pii_dispatch',
-        last_successful_stage: 'kafka_published',
-        retryable: false,
-      } : undefined);
+      const expectedDetails = terminal === 'auth' ? undefined : {
+        ...(['network', 'server'].includes(terminal) ? {
+          ingestion_state: 'processing',
+          current_stage: 'pii_dispatch',
+          last_successful_stage: 'kafka_published',
+          retryable: false,
+        } : {}),
+        ...(terminal === 'redirect' ? { http_status: 302 } : {}),
+        ...(terminal === 'client' ? { http_status: 418 } : {}),
+        ...(terminal === 'server' ? { http_status: 503 } : {}),
+      };
+      expect(failure?.details).toEqual(expectedDetails);
     }
+  });
+
+  it('includes a safe HTTP status in human-readable probe failures', async () => {
+    const value = io({ NEATLOGS_API_KEY: 'private-key', NEATLOGS_ENDPOINT: 'http://localhost:4100' });
+    const fixture = successfulProbeFixture();
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ingestionDiagnostics: {
+          protocolVersion: 'v1', state: 'processing', currentStage: 'pii_dispatch',
+          lastSuccessfulStage: 'kafka_published', retryable: false,
+        },
+      }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+
+    const code = await runDoctorCli(['doctor', '--probe'], {
+      ...value.overrides,
+      fetch: fetch as typeof globalThis.fetch,
+      sleep: async () => undefined,
+      probeExporter: fixture.probeExporter,
+    });
+
+    expect(code).toBe(3);
+    expect(value.output.join('\n')).toContain('BACKEND_HTTP_ERROR: The existing trace read path returned an unexpected HTTP status (HTTP 503)');
+    expect(value.output.join('\n')).toContain('Ingestion: processing at pii_dispatch');
   });
 
   it('does not retain stale details for a malformed terminal receipt', async () => {
