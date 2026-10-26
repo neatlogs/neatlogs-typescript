@@ -25,6 +25,10 @@ export interface AbAssignmentOptions {
   /** Used when settings cannot be fetched. Keep these equal to your control version. */
   fallback?: AbParams;
 }
+/** A choice that has not yet been reported as an executed agent run. */
+export interface AbDecision extends AbAssignment {
+  unitId: string;
+}
 export type LogExposureOptions = Pick<AbExposure, 'unitId' | 'arm'> & {
   traceId?: string;
   unitComplete?: boolean;
@@ -130,16 +134,42 @@ export class AbTestClient {
   }
 
   assign(key: string, options: AbAssignmentOptions): AbAssignment {
+    const decision = this.choose(key, options);
+    if (decision.reason === 'assigned') this.recordRun(decision);
+    return {
+      key: decision.key, arm: decision.arm, params: decision.params,
+      reason: decision.reason, revision: decision.revision,
+      allocationVersion: decision.allocationVersion,
+    };
+  }
+
+  /** Choose from cached settings without claiming that the agent ran. */
+  choose(key: string, options: AbAssignmentOptions): AbDecision {
     const config = !this.closed ? this.configs.get(key) : undefined;
     if (!config || Date.parse(config.expiresAt) <= Date.now() || !options.unit || options.unit.length > 1024) {
-      return { key, arm: 'a', params: { ...options.fallback }, reason: 'unavailable', revision: null, allocationVersion: null };
+      return { key, unitId: options.unit, arm: 'a', params: { ...options.fallback }, reason: 'unavailable', revision: null, allocationVersion: null };
     }
     const enabled = config.enabled && Date.parse(config.endsAt) > Date.now();
     const arm = enabled
       ? config.arms[assignmentBucket(config.salt, options.unit) < config.arms[0].weight ? 0 : 1]
       : config.arms[config.defaultArm === 'a' ? 0 : 1];
-    if (enabled) this.queueExposure(key, { unitId: options.unit, arm: arm.key, allocationVersion: config.allocationVersion }, 'sdk');
-    return { key, arm: arm.key, params: { ...arm.params }, reason: enabled ? 'assigned' : 'default', revision: config.revision, allocationVersion: config.allocationVersion };
+    return { key, unitId: options.unit, arm: arm.key, params: { ...arm.params }, reason: enabled ? 'assigned' : 'default', revision: config.revision, allocationVersion: config.allocationVersion };
+  }
+
+  /** Call inside the run's trace, immediately before the chosen agent starts. */
+  recordRun(decision: AbDecision): boolean {
+    if (decision.reason !== 'assigned' || decision.allocationVersion === null) return false;
+    return this.queueExposure(decision.key, {
+      unitId: decision.unitId, arm: decision.arm, allocationVersion: decision.allocationVersion,
+    }, 'sdk');
+  }
+
+  /** Call after the final trace of this session or user has been exported. */
+  completeDecision(decision: AbDecision, traceId: string): boolean {
+    if (decision.reason !== 'assigned' || decision.allocationVersion === null) return false;
+    return this.completeUnit(decision.key, {
+      unitId: decision.unitId, arm: decision.arm, traceId, allocationVersion: decision.allocationVersion,
+    });
   }
 
   /** Call inside a trace when an external feature flag chose the version. */
