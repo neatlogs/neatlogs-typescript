@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AbTestClient } from '../../src/ab-test/client.js';
 import { abConfigSchema, assignmentBucket } from '../../src/ab-test/protocol.js';
-import { abTest, getAbTestClient } from '../../src/ab-test/shared.js';
+import { abTest, chooseAbTest, recordAbTestRun, completeAbTestDecision, getAbTestClient } from '../../src/ab-test/shared.js';
 import { init, flush, shutdown } from '../../src/init.js';
 import { trace } from '../../src/core/context.js';
 import { ReplaySession } from '../../src/replay/session.js';
@@ -224,6 +224,37 @@ describe('A/B assignment and exposure HTTP protocol', () => {
     expect(paths.indexOf('/v1/traces')).toBeGreaterThan(-1);
     expect(paths.lastIndexOf('/v1/traces')).toBeLessThan(paths.indexOf('/api/v1/ab-tests/cheap-model/exposures'));
     expect(await shutdown()).toBe(true);
+  });
+
+  it('counts only executed choices and preserves failed agent attempts', async () => {
+    const exposures: Record<string, unknown>[] = [];
+    const baseUrl = await server(async (req, res) => {
+      if (req.method === 'GET') return json(res, config());
+      if (req.url === '/v1/traces') {
+        for await (const _chunk of req) { /* Drain the OTLP request. */ }
+        res.writeHead(200, { 'Content-Type': 'application/x-protobuf' }); res.end(); return;
+      }
+      exposures.push(await readBody(req) as Record<string, unknown>); json(res, { accepted: true });
+    });
+    await init({ apiKey: 'test-project-key', endpoint: baseUrl, experiments: { keys: ['cheap-model'], baseUrl }, registerShutdownHandlers: false });
+    const abandoned = chooseAbTest('cheap-model', { unit: 'abandoned' });
+    expect(abandoned.reason).toBe('assigned');
+    expect(getAbTestClient()?.getDiagnostics().pending).toBe(0);
+    expect(recordAbTestRun(abandoned)).toBe(false);
+    let traceId = '';
+    const decision = chooseAbTest('cheap-model', { unit: 'user-1' });
+    await expect(trace({ name: 'failed-agent', endUserId: 'user-1' }, async span => {
+      traceId = span.spanContext().traceId;
+      expect(recordAbTestRun(decision)).toBe(true);
+      throw new Error('agent failed after starting');
+    })).rejects.toThrow('agent failed after starting');
+    expect(getAbTestClient()?.getDiagnostics().pending).toBe(1);
+    expect(await flush()).toBe(true);
+    expect(completeAbTestDecision(decision, traceId)).toBe(true);
+    expect(await flush()).toBe(true);
+    expect(exposures).toHaveLength(2);
+    expect(exposures[0]).toMatchObject({ unitId: 'user-1', traceId, unitComplete: false });
+    expect(exposures[1]).toMatchObject({ unitId: 'user-1', traceId, unitComplete: true });
   });
 
   it('rejects credentials in URLs, malformed/oversized settings, and redirects', async () => {
