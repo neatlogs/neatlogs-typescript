@@ -54,6 +54,32 @@ documented Neatlogs wrapper, hook, processor, or telemetry helper.
 | `log()` | Capture timestamped log steps within the active trace |
 | `shutdown()` | Flush all pending data and shut down the SDK gracefully |
 
+## Live A/B tests
+
+Create a test in Neatlogs and register its key with `init({ experiments: { keys: [key] } })`. The SDK chooses cached settings; your agent backend must apply the returned model, prompt, and tool configuration. For a new integration, separate choosing from recording traffic:
+
+```typescript
+const version = chooseAbTest(key, { unit: conversationId, fallback: controlSettings });
+let traceId: string | undefined;
+try {
+  return await trace({ name: 'agent-request', sessionId: conversationId }, async (span) => {
+    traceId = span.spanContext().traceId;
+    if (version.reason === 'assigned' && !recordAbTestRun(version)) {
+      throw new Error('A/B run could not be recorded');
+    }
+    return runYourAgent(request, version.params);
+  });
+} finally {
+  await flush(); // Export successful and failed traces.
+  if (conversationIsFinished && traceId && version.reason === 'assigned') {
+    completeAbTestDecision(version, traceId);
+    await flush();
+  }
+}
+```
+
+Import `chooseAbTest`, `recordAbTestRun`, `completeAbTestDecision`, `trace`, and `flush` from `neatlogs`. Use a stable conversation or end-user ID matching the test's assignment unit. A choice alone does not appear in live results. The older `abTest` API still records immediately when called inside a trace.
+
 ## Doctor v2
 
 Run the local SDK pipeline check without credentials or network access:
