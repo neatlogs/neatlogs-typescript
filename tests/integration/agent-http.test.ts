@@ -2,9 +2,12 @@ import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentClient } from '../../src/agent/client.js';
-import { agentAttributesSchema, agentUnitSchema } from '../../src/agent/protocol.js';
+import { agentAttributesSchema, agentUnitSchema, agentConfigSchema } from '../../src/agent/protocol.js';
 import * as replay from '../../src/replay/session.js';
 import * as provider from '../../src/core/provider.js';
+import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { trace } from '../../src/core/context.js';
 
 const vectors = JSON.parse(readFileSync(new URL('../fixtures/agent-v2.json', import.meta.url), 'utf8'));
 const servers: Server[] = [], clients: AgentClient[] = [];
@@ -31,10 +34,15 @@ async function setup(configSeconds = 60, assignmentSeconds = 60) {
   return { client, state, now };
 }
 const options = { unit: 'session:42', attributes: { environment: 'production', premium: true }, fallback: { model: 'deployed' } };
-describe('session agent v2 protocol', () => {
+describe('agent v2 protocol', () => {
   it('agrees on shared typed and UTF16 attribute/session vectors', () => {
     for (const vector of vectors.attributeVectors) expect(agentAttributesSchema.safeParse(vector.attributes).success).toBe(vector.valid);
     for (const vector of vectors.unitVectors) expect(agentUnitSchema.safeParse(vector.unit).success).toBe(vector.valid);
+    for (const { unit, completionPolicy, valid } of vectors.completionVectors) {
+      const config = structuredClone(vectors.config);
+      Object.assign(config.live, { unit, completionPolicy });
+      expect(agentConfigSchema.safeParse(config).success).toBe(valid);
+    }
   });
   it.each([[10, 60], [60, 10]])('expires at the earlier config/assignment lease (%i/%i)', async (configSeconds, assignmentSeconds) => {
     const { client, state, now } = await setup(configSeconds, assignmentSeconds);
@@ -57,7 +65,7 @@ describe('session agent v2 protocol', () => {
     state.configStatus = status; await client.refresh();
     expect(await client.chooseAgent('support', options)).toEqual(first);
   });
-  it('serves current after pause and rejects an unsupported end_user config', async () => {
+  it('serves current after pause and rejects an invalid customer completion policy', async () => {
     const { client, state } = await setup(); await client.chooseAgent('support', options);
     state.config.revision++; state.config.live.status = 'paused'; await client.refresh();
     expect(await client.chooseAgent('support', options)).toMatchObject({ reason: 'paused', arm: 'a', params: { model: 'current' } });
@@ -96,7 +104,7 @@ describe('session agent v2 protocol', () => {
     expect(await client.flush()).toBe(true);
     const sent = state.requests.filter(item => item.path.endsWith('/exposures')).map(item => item.body);
     expect(sent).toHaveLength(3); expect(sent[0]).toEqual(sent[1]);
-    expect(sent[2]).toMatchObject({ protocolVersion: 2, assignmentId: vectors.assignment.assignmentId, unitComplete: true });
+    expect(sent[2]).toMatchObject({ protocolVersion: 2, assignmentId: vectors.assignment.assignmentId, conversationComplete: true, unitComplete: true });
     expect(sent[2]).not.toHaveProperty('arm');
   });
   it('coalesces simultaneous admission and respects a shorter refreshed config lease', async () => {
@@ -128,4 +136,66 @@ describe('session agent v2 protocol', () => {
     expect(client.recordAgentRun(selected)).toBe(true); state.exposureStatus = 401;
     expect(await client.flush()).toBe(false); expect(client.recordAgentRun(selected)).toBe(false);
   });
+  it('keeps a customer assigned across two conversations and completes only each conversation', async () => {
+    const { client, state } = await setup();
+    Object.assign(state.config.live, { unit: 'end_user', completionPolicy: 'fixed_horizon' });
+    Object.assign(state.assignment, { unit: 'end_user', completionPolicy: 'fixed_horizon' });
+    const exporter = new InMemorySpanExporter();
+    const telemetry = new NodeTracerProvider();
+    telemetry.addSpanProcessor(new SimpleSpanProcessor(exporter));
+    const previous = provider.getNeatlogsProvider();
+    provider._setNeatlogsProvider(telemetry);
+    const traceIds: string[] = [];
+    try {
+      for (const [index, step] of vectors.customerJourney.traces.entries()) {
+        const selected = await client.chooseAgent('support', { ...options, unit: vectors.customerJourney.unitId });
+        expect(selected).toMatchObject({ reason: 'assigned', unit: 'end_user', completionPolicy: 'fixed_horizon' });
+        await trace({ name: 'customer-turn', sessionId: step.sessionId, endUserId: vectors.customerJourney.unitId }, async span => {
+          traceIds.push(span.spanContext().traceId);
+          expect(client.recordAgentRun(selected)).toBe(true);
+          expect(client.recordAgentRun(selected)).toBe(true);
+        });
+        await telemetry.forceFlush();
+        if (index === 2) {
+          state.config.revision++;
+          Object.assign(state.config.live, { unit: 'session', completionPolicy: 'explicit' });
+          await client.refresh();
+        }
+        if (step.conversationComplete) {
+          expect(client.completeAgentDecision(selected, traceIds.at(-1)!)).toBe(true);
+          expect(client.completeAgentDecision(selected, traceIds.at(-1)!)).toBe(true);
+        }
+        expect(await client.flush()).toBe(true);
+      }
+      const roots = exporter.getFinishedSpans().filter(span => !span.parentSpanId);
+      expect(roots).toHaveLength(3);
+      expect(new Set(traceIds).size).toBe(3);
+      roots.forEach((root, i) => {
+        expect(root.attributes['neatlogs.session.id']).toBe(vectors.customerJourney.traces[i].sessionId);
+        expect(root.attributes['neatlogs.end_user.id']).toBe(vectors.customerJourney.unitId);
+        expect(root.attributes['neatlogs.agent.support.assignment_id']).toBe(vectors.assignment.assignmentId);
+      });
+      const admissions = state.requests.filter(item => item.path.endsWith('/assignments'));
+      expect(admissions).toHaveLength(1);
+      expect(admissions[0].body).toEqual({ protocolVersion: 2, revision: 1, unitId: vectors.customerJourney.unitId, attributes: options.attributes });
+      const sent = state.requests.filter(item => item.path.endsWith('/exposures')).map(item => item.body);
+      expect(sent).toHaveLength(5);
+      expect(new Set(sent.map(item => item.eventId)).size).toBe(5);
+      expect(sent.map(item => item.conversationComplete)).toEqual([false, false, true, false, true]);
+      sent.forEach(item => {
+        expect(item).toEqual({ protocolVersion: 2, eventId: expect.any(String), assignmentId: vectors.assignment.assignmentId,
+          unitId: vectors.customerJourney.unitId, traceId: expect.any(String), conversationComplete: expect.any(Boolean), unitComplete: false });
+      });
+    } finally { provider._setNeatlogsProvider(previous); await telemetry.shutdown(); }
+  });
+  it('rejects assignment unit or completion policy that differs from the publication', async () => {
+    const { client, state } = await setup();
+    Object.assign(state.assignment, { unit: 'end_user', completionPolicy: 'fixed_horizon' });
+    expect((await client.chooseAgent('support', options)).reason).toBe('unavailable');
+    state.assignment.unit = 'session'; state.assignment.completionPolicy = 'unknown';
+    expect((await client.chooseAgent('support', options)).reason).toBe('unavailable');
+    delete state.assignment.completionPolicy;
+    expect((await client.chooseAgent('support', options)).reason).toBe('unavailable');
+  });
+
 });

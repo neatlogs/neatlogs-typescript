@@ -12,7 +12,7 @@ export type AgentDecision = (AgentAssignment & { unitId: string }) | {
 };
 export interface AgentChoiceOptions { unit: string; attributes?: AgentAttributes; fallback: AbParams }
 
-/** Session-only v2 adapter. Choose before opening the root trace; record just before execution. */
+/** Customer or session v2 adapter. Choose before opening the root trace; record just before execution. */
 export class AgentClient extends AbTestClient {
   private readonly agentKeys: string[];
   private readonly publications = new Map<string, { config: AgentConfig; etag?: string }>();
@@ -94,7 +94,7 @@ export class AgentClient extends AbTestClient {
         if (this.closed || this.publications.get(key) !== publication) return fallback;
         if (result.agentKey !== key || result.revision !== config.revision || !this.validExpiry(result.expiresAt, Date.now())) throw new Error('Invalid assignment lease');
         if (result.reason === 'assigned') {
-          if (result.testId !== config.live.testId || result.experimentId !== config.live.experimentId || result.candidateRevision !== config.live.candidateRevision || result.allocationVersion !== config.live.allocationVersion || result.fingerprint !== (result.arm === 'a' ? config.current.fingerprint : config.live.candidateFingerprint)) throw new Error('Invalid assignment identity');
+          if (result.testId !== config.live.testId || result.experimentId !== config.live.experimentId || result.candidateRevision !== config.live.candidateRevision || result.allocationVersion !== config.live.allocationVersion || result.unit !== config.live.unit || result.completionPolicy !== config.live.completionPolicy || result.fingerprint !== (result.arm === 'a' ? config.current.fingerprint : config.live.candidateFingerprint)) throw new Error('Invalid assignment identity');
         } else if (result.fingerprint !== config.current.fingerprint) throw new Error('Invalid current fingerprint');
         result.expiresAt = new Date(Math.min(Date.parse(config.expiresAt), Date.parse(result.expiresAt), Date.now() + 60000)).toISOString();
         if (Date.parse(result.expiresAt) <= Date.now()) return fallback;
@@ -130,15 +130,16 @@ export class AgentClient extends AbTestClient {
     return true;
   }
 
+  /** Call after exporting the final trace of this conversation. Customer units stay open. */
   completeAgentDecision(decision: AgentDecision, traceId: string): boolean {
     if (decision.reason !== 'assigned' || getReplayStatus() || this.recorded.get(JSON.stringify([decision.agentKey, traceId])) !== decision.assignmentId) return false;
     return this.queueAgentReceipt(decision, traceId, true);
   }
 
-  private queueAgentReceipt(decision: Extract<AgentDecision, { reason: 'assigned' }>, traceId: string, unitComplete: boolean): boolean {
+  private queueAgentReceipt(decision: Extract<AgentDecision, { reason: 'assigned' }>, traceId: string, conversationComplete: boolean): boolean {
     if (!traceId || traceId.length > 128 || !agentUnitSchema.safeParse(decision.unitId).success) return false;
-    const payload = { protocolVersion: 2, eventId: randomUUID(), assignmentId: decision.assignmentId, unitId: decision.unitId, traceId, unitComplete };
-    return this.enqueueReceipt(decision.agentKey, payload, JSON.stringify(['agent', decision.agentKey, decision.assignmentId, traceId, unitComplete]), API);
+    const payload = { protocolVersion: 2, eventId: randomUUID(), assignmentId: decision.assignmentId, unitId: decision.unitId, traceId, conversationComplete, unitComplete: conversationComplete && decision.unit === 'session' && decision.completionPolicy === 'explicit' };
+    return this.enqueueReceipt(decision.agentKey, payload, JSON.stringify(['agent', decision.agentKey, decision.assignmentId, traceId, conversationComplete]), API);
   }
 
   override close(): void { this.publications.clear(); this.leases.clear(); this.recorded.clear(); super.close(); }
