@@ -42,6 +42,8 @@ const CACHE_MS = 60_000;
 const MAX_QUEUE = 1000;
 const MAX_PENDING_AGE_MS = 24 * 60 * 60_000;
 
+class TransientAbRequestError extends Error {}
+
 async function readJson(response: Response): Promise<unknown> {
   if (!response.body) throw new Error('Empty A/B response');
   const reader = response.body.getReader();
@@ -49,7 +51,7 @@ async function readJson(response: Response): Promise<unknown> {
   let size = 0;
   try {
     for (;;) {
-      const part = await reader.read();
+      const part = await reader.read().catch(() => { throw new TransientAbRequestError('A/B response interrupted'); });
       if (part.done) break;
       size += part.value.byteLength;
       if (size > MAX_RESPONSE_BYTES) throw new Error('A/B response exceeds 64 KiB');
@@ -117,6 +119,7 @@ export class AbTestClient {
       if (response.status === 304 && previous) {
         config = abConfigSchema.parse({ ...previous, expiresAt: response.headers.get('X-AB-Config-Expires-At') });
       } else {
+        if ([408, 429].includes(response.status) || response.status >= 500) throw new TransientAbRequestError('A/B settings temporarily unavailable');
         if (!response.ok) throw new Error('A/B settings unavailable');
         config = abConfigSchema.parse(response.body);
       }
@@ -127,9 +130,10 @@ export class AbTestClient {
       }
       config.expiresAt = new Date(Math.min(Date.parse(config.expiresAt), now + CACHE_MS)).toISOString();
       if (!this.closed) this.configs.set(key, config);
-    } catch {
-      // A failed refresh must not keep serving a treatment from stale settings.
-      this.configs.delete(key);
+    } catch (error) {
+      if (!(error instanceof TransientAbRequestError) || !previous || Date.parse(previous.expiresAt) <= Date.now()) {
+        this.configs.delete(key);
+      }
     }
   }
 
@@ -282,8 +286,12 @@ export class AbTestClient {
     try {
       const response = await context.with(suppressTracing(context.active()), () => fetch(
         `${this.baseUrl}/api/v1/ab-tests/${encodeURIComponent(key)}/${operation}`,
-        { ...init, headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json', ...init.headers }, redirect: 'error', signal: controller.signal },
-      ));
+        { ...init, headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json', ...init.headers }, redirect: 'manual', signal: controller.signal },
+      )).catch(() => { throw new TransientAbRequestError('A/B request failed'); });
+      if (operation === 'config' && !response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return { status: response.status, ok: false, headers: response.headers, body: null };
+      }
       const body = response.status === 304 ? null : await readJson(response).catch(error => {
         if (response.ok) throw error;
         return null;

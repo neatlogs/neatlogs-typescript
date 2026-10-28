@@ -151,7 +151,7 @@ describe('A/B assignment and exposure HTTP protocol', () => {
     expect(requests).toHaveLength(2);
   });
 
-  it('serves caller control on refresh failure and expired cache, and honors shipped defaults', async () => {
+  it('retains valid settings on transient refresh failure and honors shipped defaults', async () => {
     let fail = false;
     let shipped = false;
     const baseUrl = await server((_req, res) => {
@@ -167,12 +167,73 @@ describe('A/B assignment and exposure HTTP protocol', () => {
     const ab = client(baseUrl);
     await ab.start();
     fail = true; await ab.refresh();
-    expect(ab.assign('cheap-model', { unit: 'user-1', fallback: { model: 'safe' } })).toMatchObject({ arm: 'a', reason: 'unavailable', params: { model: 'safe' } });
+    expect(ab.assign('cheap-model', { unit: 'user-1' })).toMatchObject({ arm: 'b', reason: 'assigned' });
     fail = false; shipped = true; await ab.refresh();
     expect(ab.assign('cheap-model', { unit: 'user-1' })).toMatchObject({ arm: 'b', reason: 'default' });
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61000);
     expect(ab.assign('cheap-model', { unit: 'user-1' }).reason).toBe('unavailable');
     vi.restoreAllMocks();
+  });
+
+  it.each([408, 429, 500, 503, 'disconnect', 'interrupted'])(
+    'retains settings only until their original expiry after %s', async failure => {
+      const original = config({ expiresAt: new Date(Date.now() + 20000).toISOString() });
+      let fail = false;
+      const baseUrl = await server((_req, res) => {
+        if (!fail) return json(res, original);
+        if (failure === 'disconnect') return res.destroy();
+        if (failure === 'interrupted') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.write('{"protocolVersion":');
+          setImmediate(() => res.destroy());
+          return;
+        }
+        json(res, {}, failure as number);
+      });
+      const ab = client(baseUrl);
+      await ab.start();
+      fail = true;
+      const now = vi.spyOn(Date, 'now');
+      try {
+        now.mockReturnValue(Date.parse(original.expiresAt) - 1);
+        await ab.refresh();
+        expect(ab.choose('cheap-model', { unit: 'user-1' }).reason).toBe('assigned');
+        now.mockReturnValue(Date.parse(original.expiresAt));
+        await ab.refresh();
+        expect(ab.choose('cheap-model', { unit: 'user-1', fallback: { model: 'safe' } }))
+          .toMatchObject({ reason: 'unavailable', params: { model: 'safe' } });
+      } finally { now.mockRestore(); }
+    },
+  );
+
+  it.each([401, 403, 404, 302, 'invalid'])(
+    'invalidates unexpired settings immediately after %s', async failure => {
+      let fail = false;
+      const baseUrl = await server((_req, res) => {
+        if (!fail) return json(res, config());
+        if (failure === 'invalid') return json(res, config({ revision: 0 }));
+        json(res, {}, failure as number);
+      });
+      const ab = client(baseUrl);
+      await ab.start();
+      fail = true;
+      await ab.refresh();
+      expect(ab.choose('cheap-model', { unit: 'user-1' }).reason).toBe('unavailable');
+    },
+  );
+
+  it.each([503, 401])('classifies HTTP %s even when response disposal fails', async status => {
+    const baseUrl = await server((_req, res) => json(res, config()));
+    const ab = client(baseUrl);
+    await ab.start();
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({
+      cancel: () => Promise.reject(new Error('response cleanup failed')),
+    }), { status }));
+    try {
+      await ab.refresh();
+      expect(ab.choose('cheap-model', { unit: 'user-1' }).reason)
+        .toBe(status === 503 ? 'assigned' : 'unavailable');
+    } finally { fetch.mockRestore(); }
   });
 
   it('preserves exposure IDs and ordering while trace finalization catches up', async () => {
