@@ -42,7 +42,7 @@ export const replayStatusSchema = z.object({
   traceIds: z.array(z.string().regex(/^[a-f0-9]{32}$/)).max(2),
 }).strict();
 
-function canonical(value: DatasetJson): string {
+export function canonical(value: DatasetJson): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value !== null && typeof value === 'object')
     return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key]!)}`).join(',')}}`;
