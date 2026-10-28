@@ -533,7 +533,7 @@ describe('openaiAgentsProcessor', () => {
     for (const span of spans) discardPendingMedia(span as object);
   });
 
-  it('captures only new input turns per response span and caps total input per span', () => {
+  it('captures only new input turns per response span', () => {
     const processor = openaiAgentsProcessor();
     processor.onTraceStart({ traceId: 'trace-long', name: 'Agent workflow' });
     const history: any[] = [];
@@ -556,7 +556,7 @@ describe('openaiAgentsProcessor', () => {
       const chars = Object.entries(span.attributes)
         .filter(([k]) => /^neatlogs\.llm\.input_messages\.\d+\.content$/.test(k))
         .reduce((n, [, v]) => n + String(v).length, 0);
-      expect(chars).toBeLessThanOrEqual(20000);
+      expect(chars).toBeLessThan(2 * 2100 + 100);
       // Usage and output are still written however long the history is.
       expect(attr(span, 'neatlogs.llm.token_count.prompt')).toBe(10);
       expect(attr(span, 'neatlogs.llm.output_messages.0.content')).toMatch(/^answer /);
@@ -617,23 +617,23 @@ describe('openaiAgentsProcessor', () => {
     const llm = runResponses('trace-long-first', [history, history]);
     expect(attr(llm[0], 'neatlogs.llm.input_messages.0.content')).toBe(long);
     expect(attr(llm[0], 'neatlogs.llm.input_messages.1.content')).toBe('short follow up');
-    expect(attr(llm[0], 'neatlogs.llm.input_deferred_from')).toBeUndefined();
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.0.content')).toBeUndefined();
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.1.content')).toBeUndefined();
   });
 
-  it('defers messages past the per-span budget and captures them on the next response', () => {
+  it('writes every message of a very long input on the only response span', () => {
+    // No later response span exists to pick up anything left out.
     const big = (label: string) => `${label} ` + 'y'.repeat(300 * 1024);
     const history = [
       { role: 'user', content: big('one') },
       { role: 'user', content: big('two') },
       { role: 'user', content: 'tail' },
     ];
-    const llm = runResponses('trace-deferred', [history, history]);
+    const llm = runResponses('trace-terminal', [history]);
+    expect(llm.length).toBe(1);
     expect(attr(llm[0], 'neatlogs.llm.input_messages.0.content')).toBe(history[0].content);
-    expect(attr(llm[0], 'neatlogs.llm.input_messages.1.content')).toBeUndefined();
-    expect(attr(llm[0], 'neatlogs.llm.input_deferred_from')).toBe(1);
-    expect(attr(llm[1], 'neatlogs.llm.input_messages.0.content')).toBeUndefined();
-    expect(attr(llm[1], 'neatlogs.llm.input_messages.1.content')).toBe(history[1].content);
-    expect(attr(llm[1], 'neatlogs.llm.input_messages.2.content')).toBe('tail');
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.1.content')).toBe(history[1].content);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.2.content')).toBe('tail');
   });
 
   it('captures same-length but different input histories on later response spans', () => {

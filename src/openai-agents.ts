@@ -227,10 +227,8 @@ class NeatlogsTraceProcessor {
       const previous = this._inputSeen.get(traceKey) ?? [];
       let start = 0;
       while (start < previous.length && start < fingerprints.length && previous[start] === fingerprints[start]) start++;
-      const { turns: inputTurns, captured } = captureInputMessages(otelSpan, inputItems, start);
-      // Only what this span actually holds counts as seen; deferred turns are
-      // picked up by the next response span.
-      this._inputSeen.set(traceKey, fingerprints.slice(0, captured));
+      const inputTurns = captureInputMessages(otelSpan, inputItems, start);
+      this._inputSeen.set(traceKey, fingerprints);
       const root = this._spans.get(traceKey);
       if (root) {
         if (!this._rootInputDone.has(traceKey)) {
@@ -322,29 +320,14 @@ class NeatlogsTraceProcessor {
 // Utilities
 // ---------------------------------------------------------------------------
 
-// Characters of input text written to one span before the rest is deferred.
-// Kept well under the 4 MiB OTLP request limit (UTF-8 can take 4 bytes per
-// character) so one long history cannot make the exporter reject the span.
-const MAX_INPUT_CHARS_PER_SPAN = 512 * 1024;
-
 // Captures messages from index `start` on. Earlier ones were already written to
 // the previous response span of this trace. Indexes stay the same as in the
-// request, so `input_messages.N` always means message N.
-//
-// A message is written whole or not at all. When the budget runs out, this and
-// every later message are left for the next response span of the trace, and
-// `captured` tells the caller how many leading messages are actually on this
-// span so the dedupe only skips those. The first message is always written,
-// however long, so a single long message is never cut.
-function captureInputMessages(
-  span: Span,
-  input: any,
-  start = 0,
-): { turns: Array<{ role: string; text: string }>; captured: number } {
+// request, so `input_messages.N` always means message N. Every message is
+// written in full, like the other adapters; a span too large for one export
+// request is handled by the exporter, not cut here.
+function captureInputMessages(span: Span, input: any, start = 0): Array<{ role: string; text: string }> {
   const messages = Array.isArray(input) ? input : (typeof input === 'string' ? [{ role: 'user', content: input }] : []);
   const turns: Array<{ role: string; text: string }> = [];
-  let budget = MAX_INPUT_CHARS_PER_SPAN;
-  let captured = messages.length;
   for (let i = 0; i < messages.length; i++) {
     if (i < start) {
       turns.push({ role: '', text: '' });
@@ -353,21 +336,15 @@ function captureInputMessages(
     const message = messages[i];
     const role = typeof message === 'object' && message ? String(message.role ?? '') : '';
     const content = typeof message === 'object' && message ? message.content : message;
-    if (i > start && contentText(content).length > budget) {
-      captured = i;
-      break;
-    }
     // Route media through typed capture first, then read text parts only, so
     // inline bytes never reach text attributes.
     const safeContent = captureMedia(span, `neatlogs.llm.input_messages.${i}`, content, 'input');
     const text = contentText(safeContent);
-    budget -= text.length;
     turns.push({ role, text });
     if (role) span.setAttribute(`neatlogs.llm.input_messages.${i}.role`, role);
     if (text) span.setAttribute(`neatlogs.llm.input_messages.${i}.content`, text);
   }
-  if (captured < messages.length) span.setAttribute('neatlogs.llm.input_deferred_from', captured);
-  return { turns, captured };
+  return turns;
 }
 
 // Last user turn, taken from the already sanitized text.
