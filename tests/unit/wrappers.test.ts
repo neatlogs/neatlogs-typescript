@@ -572,6 +572,70 @@ describe('openaiAgentsProcessor', () => {
     expect(total).toBeLessThan(40 * 2100 + 40 * 20);
   });
 
+  function runResponses(traceId: string, inputs: any[][]) {
+    const processor = openaiAgentsProcessor();
+    processor.onTraceStart({ traceId, name: 'Agent workflow' });
+    inputs.forEach((input, n) => {
+      const spanId = `${traceId}-r${n}`;
+      processor.onSpanStart({ spanId, traceId, spanData: { type: 'response' } });
+      processor.onSpanEnd({ spanId, traceId, spanData: { type: 'response', _input: input, _response: {
+        model: 'gpt-4o-mini',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `answer ${n}` }] }],
+      } } });
+    });
+    processor.onTraceEnd({ traceId });
+    return exporter.getFinishedSpans().filter(s => s.attributes['neatlogs.span.kind'] === 'LLM');
+  }
+
+  it('captures a same-text message whose media differs from an earlier response', () => {
+    const image = (url: string) => [{ role: 'user', content: [
+      { type: 'input_text', text: 'What is in this image?' },
+      { type: 'input_image', image_url: url },
+    ] }];
+    const llm = runResponses('trace-media-id', [
+      image('https://example.com/a.png'),
+      image('https://example.com/b.png'),
+    ]);
+    expect(llm.length).toBe(2);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.0.media.0.reference')).toBe('https://example.com/a.png');
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.0.media.0.reference')).toBe('https://example.com/b.png');
+  });
+
+  it('still skips a repeated message with identical text and media', () => {
+    const first = [{ role: 'user', content: [
+      { type: 'input_text', text: 'look' },
+      { type: 'input_image', image_url: 'https://example.com/a.png' },
+    ] }];
+    const llm = runResponses('trace-media-same', [first, [...first, { role: 'user', content: 'and now?' }]]);
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.0.content')).toBeUndefined();
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.1.content')).toBe('and now?');
+  });
+
+  it('keeps a long first message whole and the short message after it', () => {
+    const long = 'x'.repeat(21000);
+    const history = [{ role: 'user', content: long }, { role: 'user', content: 'short follow up' }];
+    const llm = runResponses('trace-long-first', [history, history]);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.0.content')).toBe(long);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.1.content')).toBe('short follow up');
+    expect(attr(llm[0], 'neatlogs.llm.input_deferred_from')).toBeUndefined();
+  });
+
+  it('defers messages past the per-span budget and captures them on the next response', () => {
+    const big = (label: string) => `${label} ` + 'y'.repeat(300 * 1024);
+    const history = [
+      { role: 'user', content: big('one') },
+      { role: 'user', content: big('two') },
+      { role: 'user', content: 'tail' },
+    ];
+    const llm = runResponses('trace-deferred', [history, history]);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.0.content')).toBe(history[0].content);
+    expect(attr(llm[0], 'neatlogs.llm.input_messages.1.content')).toBeUndefined();
+    expect(attr(llm[0], 'neatlogs.llm.input_deferred_from')).toBe(1);
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.0.content')).toBeUndefined();
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.1.content')).toBe(history[1].content);
+    expect(attr(llm[1], 'neatlogs.llm.input_messages.2.content')).toBe('tail');
+  });
+
   it('captures same-length but different input histories on later response spans', () => {
     // Regression: a trace-wide message count treated a same-length list as an
     // already captured prefix, so a distinct one-message _input lost its input.
