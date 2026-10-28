@@ -57,3 +57,5 @@ Use `logExposure('cheap-model', { unitId, arm: 'a' | 'b', traceId, allocationVer
 ## Assignment protocol
 
 Protocol 1 hashes UTF-8 `salt + ':' + unitId`, reads the first four SHA-256 bytes as an unsigned big-endian integer, and takes modulo 10,000. A bucket below the original arm's weight selects `a`; the rest select `b`. Salt `0123456789abcdef` repeated four times produces buckets 2509 for `user-1`, 2445 for `用户-α`, and 4105 for `session:42`.
+
+For stable agent keys and session-only audience enrollment, see [protocol-v2 agent connection](agent-connection.md). Existing methods on this page remain protocol v1.

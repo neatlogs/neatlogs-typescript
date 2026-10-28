@@ -36,13 +36,13 @@ export type LogExposureOptions = Pick<AbExposure, 'unitId' | 'arm'> & {
   /** Keep the assignment's version when reporting after a settings refresh. */
   allocationVersion?: number;
 };
-type PendingExposure = { key: string; exposure: AbExposure; queuedAt: number };
+type PendingExposure = { key: string; exposure: AbExposure | ({ eventId: string } & Record<string, unknown>); queuedAt: number; apiPath?: string };
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const CACHE_MS = 60_000;
 const MAX_QUEUE = 1000;
 const MAX_PENDING_AGE_MS = 24 * 60 * 60_000;
 
-class TransientAbRequestError extends Error {}
+export class TransientAbRequestError extends Error {}
 
 async function readJson(response: Response): Promise<unknown> {
   if (!response.body) throw new Error('Empty A/B response');
@@ -76,7 +76,7 @@ export class AbTestClient {
   private timer: ReturnType<typeof setInterval> | undefined;
   private refreshing: Promise<void> | undefined;
   private flushing: Promise<boolean> | undefined;
-  private closed = false;
+  protected closed = false;
   private rejected = 0;
 
   constructor(options: AbTestClientOptions) {
@@ -248,7 +248,7 @@ export class AbTestClient {
       try {
         const response = await this.request(item.key, 'exposures', {
           method: 'POST', body: JSON.stringify(item.exposure),
-        });
+        }, item.apiPath);
         const error = z.object({ code: z.string() }).safeParse(response.body);
         if (response.ok) {
           const receipt = z.object({ accepted: z.literal(true) }).safeParse(response.body);
@@ -267,6 +267,17 @@ export class AbTestClient {
     return this.queue.size === 0 && this.rejected === 0;
   }
 
+  /** Share bounded, ordered delivery with the versioned agent adapter. */
+  protected enqueueReceipt(key: string, exposure: { eventId: string } & Record<string, unknown>, identity: string, apiPath: string): boolean {
+    if (this.closed) return false;
+    if (this.seen.has(identity)) return true;
+    if (this.queue.size >= MAX_QUEUE || this.queue.has(exposure.eventId)) { this.rejected += 1; return false; }
+    this.seen.set(identity, exposure.eventId);
+    if (this.seen.size > 10_000) this.seen.delete(this.seen.keys().next().value!);
+    this.queue.set(exposure.eventId, { key, exposure, queuedAt: Date.now(), apiPath });
+    return true;
+  }
+
   getDiagnostics(): { pending: number; rejected: number } {
     return { pending: this.queue.size, rejected: this.rejected };
   }
@@ -279,15 +290,18 @@ export class AbTestClient {
     for (const controller of this.controllers) controller.abort();
   }
 
-  private async request(key: string, operation: 'config' | 'exposures', init: RequestInit): Promise<{ status: number; ok: boolean; headers: Headers; body: unknown }> {
+  protected onAuthorizationFailure(_key: string): void {}
+
+  protected async request(key: string, operation: 'config' | 'assignments' | 'exposures', init: RequestInit, apiPath = '/api/v1/ab-tests'): Promise<{ status: number; ok: boolean; headers: Headers; body: unknown }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
     this.controllers.add(controller);
     try {
       const response = await context.with(suppressTracing(context.active()), () => fetch(
-        `${this.baseUrl}/api/v1/ab-tests/${encodeURIComponent(key)}/${operation}`,
+        `${this.baseUrl}${apiPath}/${encodeURIComponent(key)}/${operation}`,
         { ...init, headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json', ...init.headers }, redirect: 'manual', signal: controller.signal },
       )).catch(() => { throw new TransientAbRequestError('A/B request failed'); });
+      if ([401, 403].includes(response.status)) this.onAuthorizationFailure(key);
       if (operation === 'config' && !response.ok) {
         await response.body?.cancel().catch(() => undefined);
         return { status: response.status, ok: false, headers: response.headers, body: null };

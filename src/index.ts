@@ -186,3 +186,5 @@ export { __version__ } from "./version.js";
 export type { DatasetVersionActor, DatasetVersionSummary } from './dataset/history.js';
 export { Dataset, runEval } from "./evals.js";
 export type { EvalContext, EvalResult, RunEvalOptions } from "./evals.js";
+export { AgentClient, type AgentDecision, type AgentChoiceOptions } from './agent/client.js';
+export type { AgentAttributes } from './agent/protocol.js';
