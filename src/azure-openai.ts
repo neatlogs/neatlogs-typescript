@@ -26,6 +26,7 @@ import {
   wrapResponsesAsyncIterableStream,
 } from './core/openai-responses.js';
 import { recordFailure } from './core/span-outcome.js';
+import { prepareProviderCapture } from './replay/provider-capture.js';
 import {
   getNeatlogsTracer,
   getNeatlogsParentContext,
@@ -177,6 +178,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
       }
     }
 
+    const captureResponse = prepareProviderCapture(span, 'openai.chat.completions.create', opts, !isStream && rest.length === 0);
     const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
@@ -184,6 +186,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
         if (isStream) {
           return wrapAsyncIterableStream(response, span);
         }
+        captureResponse(response);
         finalizeChatResponse(span, response);
         return response;
       },
@@ -224,6 +227,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
     );
     span.setAttribute('input.value', safeStringify(capturedInput ?? ''));
 
+    const captureResponse = prepareProviderCapture(span, 'openai.responses.create', opts, !isStream && rest.length === 0);
     const promise = withNeatlogsSpan(span, () => original(opts, ...rest));
 
     return promise.then(
@@ -231,6 +235,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         if (isStream) {
           return wrapResponsesAsyncIterableStream(response, span);
         }
+        captureResponse(response);
         finalizeResponsesResponse(span, response);
         return response;
       },

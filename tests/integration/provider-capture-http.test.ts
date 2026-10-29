@@ -1,8 +1,9 @@
 import { createServer, type Server } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
-import OpenAI from 'openai';
+import OpenAI, { AzureOpenAI } from 'openai';
 import { GenerateContentResponse, GoogleGenAI } from '@google/genai';
 import { wrapOpenAI } from '../../src/openai.js';
+import { wrapAzureOpenAI } from '../../src/azure-openai.js';
 import { wrapGoogleGenAI } from '../../src/google-genai.js';
 import { ReplaySession } from '../../src/replay/session.js';
 import { replayRecordingFromCase } from '../../src/replay/frozen-case.js';
@@ -57,6 +58,58 @@ function savedSession() {
 }
 
 describe('capture to frozen-case provider replay over HTTP', () => {
+  it('captures the Azure SDK request with full tool history and preserves Azure identity', async () => {
+    const body = { id: 'azure-saved', object: 'chat.completion', created: 123, model: 'local-model',
+      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'Delivered' } }] };
+    const server = await endpoint(body);
+    const client = wrapAzureOpenAI(new AzureOpenAI({ apiKey: 'local-test-api-key', endpoint: server.url,
+      apiVersion: '2025-01-01-preview', maxRetries: 0 }));
+    const input: OpenAI.ChatCompletionCreateParamsNonStreaming = { model: 'local-model', temperature: 0,
+      messages: [{ role: 'user', content: 'Where is my order?' },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{"id":1}' } }] },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"status":"delivered"}' }],
+      tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }], tool_choice: 'auto' };
+    expect(await client.chat.completions.create(input)).toMatchObject(body);
+    const { capture } = savedSession();
+    expect(capture.input).toEqual(input);
+    expect(capture.output).toEqual(body);
+    expect(only().attributes['neatlogs.llm.provider']).toBe('azure');
+    expect(server.requests()).toBe(1);
+  });
+
+  it('captures the Azure Responses SDK output without transport credentials', async () => {
+    const body = { id: 'azure-response', object: 'response', created_at: 123, model: 'local-model', status: 'completed',
+      output: [{ id: 'message-1', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Saved', annotations: [] }] }] };
+    const server = await endpoint(body);
+    const client = wrapAzureOpenAI(new AzureOpenAI({ apiKey: 'local-test-api-key', endpoint: server.url,
+      apiVersion: '2025-01-01-preview', maxRetries: 0 }));
+    const input = { model: 'local-model', input: 'Hello' };
+    await client.responses.create(input);
+    const { capture } = savedSession();
+    expect(capture.input).toEqual(input);
+    expect(capture.output).toEqual({ ...body, output_text: 'Saved' });
+    expect(only().attributes['neatlogs.llm.provider']).toBe('azure');
+    expect(server.requests()).toBe(1);
+  });
+
+  it.each(['chat', 'responses'])('does not capture Azure %s calls with caller transport options', async operation => {
+    const body = operation === 'chat'
+      ? { id: 'azure-saved', object: 'chat.completion', created: 123, model: 'local-model',
+          choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'Saved' } }] }
+      : { id: 'azure-response', object: 'response', created_at: 123, model: 'local-model', status: 'completed', output: [] };
+    const server = await endpoint(body);
+    const client = wrapAzureOpenAI(new AzureOpenAI({ apiKey: 'local-test-api-key', endpoint: server.url,
+      apiVersion: '2025-01-01-preview', maxRetries: 0 }));
+    const options = { headers: { 'x-mode': 'caller-option' } };
+    if (operation === 'chat') {
+      await client.chat.completions.create({ model: 'local-model', messages: [{ role: 'user', content: 'Hello' }] }, options);
+    } else {
+      await client.responses.create({ model: 'local-model', input: 'Hello' }, options);
+    }
+    expect(only().attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
+    expect(server.requests()).toBe(1);
+  });
+
   it('preserves OpenAI text, tool calls and usage from the real SDK without a second request', async () => {
     const body = { id: 'chat-saved', object: 'chat.completion', created: 123, model: 'local-model',
       choices: [{ index: 0, finish_reason: 'tool_calls', message: { role: 'assistant', content: 'Working',
