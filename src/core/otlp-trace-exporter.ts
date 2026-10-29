@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { ExportResultCode } from '@opentelemetry/core';
-import { OTLPExporterBase, type OTLPExporterNodeConfigBase } from '@opentelemetry/otlp-exporter-base';
+import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
+import { OTLPExporterBase, type IOtlpExportDelegate, type OTLPExporterNodeConfigBase } from '@opentelemetry/otlp-exporter-base';
 import { createOtlpHttpExportDelegate, convertLegacyHttpOptions } from '@opentelemetry/otlp-exporter-base/node-http';
 import { ProtobufTraceSerializer, type ISerializer, type IExportTraceServiceResponse } from '@opentelemetry/otlp-transformer';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -31,34 +31,71 @@ export class OTLPTraceExporter extends OTLPExporterBase<ReadableSpan[]> {
         }
       },
     };
-    const delegate = createOtlpHttpExportDelegate(
-      convertLegacyHttpOptions(config, 'TRACES', 'v1/traces', {
-        'User-Agent': `Neatlogs/${__version__}`,
-        'Content-Type': 'application/x-protobuf',
-      }),
-      serializer,
-    );
+    const options = convertLegacyHttpOptions(config, 'TRACES', 'v1/traces', {
+      'User-Agent': `Neatlogs/${__version__}`,
+      'Content-Type': 'application/x-protobuf',
+    });
+    const delegate = createOtlpHttpExportDelegate(options, serializer);
+    const pending = new Set<Promise<void>>();
+    let stopped = false;
+    const attempt = (transport: IOtlpExportDelegate<ReadableSpan[]>, spans: ReadableSpan[]) => new Promise<ExportResult>((resolve) => {
+      const batch: { acknowledgement: Acknowledgement } = { acknowledgement: { kind: 'pending' } };
+      batches.run(batch, () => transport.export(spans, (result) => {
+        // The upstream delegate reports SUCCESS even when it rejects response data.
+        if (result.code !== ExportResultCode.SUCCESS || batch.acknowledgement.kind === 'accepted') {
+          resolve(result);
+        } else {
+          resolve({
+            code: ExportResultCode.FAILED,
+            error: batch.acknowledgement.kind === 'failed'
+              ? batch.acknowledgement.error
+              : new Error('OTLP acknowledgement was not validated'),
+          });
+        }
+      }));
+    });
+    const exportBatch = async (spans: ReadableSpan[]): Promise<ExportResult> => {
+      const deadline = performance.now() + options.timeoutMillis;
+      const result = await attempt(delegate, spans);
+      const remaining = Math.floor(deadline - performance.now());
+      if (result.code !== ExportResultCode.FAILED || !result.error || !('code' in result.error)
+        || result.error.code !== 'ECONNRESET' || remaining <= 0) return result;
+      // A reset can happen after receipt; resend the same span IDs once within the original deadline.
+      const retry = createOtlpHttpExportDelegate({ ...options, timeoutMillis: remaining }, serializer);
+      try { return await attempt(retry, spans); }
+      finally { await retry.shutdown(); }
+    };
     super({
       export(spans, callback) {
-        const batch: { acknowledgement: Acknowledgement } = { acknowledgement: { kind: 'pending' } };
-        batches.run(batch, () => delegate.export(spans, (result) => {
-          // The upstream delegate reports SUCCESS even when it rejects response data.
-          if (result.code !== ExportResultCode.SUCCESS || batch.acknowledgement.kind === 'accepted') {
-            callback(result);
-          } else {
-            callback({
-              code: ExportResultCode.FAILED,
-              error: batch.acknowledgement.kind === 'failed'
-                ? batch.acknowledgement.error
-                : new Error('OTLP acknowledgement was not validated'),
-            });
-          }
-        }));
+        if (stopped) {
+          callback({ code: ExportResultCode.FAILED, error: new Error('Exporter has been shut down') });
+          return;
+        }
+        if (pending.size >= options.concurrencyLimit) {
+          callback({ code: ExportResultCode.FAILED, error: new Error('Concurrent export limit reached') });
+          return;
+        }
+        const task = exportBatch(spans).then((result) => {
+          callback(result);
+        }, (error: unknown) => {
+          callback({
+            code: ExportResultCode.FAILED,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        });
+        pending.add(task);
+        void task.then(() => pending.delete(task), () => pending.delete(task));
       },
-      forceFlush: () => delegate.forceFlush(),
+      async forceFlush() {
+        await Promise.all(pending);
+        await delegate.forceFlush();
+      },
       async shutdown() {
-        try { await delegate.shutdown(); }
-        finally { batches.disable(); }
+        stopped = true;
+        try {
+          await Promise.all(pending);
+          await delegate.shutdown();
+        } finally { batches.disable(); }
       },
     });
   }

@@ -60,7 +60,9 @@ describe("acknowledged OTLP export, retry and compression", () => {
     { name: "unknown compatible field", response: [16, 0], code: ExportResultCode.SUCCESS },
     { name: "int64 rejected count above safe integer range", response: [10, 9, 8, 129, 128, 128, 128, 128, 128, 128, 16], code: ExportResultCode.FAILED },
   ])("validates $name", async ({ response: body, code }) => {
+    let attempts = 0;
     const port = await listen(createServer((request, response) => {
+      attempts += 1;
       request.resume();
       request.on("end", () => {
         response.writeHead(200, { "Content-Type": "application/x-protobuf" });
@@ -71,6 +73,7 @@ describe("acknowledged OTLP export, retry and compression", () => {
     try {
       const result = await exportOnce(exporter, await oneSpan());
       expect(result.code, result.error?.message).toBe(code);
+      expect(attempts).toBe(1);
     } finally { await exporter.shutdown(); }
   });
 
@@ -129,6 +132,86 @@ describe("acknowledged OTLP export, retry and compression", () => {
       await exporter.shutdown();
     },
   );
+
+  it.each([false, true])("retries a reset once and preserves the batch (persistent=%s)", async (persistent) => {
+    const payloads: Buffer[] = [];
+    const port = await listen(createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        payloads.push(Buffer.concat(chunks));
+        if (persistent || payloads.length === 1) request.socket.destroy();
+        else setTimeout(() => response.end(), 20);
+      });
+    }));
+    const exporter = new OTLPTraceExporter({ url: `http://127.0.0.1:${port}/v1/traces`, timeoutMillis: 500 });
+    let settled = false;
+    const exported = exportOnce(exporter, await oneSpan("reset-recovery")).then((result) => {
+      settled = true;
+      return result;
+    });
+    await (persistent ? exporter.shutdown() : exporter.forceFlush());
+    expect(settled).toBe(true);
+    expect((await exported).code).toBe(persistent ? ExportResultCode.FAILED : ExportResultCode.SUCCESS);
+    expect(payloads).toHaveLength(2);
+    expect(payloads[1]).toEqual(payloads[0]);
+    await exporter.shutdown();
+  });
+
+  it.each(["forceFlush", "shutdown"] as const)("ignores callback-returned %s promises", async (barrier) => {
+    const port = await listen(createServer((request, response) => {
+      request.resume();
+      request.on("end", () => response.end());
+    }));
+    const exporter = new OTLPTraceExporter({ url: `http://127.0.0.1:${port}/v1/traces` });
+    const span = await oneSpan();
+    await new Promise<void>((resolve) => {
+      exporter.export([span], () => exporter[barrier]().then(resolve));
+    });
+    await exporter.shutdown();
+  }, 2_000);
+
+  it("uses only the remaining deadline for a reset retry", async () => {
+    let attempts = 0;
+    const port = await listen(createServer((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        attempts += 1;
+        if (attempts === 1) setTimeout(() => request.socket.destroy(), 300);
+        else setTimeout(() => response.end(), 300);
+      });
+    }));
+    const exporter = new OTLPTraceExporter({ url: `http://127.0.0.1:${port}/v1/traces`, timeoutMillis: 500 });
+    expect((await exportOnce(exporter, await oneSpan())).code).toBe(ExportResultCode.FAILED);
+    expect(attempts).toBe(2);
+    await exporter.shutdown();
+  });
+
+  it("does not retry a non-retryable HTTP rejection", async () => {
+    let attempts = 0;
+    const port = await listen(createServer((request, response) => {
+      attempts += 1;
+      request.resume();
+      request.on("end", () => { response.statusCode = 403; response.end(); });
+    }));
+    const exporter = new OTLPTraceExporter({ url: `http://127.0.0.1:${port}/v1/traces` });
+    expect((await exportOnce(exporter, await oneSpan())).code).toBe(ExportResultCode.FAILED);
+    expect(attempts).toBe(1);
+    await exporter.shutdown();
+  });
+
+  it("does not retry a reset after its original deadline", async () => {
+    let attempts = 0;
+    const port = await listen(createServer((request) => {
+      attempts += 1;
+      request.resume();
+      request.on("end", () => setTimeout(() => request.socket.destroy(), 35));
+    }));
+    const exporter = new OTLPTraceExporter({ url: `http://127.0.0.1:${port}/v1/traces`, timeoutMillis: 20 });
+    expect((await exportOnce(exporter, await oneSpan())).code).toBe(ExportResultCode.FAILED);
+    expect(attempts).toBe(1);
+    await exporter.shutdown();
+  });
 
   it("bounds a receiver timeout and rejects work after shutdown", async () => {
     const server = createServer((_request, response) => {
