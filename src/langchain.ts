@@ -276,17 +276,17 @@ class NeatlogsCallbackHandler {
     }
 
     const usage = output?.llmOutput?.tokenUsage ?? output?.llmOutput?.usage;
-    if (usage) {
-      if (usage.promptTokens != null || usage.prompt_tokens != null) {
-        span.setAttribute('neatlogs.llm.token_count.prompt', usage.promptTokens ?? usage.prompt_tokens);
-      }
-      if (usage.completionTokens != null || usage.completion_tokens != null) {
-        span.setAttribute('neatlogs.llm.token_count.completion', usage.completionTokens ?? usage.completion_tokens);
-      }
-      if (usage.totalTokens != null || usage.total_tokens != null) {
-        span.setAttribute('neatlogs.llm.token_count.total', usage.totalTokens ?? usage.total_tokens);
-      }
-    }
+    const firstGen = output?.generations?.[0]?.[0];
+    const meta = (firstGen?.message ?? firstGen)?.usage_metadata;
+    // Anthropic reports input_tokens/output_tokens; OpenAI-style wrappers report
+    // camelCase or *_tokens. The canonical message.usage_metadata is the last fallback.
+    const prompt = usage?.promptTokens ?? usage?.prompt_tokens ?? usage?.input_tokens ?? meta?.input_tokens;
+    const completion = usage?.completionTokens ?? usage?.completion_tokens ?? usage?.output_tokens ?? meta?.output_tokens;
+    const total = usage?.totalTokens ?? usage?.total_tokens ?? meta?.total_tokens
+      ?? (prompt != null && completion != null ? prompt + completion : undefined);
+    if (prompt != null) span.setAttribute('neatlogs.llm.token_count.prompt', prompt);
+    if (completion != null) span.setAttribute('neatlogs.llm.token_count.completion', completion);
+    if (total != null) span.setAttribute('neatlogs.llm.token_count.total', total);
 
     span.setStatus({ code: SpanStatusCode.OK });
     this._endRun(runId, span);

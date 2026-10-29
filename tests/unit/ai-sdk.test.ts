@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { describe, it, expect } from 'vitest';
 import * as aiV7 from 'ai';
 import * as aiV6 from 'ai-v6';
@@ -10,6 +11,19 @@ import {
   type AITelemetryConfig,
 } from '../../src/ai-sdk.js';
 import type { TraceOptions } from '../../src/types.js';
+
+
+// @ai-sdk/otel is an optional dependency with engines >=22, so npm ci silently
+// skips it on Node 18/20 (which package.json still supports). Without it the
+// v7 integration cannot load, so skip this test there instead of failing.
+const hasAiSdkOtel = (() => {
+  try {
+    createRequire(import.meta.url).resolve('@ai-sdk/otel');
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 function createRecordingTracer() {
   const calls: string[] = [];
@@ -188,7 +202,7 @@ describe('wrapAISDK', () => {
     expect(receivedTelemetry?.integrations).toHaveLength(1);
   });
 
-  it('records a real AI SDK v7 generateText call through @ai-sdk/otel', async () => {
+  it.skipIf(!hasAiSdkOtel)('records a real AI SDK v7 generateText call through @ai-sdk/otel', async () => {
     const caller = createRecordingTracer();
     const model = new MockLanguageModelV4({
       provider: 'test-provider',

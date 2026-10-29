@@ -1,11 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createServer, type Server, type RequestListener } from 'node:http';
 import { LocalRunApi } from '../../src/replay/run-api.js';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { parseAgentConfig, runLocalCommand } from '../../src/replay/local-command.js';
 
 const directories: string[] = [];
@@ -22,6 +22,8 @@ const recording = { version: 1, sourceTraceId: 'source-1', entries: [
   { spanId: 'tool-1', kind: 'tool', name: 'lookup', input: { customer: '1' }, output: { balance: 40 } },
 ] };
 const exec = promisify(execFile);
+const cli = resolve('dist/cli.mjs');
+beforeAll(async () => { await access(cli); });
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))));
   await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true })));
@@ -70,7 +72,7 @@ describe('local replay command', () => {
       { span_id: 'tool-1', span_type: 'TOOL', tool_name: 'lookup', input_value: JSON.stringify({ customer: '1' }), output_value: JSON.stringify({ balance: 40 }) },
     ] } }));
     await writeFile(config, JSON.stringify({ command: await agent(path), input_from_trace: { customer: 'root.input.message.customer' }, timeout_seconds: 20 }));
-    const result = await exec(process.execPath, ['--import', 'tsx', resolve('src/cli.ts'), 'simulate', 'local', '--recording', file, '--agent', config, '--param', 'model=cheap', '--json'], { cwd: process.cwd(), timeout: 30000 });
+    const result = await exec(process.execPath, [cli, 'simulate', 'local', '--recording', file, '--agent', config, '--param', 'model=cheap', '--json'], { cwd: process.cwd(), timeout: 30000 });
     const report = JSON.parse(result.stdout);
     expect(report).toMatchObject({ exitCode: 0, uploaded: false, skippedTools: 0, status: { hits: 1, liveCalls: 0 } });
     expect(report.stdout).toContain('"balance":40');
@@ -115,7 +117,7 @@ describe('local replay command', () => {
       }
       response.end(JSON.stringify({ success: true, data: { runId: ids.run, itemId: ids.case, outputId: ids.output, traceId: body.traceId, state: 'succeeded' } }));
     });
-    const output = await exec(process.execPath, ['--import', 'tsx', resolve('src/cli.ts'), 'simulate', 'local', '--dataset', ids.dataset,
+    const output = await exec(process.execPath, [cli, 'simulate', 'local', '--dataset', ids.dataset,
       '--version', ids.version, '--case', ids.case, '--agent', config, '--trials', '2', '--upload', '--form', ids.form, '--evaluator', ids.evaluator,
       '--param', 'temperature=0.2', '--param', 'fallback=false', ...(mode === 'until_span' ? ['--mode', mode, '--until-span', 'tool-1'] : []), '--json'], {
       cwd: process.cwd(), timeout: 30000, env: { ...process.env, NEATLOGS_TOKEN: 'test-token', NEATLOGS_PROJECT_ID: ids.project, NEATLOGS_HOST: baseUrl },

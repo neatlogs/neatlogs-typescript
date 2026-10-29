@@ -1,16 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createServer, type Server, type RequestListener } from 'node:http';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { DatasetApi } from '../../src/dataset/api.js';
 import { enumerateSavedDataset, datasetSelectionDigest } from '../../src/replay/all-selection.js';
 import { agentConfigDigest, createAllReplayState, readAllReplayState, saveAllReplayState, withAllReplayLock, type AllReplayConfiguration } from '../../src/replay/all-state.js';
 
 const exec = promisify(execFile), servers: Server[] = [], directories: string[] = [];
+const cli = resolve('dist/cli.mjs');
+beforeAll(async () => { await access(cli); });
 const ids = { project: randomUUID(), dataset: randomUUID(), version: randomUUID(), form: randomUUID(), evaluator: randomUUID() };
 const members = (count: number) => Array.from({ length: count }, (_, position) => ({ caseId: randomUUID(), revisionId: randomUUID(), position }));
 async function serve(handler: RequestListener) {
@@ -105,7 +107,7 @@ if(process.env.FAIL_AGENT==='true'&&input.customer==='2')process.exitCode=7;`);
       send(response, { runId: url.pathname.split('/').at(-2), itemId: randomUUID(), outputId: randomUUID(), traceId: body.traceId, state: 'succeeded' });
     });
     const env = { ...process.env, NEATLOGS_TOKEN: 'private-test-token', NEATLOGS_PROJECT_ID: ids.project, NEATLOGS_HOST: baseUrl };
-    const invoke = (args: string[], environment: NodeJS.ProcessEnv = {}) => exec(process.execPath, ['--import', 'tsx', resolve('src/cli.ts'), 'simulate', 'local', ...args], { cwd: process.cwd(), env: { ...env, ...environment }, timeout: 40_000 });
+    const invoke = (args: string[], environment: NodeJS.ProcessEnv = {}) => exec(process.execPath, [cli, 'simulate', 'local', ...args], { cwd: process.cwd(), env: { ...env, ...environment }, timeout: 40_000 });
     await expect(invoke(['--dataset', ids.dataset, '--version', ids.version, '--all', '--state', stateFile, '--batch-size', '2', '--agent', configFile, '--upload', '--form', ids.form, '--evaluator', ids.evaluator, '--json'])).rejects.toMatchObject({ code: 1 });
     expect((await readFile(logFile, 'utf8')).trim().split('\n')).toEqual(['0']);
     const saved = await readAllReplayState(stateFile);
