@@ -240,11 +240,14 @@ export class AbTestClient {
 
   private async flushPending(): Promise<boolean> {
     const deadline = Date.now() + 5000;
+    const blockedUnits = new Set<string>();
     for (const [id, item] of this.queue) {
       if (this.closed || Date.now() >= deadline) break;
       if (Date.now() - item.queuedAt > MAX_PENDING_AGE_MS) {
         this.queue.delete(id); this.rejected += 1; continue;
       }
+      const unit = JSON.stringify([item.apiPath ?? '/api/v1/ab-tests', item.key, item.exposure.unitId]);
+      if (blockedUnits.has(unit)) continue;
       try {
         const response = await this.request(item.key, 'exposures', {
           method: 'POST', body: JSON.stringify(item.exposure),
@@ -252,14 +255,16 @@ export class AbTestClient {
         const error = z.object({ code: z.string() }).safeParse(response.body);
         if (response.ok) {
           const receipt = z.object({ accepted: z.literal(true) }).safeParse(response.body);
-          if (!receipt.success) break;
+          if (!receipt.success) { blockedUnits.add(unit); continue; }
           this.queue.delete(id);
         } else if ([400, 401, 403, 404, 422].includes(response.status) ||
           response.status === 409 && error.success && error.data.code !== 'AB_TRACE_NOT_READY') {
           this.queue.delete(id); this.rejected += 1;
           getLogger().warn(`A/B exposure rejected with HTTP ${response.status}`);
+        } else if (response.status === 409 && error.success && error.data.code === 'AB_TRACE_NOT_READY') {
+          // A delayed run must hold its own closure, not unrelated units.
+          blockedUnits.add(unit);
         } else {
-          // Preserve order, including explicit closure, while finalization catches up.
           break;
         }
       } catch { break; }

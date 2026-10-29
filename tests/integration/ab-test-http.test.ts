@@ -260,6 +260,123 @@ describe('A/B assignment and exposure HTTP protocol', () => {
     expect(ab.getDiagnostics()).toEqual({ pending: 0, rejected: 0 });
   });
 
+  it.each(['not_ready', 'invalid_receipt'])('isolates %s without letting same-unit closure overtake its run', async failure => {
+    const bodies: Record<string, unknown>[] = [];
+    let ready = false;
+    const baseUrl = await server(async (req, res) => {
+      if (req.method === 'GET') return json(res, config());
+      const body = await readBody(req) as Record<string, unknown>;
+      bodies.push(body);
+      if (body.unitId === 'user-1' && !ready) {
+        return json(res, failure === 'not_ready' ? { code: 'AB_TRACE_NOT_READY' } : { accepted: false }, failure === 'not_ready' ? 409 : 200);
+      }
+      json(res, { accepted: true });
+    });
+    const ab = client(baseUrl); await ab.start();
+    for (const unitId of ['user-1', 'user-2']) {
+      const run = { unitId, arm: 'b' as const, traceId: `trace-${unitId}` };
+      expect(ab.logExposure('cheap-model', run)).toBe(true);
+      expect(ab.completeUnit('cheap-model', { ...run, source: 'external' })).toBe(true);
+    }
+    expect(await ab.flush()).toBe(false);
+    expect(bodies.map(body => [body.unitId, body.unitComplete])).toEqual([
+      ['user-1', false], ['user-2', false], ['user-2', true],
+    ]);
+    expect(ab.getDiagnostics()).toEqual({ pending: 2, rejected: 0 });
+    ready = true;
+    expect(await ab.flush()).toBe(true);
+    expect(bodies.slice(3).map(body => [body.unitId, body.unitComplete])).toEqual([
+      ['user-1', false], ['user-1', true],
+    ]);
+    expect(bodies[3]).toEqual(bodies[0]);
+    expect(ab.getDiagnostics()).toEqual({ pending: 0, rejected: 0 });
+  });
+
+  it.each([408, 429, 503, 'disconnect'])('does not fan out receipt retries during global failure %s', async failure => {
+    let requests = 0;
+    const baseUrl = await server(async (req, res) => {
+      if (req.method === 'GET') return json(res, config());
+      await readBody(req); requests++;
+      if (failure === 'disconnect') return res.destroy();
+      json(res, {}, failure as number);
+    });
+    const ab = client(baseUrl); await ab.start();
+    for (const unitId of ['user-1', 'user-2']) {
+      expect(ab.logExposure('cheap-model', { unitId, arm: 'b', traceId: `trace-${unitId}` })).toBe(true);
+    }
+    expect(await ab.flush()).toBe(false);
+    expect(requests).toBe(1);
+    expect(ab.getDiagnostics()).toEqual({ pending: 2, rejected: 0 });
+  });
+
+  it('keeps renewed agent leases ordered per unit while other keys and units progress', async () => {
+    class AgentReceiptQueue extends AbTestClient {
+      enqueue(key: string, unitId: string, assignmentId: string, conversationComplete: boolean) {
+        const payload = { protocolVersion: 2, eventId: randomUUID(), assignmentId, unitId,
+          traceId: `trace-${assignmentId}`, conversationComplete, unitComplete: false };
+        return this.enqueueReceipt(key, payload, JSON.stringify([key, assignmentId, conversationComplete]), '/api/v2/agents');
+      }
+    }
+    const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let ready = false;
+    const baseUrl = await server(async (req, res) => {
+      const body = await readBody(req) as Record<string, unknown>;
+      sent.push({ path: req.url ?? '', body });
+      if (body.assignmentId === 'lease-old' && !ready) return json(res, { code: 'AB_TRACE_NOT_READY' }, 409);
+      json(res, { accepted: true });
+    });
+    const ab = new AgentReceiptQueue({ baseUrl, apiKey: 'test-project-key', keys: ['support', 'other'] });
+    clients.push(ab);
+    expect(ab.enqueue('support', 'customer-1', 'lease-old', false)).toBe(true);
+    expect(ab.enqueue('support', 'customer-1', 'lease-renewed', true)).toBe(true);
+    expect(ab.enqueue('support', 'customer-2', 'lease-other-unit', true)).toBe(true);
+    expect(ab.enqueue('other', 'customer-1', 'lease-other-key', true)).toBe(true);
+    expect(await ab.flush()).toBe(false);
+    expect(sent.map(({ body }) => body.assignmentId)).toEqual(['lease-old', 'lease-other-unit', 'lease-other-key']);
+    expect(ab.getDiagnostics()).toEqual({ pending: 2, rejected: 0 });
+    ready = true;
+    expect(await ab.flush()).toBe(true);
+    expect(sent.slice(3).map(({ body }) => body.assignmentId)).toEqual(['lease-old', 'lease-renewed']);
+    expect(sent[3]).toEqual(sent[0]);
+    expect(sent.every(({ path }) => path.startsWith('/api/v2/agents/'))).toBe(true);
+  });
+
+  it('does not attempt another unit after the flush deadline', async () => {
+    const start = Date.now();
+    let clock = start;
+    let requests = 0;
+    const baseUrl = await server(async (req, res) => {
+      if (req.method === 'GET') return json(res, config());
+      await readBody(req); requests++; clock = start + 5001;
+      json(res, { code: 'AB_TRACE_NOT_READY' }, 409);
+    });
+    const ab = client(baseUrl); await ab.start();
+    for (const unitId of ['user-1', 'user-2']) ab.logExposure('cheap-model', { unitId, arm: 'b', traceId: `trace-${unitId}` });
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      expect(await ab.flush()).toBe(false);
+      expect(requests).toBe(1);
+      expect(ab.getDiagnostics()).toEqual({ pending: 2, rejected: 0 });
+    } finally { now.mockRestore(); }
+  });
+
+  it('retains the existing age limit and reports expired receipts without sending them', async () => {
+    let requests = 0;
+    const baseUrl = await server((req, res) => {
+      if (req.method === 'GET') return json(res, config());
+      requests++; json(res, { accepted: true });
+    });
+    const ab = client(baseUrl); await ab.start();
+    const queuedAt = Date.now();
+    expect(ab.logExposure('cheap-model', { unitId: 'user-1', arm: 'b', traceId: 'expired' })).toBe(true);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(queuedAt + 24 * 60 * 60_000 + 1000);
+    try {
+      expect(await ab.flush()).toBe(false);
+      expect(requests).toBe(0);
+      expect(ab.getDiagnostics()).toEqual({ pending: 0, rejected: 1 });
+    } finally { now.mockRestore(); }
+  });
+
   it('starts through init and stamps the current trace before queueing an SDK exposure', async () => {
     const exposures: unknown[] = [];
     const paths: string[] = [];
