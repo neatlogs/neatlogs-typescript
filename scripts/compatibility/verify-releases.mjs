@@ -23,6 +23,7 @@ export const PROBES = {
   '@google/genai': { adapter: 'google-genai', exportName: 'wrapGoogleGenAI', mode: 'google', scope: 'client construction and SDK wrapping' },
   '@langchain/anthropic': { adapter: 'langchain', exportName: 'langchainHandler', scope: 'consumer import and adapter export' },
   '@langchain/core': { adapter: 'langchain', exportName: 'langchainHandler', scope: 'consumer import and adapter export' },
+  '@langchain/google-genai': { adapter: 'langchain', exportName: 'langchainHandler', scope: 'consumer import and adapter export' },
   '@langchain/langgraph': { adapter: 'langchain', exportName: 'langchainHandler', scope: 'consumer import and adapter export' },
   '@langchain/openai': { adapter: 'langchain', exportName: 'langchainHandler', scope: 'consumer import and adapter export' },
   '@mastra/core': { adapter: 'mastra', exportName: 'wrapMastra', scope: 'consumer import and adapter export' },
