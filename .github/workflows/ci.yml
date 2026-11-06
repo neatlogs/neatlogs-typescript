@@ -40,6 +40,40 @@ jobs:
       - name: Pack the published artifact
         run: npm pack --dry-run
 
+  release-pack:
+    name: release job pack step
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Same Node and npm as the release job in weekly-release.yml.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Use the release job's npm
+        run: npm install --global npm@11
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run the release job's pack step
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Run the step's own script, not a copy of it. The release job runs it
+          # after the tag is pushed, so a failure there leaves the tag unpublished.
+          yq -e -r '.jobs.release.steps[] | select(.id == "pack") | .run' \
+            .github/workflows/weekly-release.yml > "$RUNNER_TEMP/release-pack-step.sh"
+          bash --noprofile --norc -eo pipefail "$RUNNER_TEMP/release-pack-step.sh"
+          # The upload step hands this glob to publish, which needs exactly one tarball.
+          tarballs=("$RUNNER_TEMP"/npm-package/*.tgz)
+          test "${#tarballs[@]}" -eq 1 && test -f "${tarballs[0]}"
+
   doctor-e2e:
     name: packed package to finalized trace
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
