@@ -33,11 +33,14 @@ let failGateCount = 0;
 let comparisonRows: { key: string }[] = [];
 let exported: ReadableSpan[] = [];
 let evidenceAtUpload: ReadableSpan[][] = [];
-let caseInput = 'hello', rejectEvidence = false, evidenceRejectionCode: string | undefined, failRejectedFailure = false, disconnectUpload = false;
+let caseInput = 'hello', rejectEvidence = false, evidenceRejectionCode: string | undefined, failRejectedFailure = false, disconnectUpload = 0, disconnectAfterAcceptance = false;
 let uploadKeys: string[] = [];
+let startedCases: Record<string, unknown>[] = [];
+let runState: string;
+let legacyApp: boolean;
 const clients: Client[] = [];
 beforeEach(async () => {
-  caseInput = 'hello'; rejectEvidence = false; evidenceRejectionCode = 'GRADING_EVIDENCE_LIMIT'; failRejectedFailure = false; disconnectUpload = false; uploadKeys = [];
+  caseInput = 'hello'; rejectEvidence = false; evidenceRejectionCode = 'GRADING_EVIDENCE_LIMIT'; failRejectedFailure = false; disconnectUpload = 0; disconnectAfterAcceptance = false; uploadKeys = []; startedCases = []; runState = 'running'; legacyApp = false;
   comparisonRows = []; exported = []; evidenceAtUpload = [];
   registrations = []; uploads = []; paths = []; catalogHeaders = []; manyCases = []; datasetPages = []; completionKeys = []; gateKeys = []; comparisonsUntilReady = 0; handoffReady = false; failUpload = false; failCompletionCount = 0; failGateCount = 0; verdict = 'pass'; directory = mkdtempSync(join(tmpdir(), 'neatlogs-eval-'));
   server = createServer(async (request, response) => {
@@ -61,16 +64,32 @@ beforeEach(async () => {
         const page = comparisonRows.slice(start, start + limit);
         data = { state: complete ? 'ready' : 'pending', coverage: { complete }, ...(comparisonRows.length ? { pairs: page, nextCursor: start + page.length < comparisonRows.length ? page.at(-1)?.key : null, questionSummaries: [{ questionId: 'quality', total: comparisonRows.length }] } : {}) };
       }
-      else if (path.endsWith(`/runs/${runId}`)) data = { runId, state: 'completed', deadlineAt: '2030-01-01T00:00:00Z', itemCount: 1, completedCount: 1, failedCount: 0, pendingCount: 0, gradingHandoffState: 'dispatched' };
+      else if (new URL(path, 'http://localhost').pathname.endsWith(`/runs/${runId}`)) {
+        const negotiate = new URL(path, 'http://localhost').searchParams.has('includeCaseOutputProtocol');
+        if (legacyApp && negotiate) { status = 400; code = 'VALIDATION_ERROR'; }
+        else data = { runId, state: runState, deadlineAt: '2030-01-01T00:00:00Z', itemCount: 1, completedCount: uploads.length,
+          failedCount: 0, pendingCount: runState === 'completed' ? 0 : 1, gradingHandoffState: 'dispatched', ...(negotiate ? { caseOutputProtocol: 2 } : {}) };
+      }
       else if (path.includes('/cases/') && (path.includes(`/cases/${caseId}`) || manyCases.some(id => path.includes(`/cases/${id}`)))) data = { case: { caseId: path.split('/cases/')[1]!.split('?')[0], revisionId, input: caseInput, expected: { value: 'hello' }, metadata: { language: 'en' } } };
       else if (path.includes('/cases?')) { const offset = Number(new URL(path, 'http://localhost').searchParams.get('offset')); data = manyCases.length ? { cases: manyCases.slice(offset, offset + 100).map(caseId => ({ caseId })), total: manyCases.length } : { cases: [{ caseId }], total: 1 }; }
       else data = { dataset: { caseCount: manyCases.length || 1 }, version: { id: versionId } };
     } else {
       expect(request.headers.authorization).toBe('Bearer task-token'); expect(request.headers['x-project-id']).toBe(projectId); expect(request.headers['idempotency-key']).toBeTruthy();
-      if (path.endsWith('/complete')) { completionKeys.push(String(request.headers['idempotency-key'])); if (failCompletionCount > 0) { status = 503; failCompletionCount--; } data = { runId, state: 'completed', deadlineAt: '2030-01-01T00:00:00Z', itemCount: 2, completedCount: 2, failedCount: 0, pendingCount: 0, gradingHandoffState: handoffReady ? 'ready' : 'dispatched' }; }
+      if (path.endsWith('/complete')) { completionKeys.push(String(request.headers['idempotency-key'])); if (failCompletionCount > 0) { status = 503; failCompletionCount--; } else runState = 'completed'; data = { runId, state: 'completed', deadlineAt: '2030-01-01T00:00:00Z', itemCount: 2, completedCount: 2, failedCount: 0, pendingCount: 0, gradingHandoffState: handoffReady ? 'ready' : 'dispatched' }; }
+      else if (path.endsWith('/outputs/started')) {
+        startedCases.push(body);
+        data = { itemId: randomUUID(), startedAt: body.startedAt };
+      }
       else if (path.endsWith('/outputs')) {
         uploadKeys.push(String(request.headers['idempotency-key']));
-        if (disconnectUpload) { request.socket.destroy(); return; }
+        if (disconnectUpload > 0) {
+          disconnectUpload--;
+          if (disconnectAfterAcceptance && runState !== 'completed') {
+            uploads.push(body);
+            runState = 'completed';
+          }
+          request.socket.destroy(); return;
+        }
         if (rejectEvidence && 'output' in body) { status = 413; code = evidenceRejectionCode; }
         else if (failUpload || failRejectedFailure && body.error) status = 503;
         else uploads.push(body);
@@ -79,7 +98,7 @@ beforeEach(async () => {
       }
       else if (path.endsWith('/gate')) { gateKeys.push(String(request.headers['idempotency-key'])); if (failGateCount > 0) { status = 503; failGateCount--; } data = { verdict }; }
       else data = { runId, state: path.endsWith('/complete') ? 'completed' : 'queued', deadlineAt: '2030-01-01T00:00:00Z', itemCount: 2, completedCount: 2, failedCount: 0, pendingCount: 0, gradingHandoffState: 'dispatched' };
-      if (!path.endsWith('/complete') && !path.endsWith('/gate') && !path.endsWith('/outputs')) {
+      if (!path.endsWith('/complete') && !path.endsWith('/gate') && !path.endsWith('/outputs') && !path.endsWith('/outputs/started')) {
         registrations.push(body);
         const { completedCount: _completed, failedCount: _failed, pendingCount: _pending, gradingHandoffState: _handoff, ...receipt } = data as Record<string, unknown>; data = receipt;
       }
@@ -137,6 +156,8 @@ describe('task evaluation over the public HTTP contract', () => {
     const options = { grading, dataset: datasetId!, label: 'round B retry', local, statePath: join(directory, 'round.json'), api: { projectId: projectId!, token: 'task-token', baseUrl }, task };
     await runEval(options);
     expect(registrations[0]?.local).toEqual(local);
+    expect(startedCases[0]).toMatchObject({ caseId, trial: 1, startedAt: expect.any(String) });
+    expect(uploads[0]).toMatchObject({ caseId, trial: 1, output: 'answer', startedAt: expect.any(String), endedAt: expect.any(String) });
     await runEval({ ...options, resume: true });
     expect(task).toHaveBeenCalledTimes(1);
     expect(registrations).toHaveLength(1);
@@ -182,6 +203,32 @@ describe('task evaluation over the public HTTP contract', () => {
     expect(root?.attributes).toMatchObject({ 'neatlogs.replay.run_id': runId, 'neatlogs.replay.case_id': caseId, 'neatlogs.replay.trial': 1, 'test.mask.complete': true });
     expect(evidenceAtUpload[0]?.some(item => item.name === 'lookup')).toBe(true);
     expect(evidenceAtUpload[0]?.some(item => item.attributes['neatlogs.trace.complete'] === true)).toBe(true);
+  });
+
+  it('runs Local A/B using legacy upload fields when the App lacks case details', async () => {
+    legacyApp = true;
+    const local = { experimentId: randomUUID(), roundId: randomUUID(), variant: 'A' as const, attempt: 1 };
+    const task = vi.fn(() => 'saved value');
+    const result = await runEval({ grading, dataset: datasetId!, label: 'legacy case', local, api: { projectId: projectId!, token: 'task-token', baseUrl }, task });
+    expect(result.exitCode).toBe(0);
+    expect(task).toHaveBeenCalledOnce();
+    expect(startedCases).toEqual([]);
+    expect(uploads).toEqual([{ caseId, trial: 1, output: 'saved value', metrics: { latencyMs: expect.any(Number) } }]);
+    expect(paths).toContain(`/api/v1/public/runs/${runId}?includeCaseOutputProtocol=true`);
+    expect(paths).toContain(`/api/v1/public/runs/${runId}`);
+  });
+
+  it('links an exported local case trace while retaining the task value', async () => {
+    const client = new Client({ apiKey: 'test-ingest', workflowName: 'eval-test', captureLogs: false, flushInterval: 600,
+      spanExporter: { export(spans, callback) { exported.push(...spans); callback({ code: 0 }); }, async shutdown() {}, async forceFlush() {} },
+    });
+    clients.push(client);
+    const local = { experimentId: randomUUID(), roundId: randomUUID(), variant: 'A' as const, attempt: 1 };
+    const task = () => ({ answer: 'saved value' });
+    await client.activate(() => runEval({ grading, dataset: datasetId!, label: 'value case', local, api: { projectId: projectId!, token: 'task-token', baseUrl }, task }));
+    const root = evidenceAtUpload[0]?.find(item => item.name === 'value case');
+    expect(uploads[0]).toMatchObject({ caseId, trial: 1, output: { answer: 'saved value' }, traceId: root?.spanContext().traceId });
+    expect(root?.attributes).toMatchObject({ 'neatlogs.replay.run_id': runId, 'neatlogs.replay.case_id': caseId, 'neatlogs.replay.trial': 1 });
   });
 
   it.each([false, true])('seals oversized outputs and resumes current/legacy delivery without repeating tasks, legacy=%s', async legacy => {
@@ -241,19 +288,19 @@ describe('task evaluation over the public HTTP contract', () => {
     expect(JSON.parse(readFileSync(options.statePath, 'utf8')).slots[`${caseId}:1`].body.output).toBe(output);
   });
 
-  it('retains the original output and key after an ambiguous connection failure', async () => {
-    disconnectUpload = true;
+  it.each([false, true])('reconciles a lost output response without repeating the task (committed=%s)', async committed => {
+    disconnectUpload = 2; disconnectAfterAcceptance = committed;
     const task = vi.fn(() => 'saved answer');
     const options = { grading, dataset: datasetId!, label: 'unknown delivery', statePath: join(directory, 'unknown.json'), api: { projectId: projectId!, token: 'task-token', baseUrl }, task };
-    await expect(runEval(options)).rejects.toThrow(/request failed/);
+    expect(await runEval(options)).toMatchObject({ runId, runState: 'completed', exitCode: 0 });
     const slot = JSON.parse(readFileSync(options.statePath, 'utf8')).slots[`${caseId}:1`];
     expect(slot.body.output).toBe('saved answer');
     expect(slot).not.toHaveProperty('rejection');
     expect(new Set(uploadKeys)).toEqual(new Set([slot.key]));
-    disconnectUpload = false;
-    expect((await runEval({ ...options, resume: true })).exitCode).toBe(0);
     expect(task).toHaveBeenCalledOnce();
-    expect(new Set(uploadKeys)).toEqual(new Set([slot.key]));
+    expect(uploads).toHaveLength(1);
+    expect(paths).toContain(`/api/v1/public/runs/${runId}`);
+    expect(completionKeys).toHaveLength(committed ? 0 : 1);
   });
 
   it.each([undefined, 'PROXY_BODY_LIMIT'])('does not replace an output after an unrecognized413: %s', async code => {

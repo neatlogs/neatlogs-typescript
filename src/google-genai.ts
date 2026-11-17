@@ -754,7 +754,10 @@ function setUsage(span: Span, usage: any): void {
   if (usage.candidatesTokenCount != null) span.setAttribute('neatlogs.llm.token_count.completion', usage.candidatesTokenCount);
   if (usage.totalTokenCount != null) span.setAttribute('neatlogs.llm.token_count.total', usage.totalTokenCount);
   if (usage.cachedContentTokenCount != null) span.setAttribute('neatlogs.llm.token_count.cache_read', usage.cachedContentTokenCount);
-  if (usage.thoughtsTokenCount != null) span.setAttribute('neatlogs.llm.token_count.reasoning', usage.thoughtsTokenCount);
+  if (usage.thoughtsTokenCount != null) {
+    span.setAttribute('neatlogs.llm.token_count.reasoning', usage.thoughtsTokenCount);
+    if (usage.candidatesTokenCount != null) span.setAttribute('neatlogs.llm.token_count.reasoning_is_separate', true);
+  }
 }
 
 // ---------------------------------------------------------------------------

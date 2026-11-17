@@ -14,9 +14,17 @@ const outputReceiptSchema = z.object({
 }).strict();
 const statusSchema = receiptSchema.extend({ completedCount: z.number().int().nonnegative(), failedCount: z.number().int().nonnegative(),
   pendingCount: z.number().int().nonnegative(), gradingHandoffState: z.enum(['pending', 'ready', 'dispatched', 'failed']),
+  caseOutputProtocol: z.literal(2).optional(),
   grading: z.object({ evaluationId: z.string().uuid(), candidateBatchId: z.string().uuid(), recordedBatchId: z.string().uuid() }).nullable().optional() }).strict();
+const localConflict = z.object({
+  runId: z.string().uuid(), state: z.enum(['queued', 'running', 'completed', 'partial', 'failed', 'cancelled', 'timed_out']),
+  attempt: z.number().int().min(1).max(100),
+}).strict();
+type LocalConflict = z.infer<typeof localConflict>;
 export class LocalRunApiError extends Error {
-  constructor(message: string, readonly status?: number, readonly code?: string) { super(message); this.name = 'LocalRunApiError'; }
+  constructor(message: string, readonly status?: number, readonly code?: string, readonly details?: LocalConflict) {
+    super(message); this.name = 'LocalRunApiError';
+  }
 }
 async function responseJson(response: Response, limit = 64 * 1024): Promise<unknown> {
   const reader = response.body?.getReader();
@@ -70,15 +78,20 @@ export class LocalRunApi {
         }
         const raw = await responseJson(response, responseLimit);
         if (!response.ok) {
-          const error = z.object({ code: z.string().optional(), error: z.union([z.string(), z.object({ code: z.string().optional() }).passthrough()]).optional() }).passthrough().safeParse(raw);
+          const error = z.object({ code: z.string().optional(), details: z.unknown().optional(), error: z.union([z.string(), z.object({ code: z.string().optional() }).passthrough()]).optional() }).passthrough().safeParse(raw);
           const code = error.success ? error.data.code ?? (typeof error.data.error === 'object' ? error.data.error.code : undefined) : undefined;
+          const details = localConflict.safeParse(error.success ? error.data.details : undefined);
+          if (response.status === 409 && code === 'LOCAL_ROUND_CONFLICT' && details.success) {
+            const { runId, state, attempt } = details.data;
+            throw new LocalRunApiError(`Attempt ${attempt} already has run ${runId} (${state}). Use --resume --state with the original private state file.`, 409, code, details.data);
+          }
           throw new LocalRunApiError(`Run upload failed with HTTP ${response.status}${code ? ` (${code})` : ''}.`, response.status, code);
         }
         return z.object({ success: z.literal(true), data: z.unknown() }).parse(raw).data;
       }
     } catch (error) {
       if (error instanceof LocalRunApiError) throw error;
-      throw new LocalRunApiError(controller.signal.aborted ? 'Run API request timed out.' : 'Run API request failed.');
+      throw new LocalRunApiError(controller.signal.aborted ? 'Run API request timed out.' : 'Run API request failed.', undefined, 'RUN_API_TRANSPORT_FAILURE');
     } finally { clearTimeout(timer); }
   }
   async register(input: {
@@ -88,32 +101,50 @@ export class LocalRunApi {
     params: Record<string, string | number | boolean | null>;
     replay?: ReplaySettings;
     selection?: DatasetSelection;
-  }, key: string = randomUUID()) {
+  }, key: string = randomUUID(), timeout = 30_000) {
     if (input.replay) replaySettingsSchema.parse(input.replay);
     if (input.selection) datasetSelectionSchema.parse(input.selection);
-    return receiptSchema.parse(await this.request('', input, uuid(key, 'Idempotency-Key'), 30_000));
+    return receiptSchema.parse(await this.request('', input, uuid(key, 'Idempotency-Key'), timeout));
   }
-  async taskOutput(runId: string, input: { caseId: string; trial: number; output?: unknown; metrics?: Record<string, number>; error?: { code: string; message: string } }, key: string = randomUUID()) {
-    return z.object({ outputId: z.string().uuid(), state: z.enum(['succeeded', 'failed']) }).passthrough().parse(await this.request(`/${uuid(runId, 'runId')}/outputs`, input, key, 30_000));
+  async startOutput(runId: string, input: { caseId: string; trial: number; startedAt: string }, key: string, timeout = 30_000) {
+    await this.request(`/${uuid(runId, 'runId')}/outputs/started`, input, key, timeout);
   }
-  async complete(runId: string, key: string = randomUUID()) {
-    return statusSchema.parse(await this.request(`/${uuid(runId, 'runId')}/complete`, {}, key, 30_000));
+  async taskOutput(runId: string, input: { caseId: string; trial: number; output?: unknown; metrics?: Record<string, number>; error?: { code: string; message: string }; traceId?: string; startedAt?: string; endedAt?: string }, key: string = randomUUID(), timeout = 30_000) {
+    return z.object({ outputId: z.string().uuid(), state: z.enum(['succeeded', 'failed']) }).passthrough().parse(await this.request(`/${uuid(runId, 'runId')}/outputs`, input, key, timeout));
+  }
+  async complete(runId: string, key: string = randomUUID(), timeout = 30_000) {
+    return statusSchema.parse(await this.request(`/${uuid(runId, 'runId')}/complete`, {}, key, timeout));
   }
   /** One detail page; coverage and gate summaries describe the entire run. */
-  async comparison(runId: string, options: { baseline?: string; after?: string; limit?: number; newFailuresOnly?: boolean } = {}) {
+  async comparison(runId: string, options: { baseline?: string; after?: string; limit?: number; newFailuresOnly?: boolean } = {}, timeout = 30_000) {
     const parsed = z.object({ baseline: z.string().min(1).max(200).optional(), after: z.string().min(1).max(1000).optional(), limit: z.number().int().min(1).max(100).optional(), newFailuresOnly: z.boolean().optional() }).strict().parse(options);
     const query = new URLSearchParams(Object.entries(parsed).map(([key, value]): [string, string] => [key, String(value)]));
-    return z.object({ nextCursor: z.string().max(1000).nullable().optional() }).passthrough().parse(await this.request(`/${uuid(runId, 'runId')}/comparison${query.size ? '?' + query : ''}`, undefined, undefined, 30_000, 'GET', 17 * 1024 * 1024));
+    return z.object({ nextCursor: z.string().max(1000).nullable().optional() }).passthrough().parse(await this.request(`/${uuid(runId, 'runId')}/comparison${query.size ? '?' + query : ''}`, undefined, undefined, timeout, 'GET', 17 * 1024 * 1024));
   }
-  async gate(runId: string, key: string = randomUUID()) {
-    return z.object({ verdict: z.enum(['pass', 'fail', 'incomplete']) }).passthrough().parse(await this.request(`/${uuid(runId, 'runId')}/gate`, {}, key, 30_000));
+  async gate(runId: string, key: string = randomUUID(), timeout = 30_000) {
+    return z.object({ verdict: z.enum(['pass', 'fail', 'incomplete']) }).passthrough().parse(await this.request(`/${uuid(runId, 'runId')}/gate`, {}, key, timeout));
   }
-  async status(runId: string, includeGrading = false) {
-    const id = uuid(runId, 'runId'), result = statusSchema.parse(await this.request(`/${id}${includeGrading ? '?includeGrading=true' : ''}`, undefined, undefined, 30_000, 'GET'));
+  async status(runId: string, includeGrading = false, timeout = 30_000, includeCaseOutputProtocol = false) {
+    const id = uuid(runId, 'runId');
+    const query = new URLSearchParams();
+    if (includeGrading) query.set('includeGrading', 'true');
+    if (includeCaseOutputProtocol) query.set('includeCaseOutputProtocol', 'true');
+    const deadline = Date.now() + timeout;
+    const read = () => this.request(`/${id}${query.size ? '?' + query : ''}`, undefined, undefined, Math.max(1, deadline - Date.now()), 'GET');
+    let data: unknown;
+    try {
+      data = await read();
+    } catch (error) {
+      if (!includeCaseOutputProtocol || !(error instanceof LocalRunApiError) || error.status !== 400 || error.code !== 'VALIDATION_ERROR') throw error;
+      // Older Apps validate the status query strictly.
+      query.delete('includeCaseOutputProtocol');
+      data = await read();
+    }
+    const result = statusSchema.parse(data);
     if (result.runId !== id) throw new LocalRunApiError('The run status belongs to a different run.');
     return result;
   }
-  async upload(runId: string, input: { caseId: string; trial: number; traceId: string }, options: { key?: string; waitMillis?: number } = {}) {
+  async upload(runId: string, input: { caseId: string; trial: number; traceId: string; startedAt?: string; endedAt?: string }, options: { key?: string; waitMillis?: number } = {}) {
     const key = uuid(options.key ?? randomUUID(), 'Idempotency-Key'), id = uuid(runId, 'runId');
     uuid(input.caseId, 'caseId');
     if (!/^[a-f0-9]{32}$/.test(input.traceId) || !Number.isInteger(input.trial) || input.trial < 1 || input.trial > 10)
