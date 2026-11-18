@@ -31,6 +31,8 @@ let completionKeys: string[];
 let failCompletionCount = 0;
 let gateKeys: string[];
 let failGateCount = 0;
+let gateLatency = 0;
+let disconnectGate = 0;
 let comparisonRows: { key: string }[] = [];
 let exported: ReadableSpan[] = [];
 let evidenceAtUpload: ReadableSpan[][] = [];
@@ -42,6 +44,7 @@ let legacyApp: boolean;
 let deadlineAt: string, comparisonLatency: number, traceNotReady: boolean, firstTraceLatency: number;
 const clients: Client[] = [];
 beforeEach(async () => {
+  gateLatency = 0; disconnectGate = 0;
   deadlineAt = '2030-01-01T00:00:00Z'; comparisonLatency = 0; traceNotReady = false; firstTraceLatency = 0;
   caseInput = 'hello'; rejectEvidence = false; evidenceRejectionCode = 'GRADING_EVIDENCE_LIMIT'; failRejectedFailure = false; disconnectUpload = 0; disconnectAfterAcceptance = false; uploadKeys = []; startedCases = []; runState = 'running'; legacyApp = false;
   comparisonRows = []; exported = []; evidenceAtUpload = [];
@@ -123,7 +126,13 @@ beforeEach(async () => {
         data = body.traceId ? { runId, itemId: randomUUID(), outputId: randomUUID(), traceId: body.traceId, state: 'succeeded' } : { outputId: randomUUID(), state: body.error ? 'failed' : 'succeeded' };
         if (body.traceId) evidenceAtUpload.push([...exported]);
       }
-      else if (path.endsWith('/gate')) { gateKeys.push(String(request.headers['idempotency-key'])); if (failGateCount > 0) { status = 503; failGateCount--; } data = { verdict }; }
+      else if (path.endsWith('/gate')) {
+        gateKeys.push(String(request.headers['idempotency-key']));
+        if (gateLatency) await new Promise(resolve => setTimeout(resolve, gateLatency));
+        if (disconnectGate > 0) { disconnectGate--; request.socket.destroy(); return; }
+        if (failGateCount > 0) { status = 503; failGateCount--; }
+        data = { verdict };
+      }
       else data = { runId, state: path.endsWith('/complete') ? 'completed' : 'queued', deadlineAt, itemCount: 2, completedCount: 2, failedCount: 0, pendingCount: 0, gradingHandoffState: 'dispatched' };
       if (!path.endsWith('/complete') && !path.endsWith('/gate') && !path.endsWith('/outputs') && !path.endsWith('/outputs/started')) {
         registrations.push(body);
@@ -436,6 +445,22 @@ describe('task evaluation over the public HTTP contract', () => {
     expect(result.exitCode).toBe(4);
     expect(result.comparison).toMatchObject({ state: 'pending', coverage: { complete: false } });
     expect(paths.filter(path => path.includes('/comparison'))).toHaveLength(1);
+  });
+  it.each([
+    { gateVerdict: 'pass', exitCode: 0, droppedReplies: 1 },
+    { gateVerdict: 'fail', exitCode: 1, droppedReplies: 0 },
+    { gateVerdict: 'incomplete', exitCode: 4, droppedReplies: 0 },
+  ])('confirms a $gateVerdict gate after comparison outlasts the polling budget', async ({ gateVerdict, exitCode, droppedReplies }) => {
+    verdict = gateVerdict; comparisonLatency = 700; gateLatency = 30; disconnectGate = droppedReplies;
+    const result = await runEval({ grading, dataset: datasetId!, label: 'late gate', waitTimeoutMillis: 500,
+      gates: ['error_rate <= 0'], statePath: join(directory, 'late-gate.json'),
+      api: { projectId: projectId!, token: 'task-token', baseUrl }, task: () => 'answer',
+    });
+    expect(result.exitCode).toBe(exitCode);
+    expect(result.gate).toMatchObject({ verdict: gateVerdict });
+    expect(gateKeys).toHaveLength(droppedReplies + 1);
+    expect(new Set(gateKeys).size).toBe(1);
+    expect(uploads).toHaveLength(1);
   });
   it('runs each trial, carries context and maps failed gates to exit1', async () => {
     verdict = 'fail'; const seen: number[] = [];

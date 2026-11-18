@@ -336,7 +336,8 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
     if (!options.gates?.length) return { runId, runState: status.state, comparison, gate: null, errors, exitCode: 0 };
     state.gateKey ??= randomUUID();
     save(options.statePath, state);
-    const gated = await recoverRunRequest(requestTimeout => runApi.gate(runId, state.gateKey, requestTimeout), deadline);
+    const gateDeadline = Math.max(deadline, Date.now() + 5000);
+    const gated = await recoverRunRequest(requestTimeout => runApi.gate(runId, state.gateKey, requestTimeout), gateDeadline);
     const gate = gated.data;
     if (!gate) throw new Error('The quality gate could not be confirmed.');
     return { runId, runState: status.state, comparison, gate, errors, exitCode: gate.verdict === 'pass' ? 0 : gate.verdict === 'fail' ? 1 : 4 };
