@@ -37,7 +37,7 @@ describe('google thinking accumulation', () => {
       yield { candidates: [{ content: { parts: [{ text: 'reasoning step one, ', thought: true }] } }] };
       yield { candidates: [{ content: { parts: [{ text: 'reasoning step two, ', thought: true }] } }] };
       yield { candidates: [{ content: { parts: [{ text: 'reasoning step three', thought: true }] } }] };
-      yield { candidates: [{ content: { parts: [{ text: 'final answer' }] } }] , usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, totalTokenCount: 8 } };
+      yield { candidates: [{ content: { parts: [{ text: 'final answer' }] } }] , usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, totalTokenCount: 8, thoughtsTokenCount: 2 } };
     }
     const wrapped = wrap({
       models: { generateContentStream: async () => chunks() },
@@ -49,6 +49,9 @@ describe('google thinking accumulation', () => {
     expect(spans).toHaveLength(1);
     const thinking = attr(spans[0], 'neatlogs.llm.output_messages.0.thinking');
     expect(thinking).toBe('reasoning step one, reasoning step two, reasoning step three');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(3);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.reasoning')).toBe(2);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.reasoning_is_separate')).toBe(true);
   });
   it.each([['google-genai', wrapGoogleGenAI], ['vertex', wrapVertexAI]] as const)('%s: non-stream response with multiple thought parts keeps ALL parts concatenated', async (_name, wrap) => {
     const response = {
@@ -58,7 +61,7 @@ describe('google thinking accumulation', () => {
         { text: 'reasoning step three', thought: true },
         { text: 'final answer' },
       ] } }],
-      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, totalTokenCount: 8 },
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, totalTokenCount: 8, thoughtsTokenCount: 2 },
     };
     const wrapped = wrap({
       models: { generateContent: async () => response },
@@ -68,5 +71,8 @@ describe('google thinking accumulation', () => {
     expect(spans).toHaveLength(1);
     const thinking = attr(spans[0], 'neatlogs.llm.output_messages.0.thinking');
     expect(thinking).toBe('reasoning step one, reasoning step two, reasoning step three');
+    expect(attr(spans[0], 'neatlogs.llm.token_count.completion')).toBe(3);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.reasoning')).toBe(2);
+    expect(attr(spans[0], 'neatlogs.llm.token_count.reasoning_is_separate')).toBe(true);
   });
 });
