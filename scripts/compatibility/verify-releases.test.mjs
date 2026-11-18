@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { classifyVerification, installedVersions, verifyChanges } from './verify-releases.mjs';
+import { classifyVerification, installedVersions, PROBES, verifyChanges } from './verify-releases.mjs';
+
+test('every monitored LangChain package has a runtime probe', () => {
+  assert.deepEqual(PROBES['@langchain/google-genai'], {
+    adapter: 'langchain',
+    exportName: 'langchainHandler',
+    scope: 'consumer import and adapter export',
+  });
+});
 
 test('only baseline pass followed by latest runtime failure is a candidate regression', () => {
   assert.equal(classifyVerification({ status: 'passed' }, { status: 'failed' }), 'failed');
