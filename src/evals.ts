@@ -53,6 +53,18 @@ const dispatchSlotSchema = z.object({ batchId: z.string().uuid(), key: z.string(
 const stateSchema = z.object({ projectId: z.string().uuid(), request: z.record(z.string(), z.json()), taskDigest: z.string().regex(/^[a-f0-9]{64}$/), registrationKey: z.string().uuid(), runId: z.string().uuid().nullable(), deadlineAt: z.string().datetime().optional(), traceEvidence: z.boolean().optional(), slots: z.record(z.string(), slotSchema),
   completionKey: z.string().uuid().optional(), gateKey: z.string().uuid().optional(), gradingDispatch: z.object({ evaluationId: z.string().uuid(), recorded: dispatchSlotSchema, candidate: dispatchSlotSchema }).strict().optional() }).strict();
 type State = z.infer<typeof stateSchema>;
+async function flushOptionalTrace(flush: () => Promise<boolean>, deadline: number): Promise<boolean> {
+  const remaining = Math.min(10_000, deadline - Date.now());
+  if (remaining <= 0) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(flush),
+      new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), remaining); }),
+    ]);
+  } catch { return false; }
+  finally { if (timer !== undefined) clearTimeout(timer); }
+}
 function boundedOutput(body: NonNullable<State['slots'][string]['body']>): NonNullable<State['slots'][string]['body']> {
   try {
     if (body.metrics && Object.keys(body.metrics).some(key => key.length > 100)) throw new DatasetCaptureError('Task metric names must be at most 100 UTF-16 units.');
@@ -247,22 +259,30 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
         if (uploaded.terminal) { status = uploaded.terminal; break casesLoop; }
       } else {
         const output = slot;
+        // Ambiguous writes keep their original body/key while reconciling.
+        const traceDeadline = Math.min(runDeadline - 5000, Date.now() + 60_000);
         const upload = () => {
           const value = output.body!;
           if (!output.rejection) return value;
           const { output: _output, metrics: _metrics, ...execution } = value;
           return { ...execution, error: output.rejection.error };
         };
-        const deliver = () => recoverRunRequest(requestTimeout => runApi.taskOutput(runId, upload(), output.rejection?.key ?? output.key, requestTimeout), runDeadline, recovery);
+        const deliver = () => recoverRunRequest(requestTimeout => {
+          const value = upload();
+          const evidenceRemaining = traceDeadline - Date.now();
+          const timeout = value.traceId && evidenceRemaining > 0 ? Math.min(requestTimeout, evidenceRemaining) : requestTimeout;
+          return runApi.taskOutput(runId, value, output.rejection?.key ?? output.key, timeout);
+        }, runDeadline, recovery);
         const withoutTrace = () => {
           const { traceId: _traceId, ...unlinked } = output.body!;
           output.body = unlinked;
           if (output.rejection) output.rejection.key = randomUUID(); else output.key = randomUUID();
           save(options.statePath, state);
         };
-        if (body.traceId && flushTrace) await flushTrace();
-        const traceDeadline = Math.min(runDeadline, Date.now() + 60_000);
+        // Optional evidence must leave time to deliver the computed value.
+        if (body.traceId && flushTrace && !await flushOptionalTrace(flushTrace, traceDeadline)) withoutTrace();
         for (;;) {
+          if (output.body?.traceId && Date.now() >= traceDeadline) withoutTrace();
           try {
             const uploaded = await deliver();
             if (uploaded.terminal) { status = uploaded.terminal; break casesLoop; }
@@ -296,15 +316,21 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
     while (options.grading && status.state === 'completed' &&
       (status.gradingHandoffState === 'pending' || status.gradingHandoffState === 'ready') && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+      if (Date.now() >= deadline) break;
       status = (await recoverRunRequest(requestTimeout => runApi.status(runId, false, requestTimeout), deadline)).data ?? status;
     }
-    const readComparison = async () => {
-      const response = await recoverRunRequest(requestTimeout => runApi.comparison(runId, {}, requestTimeout), deadline);
+    const readComparison = async (readDeadline: number) => {
+      const response = await recoverRunRequest(requestTimeout => runApi.comparison(runId, {}, requestTimeout), readDeadline);
       if (!response.data) throw new Error('The comparison could not be confirmed.');
       return response.data;
     };
-    let comparison = await readComparison();
-    while (comparison.state === 'pending' && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now()))); comparison = await readComparison(); }
+    // A handoff wait can consume the polling budget; one bounded receipt read remains.
+    let comparison = await readComparison(Math.max(deadline, Date.now() + 5000));
+    while (comparison.state === 'pending' && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+      if (Date.now() >= deadline) break;
+      comparison = await readComparison(deadline);
+    }
     const coverage = z.object({ complete: z.boolean() }).parse(comparison.coverage);
     if (errors / (cases.length * trials) > maxErrorRate || !coverage.complete) return { runId, runState: status.state, comparison, gate: null, errors, exitCode: 4 };
     if (!options.gates?.length) return { runId, runState: status.state, comparison, gate: null, errors, exitCode: 0 };
