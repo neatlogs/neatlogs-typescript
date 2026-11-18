@@ -11,8 +11,7 @@ export type SpanKind =
   | 'RETRIEVER'
   | 'EMBEDDING'
   | 'MCP_TOOL'
-  | 'GUARDRAIL'
-  | 'EVALUATOR';
+  | 'GUARDRAIL';
 
 /**
  * Span kinds accepted by the lower-level trace() API.

@@ -330,17 +330,7 @@ describe('trace() extra option keys', () => {
 // ---------------------------------------------------------------------------
 
 describe('trace() with various span kinds', () => {
-  const spanKinds = [
-    'WORKFLOW',
-    'AGENT',
-    'CHAIN',
-    'TOOL',
-    'RETRIEVER',
-    'EMBEDDING',
-    'MCP_TOOL',
-    'GUARDRAIL',
-    'EVALUATOR',
-  ] as const;
+  const spanKinds = ['WORKFLOW', 'AGENT', 'CHAIN', 'TOOL', 'RETRIEVER', 'EMBEDDING', 'MCP_TOOL', 'GUARDRAIL'] as const;
 
   for (const kind of spanKinds) {
     it(`should set openinference.span.kind to ${kind}`, async () => {
