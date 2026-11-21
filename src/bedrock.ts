@@ -26,7 +26,6 @@ import { getProviderTracer } from './core/auto-root.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import { markCancelled, recordFailure } from './core/span-outcome.js';
 import {
-  getNeatlogsTracer,
   getNeatlogsParentContext,
   withNeatlogsSpan,
 } from './core/provider.js';
@@ -55,7 +54,7 @@ export function traceTool<TArgs = any, TResult = any>(
   fn: (args: TArgs) => TResult | Promise<TResult>,
 ): (args: TArgs) => Promise<TResult> {
   return async function tracedTool(args: TArgs): Promise<TResult> {
-    const tracer = getNeatlogsTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const span = tracer.startSpan(
       `tool.${name}`,
       {
