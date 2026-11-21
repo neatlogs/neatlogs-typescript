@@ -100,10 +100,10 @@ function wrapNamespace(target: any, path: string[]): any {
       const currentPath = [...path, String(prop)];
       const pathStr = currentPath.join('.');
 
-      if (pathStr === 'messages.create' && typeof value === 'function') {
+      if ((pathStr === 'messages.create' || pathStr === 'beta.messages.create') && typeof value === 'function') {
         return tracedMessagesCreate(value.bind(obj));
       }
-      if (pathStr === 'messages.stream' && typeof value === 'function') {
+      if ((pathStr === 'messages.stream' || pathStr === 'beta.messages.stream') && typeof value === 'function') {
         return tracedMessagesStream(value.bind(obj));
       }
 
@@ -754,4 +754,4 @@ function safeStringify(value: unknown): string {
 function recordError(span: Span, err: unknown): void {
   recordFailure(span, err);
   span.end();
-}
+                                             }
