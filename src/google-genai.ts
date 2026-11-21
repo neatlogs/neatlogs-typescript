@@ -851,4 +851,4 @@ function safeStringify(value: unknown): string {
 function recordError(span: Span, err: unknown): void {
   recordFailure(span, err);
   span.end();
-    }
+}
