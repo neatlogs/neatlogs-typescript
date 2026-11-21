@@ -149,6 +149,39 @@ function startSpan(name: string, modelId: any, isStream: boolean): Span {
 // Converse API
 // ---------------------------------------------------------------------------
 
+function sendWithSpan(
+  originalSend: (...args: any[]) => any,
+  command: any,
+  rest: any[],
+  span: Span,
+  onResponse: (response: any) => any,
+): any {
+  const callback = rest[rest.length - 1];
+  if (typeof callback === 'function') {
+    const args = rest.slice();
+    args[args.length - 1] = function (this: any, error: any, response: any) {
+      if (error) recordError(span, error);
+      else response = onResponse(response);
+      return callback.call(this, error, response);
+    };
+    try {
+      return withNeatlogsSpan(span, () => originalSend(command, ...args));
+    } catch (error) {
+      recordError(span, error);
+      throw error;
+    }
+  }
+  try {
+    return withNeatlogsSpan(span, () => originalSend(command, ...rest)).then(
+      onResponse,
+      (error: any) => { recordError(span, error); throw error; },
+    );
+  } catch (error) {
+    recordError(span, error);
+    throw error;
+  }
+}
+
 function tracedConverse(
   originalSend: (...a: any[]) => any,
   command: any,
@@ -163,21 +196,11 @@ function tracedConverse(
   );
   setConverseInput(span, input);
 
-  const promise = withNeatlogsSpan(span, () => originalSend(command, ...rest));
-
-  return promise.then(
-    (response: any) => {
-      if (isStream) {
-        return wrapConverseStream(response, span);
-      }
-      finalizeConverse(span, response);
-      return response;
-    },
-    (err: any) => {
-      recordError(span, err);
-      throw err;
-    },
-  );
+  return sendWithSpan(originalSend, command, rest, span, (response: any) => {
+    if (isStream) return wrapConverseStream(response, span);
+    finalizeConverse(span, response);
+    return response;
+  });
 }
 
 function setConverseInput(span: Span, input: any): void {
@@ -475,30 +498,17 @@ function tracedInvokeModel(
     setInvokeInput(span, vendor, bodyIn);
   }
 
-  const promise = withNeatlogsSpan(span, () => originalSend(command, ...rest));
-
-  return promise.then(
-    (response: any) => {
-      if (isStream) {
-        return wrapInvokeStream(response, span, vendor);
-      }
-      try {
-        if (isEmbedding) {
-          finalizeInvokeEmbedding(span, decodeBody(response?.body));
-        } else {
-          finalizeInvoke(span, vendor, decodeBody(response?.body));
-        }
-      } catch {
-        span.setStatus({ code: SpanStatusCode.OK });
-        span.end();
-      }
-      return response;
-    },
-    (err: any) => {
-      recordError(span, err);
-      throw err;
-    },
-  );
+  return sendWithSpan(originalSend, command, rest, span, (response: any) => {
+    if (isStream) return wrapInvokeStream(response, span, vendor);
+    try {
+      if (isEmbedding) finalizeInvokeEmbedding(span, decodeBody(response?.body));
+      else finalizeInvoke(span, vendor, decodeBody(response?.body));
+    } catch {
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
+    }
+    return response;
+  });
 }
 
 function finalizeInvokeEmbedding(span: Span, body: any): void {
