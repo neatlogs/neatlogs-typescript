@@ -69,4 +69,4 @@ for (const providerName of ['google','vertex']) {
       expect(exporter.getFinishedSpans()).toHaveLength(1);
     });
   });
-           }
+}
