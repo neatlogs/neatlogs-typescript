@@ -22,6 +22,7 @@
 
 import {
   trace as otelTrace,
+  isSpanContextValid,
   type Tracer,
   type Span,
   type Context,
@@ -170,11 +171,9 @@ class AutoRootTracer implements Tracer {
     ).toLowerCase();
 
     // Parent from our private context, never the foreign global.
-    const hasExplicitContext = context !== undefined;
     const ctx = context ?? getNeatlogsParentContext();
-    const parent = getActiveNeatlogsSpan();
-    const isParentless =
-      !hasExplicitContext && !(parent !== undefined && parent.isRecording());
+    const parent = otelTrace.getSpanContext(ctx);
+    const isParentless = !parent || !isSpanContextValid(parent);
     const needsRoot =
       autoRootEnabled() &&
       !ROOT_KINDS.has(kind) &&
