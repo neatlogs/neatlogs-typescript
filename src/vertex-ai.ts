@@ -442,12 +442,12 @@ function wrapStream(stream: any, span: Span): any {
   const wrapped = Object.create(Object.getPrototypeOf(stream));
   Object.assign(wrapped, stream);
 
-  wrapped[Symbol.asyncIterator] = function () {
-    const iterator = originalAsyncIterator();
+  const wrapIterator = (iterator: any) => {
     return {
-      async next(): Promise<IteratorResult<any>> {
+      [Symbol.asyncIterator]() { return this; },
+      async next(...args: any[]): Promise<IteratorResult<any>> {
         try {
-          const result = await iterator.next();
+          const result = await iterator.next(...args);
           if (result.done) {
             finalizeStreamChunks(span, accumulated, cancellationRequested);
             return result;
@@ -478,6 +478,17 @@ function wrapStream(stream: any, span: Span): any {
         return iterator.throw?.(err) ?? { done: true, value: undefined };
       },
     };
+  };
+
+  const directIterator = typeof stream.next === 'function' ? wrapIterator(stream) : undefined;
+  if (directIterator) {
+    wrapped.next = directIterator.next.bind(directIterator);
+    wrapped.return = directIterator.return.bind(directIterator);
+    wrapped.throw = directIterator.throw.bind(directIterator);
+  }
+  wrapped[Symbol.asyncIterator] = () => {
+    const iterator = originalAsyncIterator();
+    return iterator === stream && directIterator ? directIterator : wrapIterator(iterator);
   };
 
   return wrapped;
@@ -811,4 +822,4 @@ function safeStringify(value: unknown): string {
 function recordError(span: Span, err: unknown): void {
   recordFailure(span, err);
   span.end();
-}
+    }
