@@ -56,4 +56,4 @@ for(const Command of [ConverseCommand, InvokeModelCommand, ConverseStreamCommand
       expect(exporter.getFinishedSpans()[0].status.code).toBe(2);
     });
   });
-                                                          }
+}
