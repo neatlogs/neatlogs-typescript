@@ -115,7 +115,10 @@ function getHeader(
     return typeof value === 'string' ? value : undefined;
   }
   const record = carrier as Record<string, string | undefined>;
-  return record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
+  const direct = record[name];
+  if (direct !== undefined) return direct;
+  const key = Object.keys(record).find((key) => key.toLowerCase() === name);
+  return key === undefined ? undefined : record[key];
 }
 
 function setHeader(
