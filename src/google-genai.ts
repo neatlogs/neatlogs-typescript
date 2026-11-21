@@ -39,7 +39,6 @@ import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import { cachedModelSpan, providerReplay, restoreGoogleResponse } from './replay/provider.js';
 import { prepareProviderCapture } from './replay/provider-capture.js';
 import {
-  getNeatlogsTracer,
   getNeatlogsParentContext,
   withNeatlogsSpan,
 } from './core/provider.js';
@@ -70,7 +69,7 @@ export function traceTool<TArgs = any, TResult = any>(
   options?: { callId?: string },
 ): (args: TArgs) => Promise<TResult> {
   return async function tracedTool(args: TArgs): Promise<TResult> {
-    const tracer = getNeatlogsTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const span = tracer.startSpan(
       `tool.${name}`,
       {

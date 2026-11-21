@@ -25,7 +25,6 @@ import { observeRawResponse } from './core/raw-response.js';
 import { captureMedia, captureMediaWithIndex } from './core/media.js';
 import { markCancelled, recordFailure } from './core/span-outcome.js';
 import {
-  getNeatlogsTracer,
   getNeatlogsParentContext,
   withNeatlogsSpan,
 } from './core/provider.js';
@@ -53,7 +52,7 @@ export function traceTool<TInput = any, TResult = any>(
   fn: (input: TInput) => TResult | Promise<TResult>,
 ): (input: TInput) => Promise<TResult> {
   return async function tracedTool(input: TInput): Promise<TResult> {
-    const tracer = getNeatlogsTracer(TRACER_NAME);
+    const tracer = getProviderTracer(TRACER_NAME);
     const span = tracer.startSpan(
       `tool.${name}`,
       {
