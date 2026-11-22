@@ -263,39 +263,48 @@ function instrumentQueryIterable(
   const wrapped = Object.create(Object.getPrototypeOf(queryObj));
   Object.assign(wrapped, queryObj);
 
-  wrapped[Symbol.asyncIterator] = function () {
-    const iterator = originalAsyncIterator();
-    return {
-      async next(): Promise<IteratorResult<any>> {
-        try {
-          const result = await withNeatlogsSpan(agentSpan, () => iterator.next());
-          if (result.done) {
-            finalizeAgent('ok');
-            return result;
-          }
-          try {
-            handleMessage(tracer, state, result.value, finalizeAgent);
-          } catch {
-            /* never let tracing break the run */
-          }
-          return result;
-        } catch (err) {
-          finalizeAgent('error', err);
-          throw err;
-        }
-      },
-      async return(value?: any): Promise<IteratorResult<any>> {
-        // No-op when the `result` message already closed the run.
-        finalizeAgent('cancelled');
-        return iterator.return?.(value) ?? { done: true, value: undefined };
-      },
-      async throw(err?: any): Promise<IteratorResult<any>> {
-        finalizeAgent('error', err);
-        if (iterator.throw) return iterator.throw(err);
-        throw err;
-      },
-    };
+  let source: any;
+  const getIterator = () => {
+    source ??= typeof queryObj.next === 'function' ? queryObj : originalAsyncIterator();
+    return source;
   };
+  const instrumented = {
+    async next(value?: any): Promise<IteratorResult<any>> {
+      const iterator = getIterator();
+      try {
+        const result = await withNeatlogsSpan(agentSpan, () => iterator.next(value));
+        if (result.done) {
+          finalizeAgent('ok');
+          return result;
+        }
+        try {
+          handleMessage(tracer, state, result.value, finalizeAgent);
+        } catch {
+          /* never let tracing break the run */
+        }
+        return result;
+      } catch (err) {
+        finalizeAgent('error', err);
+        throw err;
+      }
+    },
+    async return(value?: any): Promise<IteratorResult<any>> {
+      // No-op when the `result` message already closed the run.
+      finalizeAgent('cancelled');
+      const iterator = getIterator();
+      return iterator.return?.(value) ?? { done: true, value: undefined };
+    },
+    async throw(err?: any): Promise<IteratorResult<any>> {
+      finalizeAgent('error', err);
+      const iterator = getIterator();
+      if (iterator.throw) return iterator.throw(err);
+      throw err;
+    },
+  };
+  wrapped.next = instrumented.next;
+  wrapped.return = instrumented.return;
+  wrapped.throw = instrumented.throw;
+  wrapped[Symbol.asyncIterator] = () => wrapped;
 
   return wrapped;
 }
