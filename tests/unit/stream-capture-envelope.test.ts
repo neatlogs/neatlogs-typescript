@@ -44,6 +44,17 @@ describe('streamed capture envelope (F-040 review M1)', () => {
     expect(mainRecording.safeParse(JSON.parse(raw)).success).toBe(false);
   });
 
+  it('accepts only stream: true as the marker', () => {
+    const span = getProviderTracer('envelope-test').startSpan('provider');
+    const output = { id: 'x', object: 'chat.completion', created: 1, model: 'm', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'A' } }] };
+    prepareProviderCapture(span, 'openai.chat.completions.create', { model: 'm', messages: [] }, true)!(output);
+    span.end();
+    // A non-streamed capture (digest without the marker) with any other marker value must not be read.
+    const saved = JSON.parse(only().attributes[MODEL_CAPTURE_ATTRIBUTE] as string);
+    expect(() => readProviderCapture(JSON.stringify({ ...saved, stream: false }))).toThrow();
+    expect(() => readProviderCapture(JSON.stringify({ ...saved, stream: 'true' }))).toThrow();
+  });
+
   it('leaves non-streamed captures in the old format', () => {
     const span = getProviderTracer('envelope-test').startSpan('provider');
     const output = { id: 'x', object: 'chat.completion', created: 1, model: 'm', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'A' } }] };

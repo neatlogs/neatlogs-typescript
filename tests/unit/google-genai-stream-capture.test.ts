@@ -204,7 +204,10 @@ describe('google-genai streamed capture: review fixes (F-040)', () => {
   });
 
   it('records nothing when two candidates in one chunk claim the same index', async () => {
-    const chunks = [{ candidates: [{ content: { parts: [{ text: 'A' }] }, finishReason: 'STOP' }, { content: { parts: [{ text: 'B' }] }, finishReason: 'STOP' }] }];
+    const chunks = [
+      { candidates: [{ content: { parts: [{ text: 'A' }] } }, { content: { parts: [{ text: 'B' }] } }] },
+      { candidates: [{ content: { parts: [{ text: '.' }] }, finishReason: 'STOP' }] },
+    ];
     expect(await drain(wrapGoogleGenAI, chunks)).toBeUndefined();
   });
 });
@@ -276,5 +279,44 @@ describe('google-genai streamed capture: review round 2 (F-040)', () => {
     Object.defineProperty(counted, 'probeField', { enumerable: true, get() { reads++; return 1; } });
     await drain(wrap, [mid([{ text: 'y'.repeat(1024 * 1024 + 10) }]), counted, fin([{ text: '.' }])]);
     expect(reads).toBe(0);
+  });
+});
+
+describe('google-genai streamed capture: review round 3 (F-040)', () => {
+  const wrap = wrapGoogleGenAI;
+  const fin = (parts: unknown[], extra: object = {}) => ({ candidates: [{ index: 0, content: { role: 'model', parts }, finishReason: 'STOP', ...extra }] });
+  const mid = (parts: unknown[], extra: object = {}) => ({ candidates: [{ index: 0, content: { role: 'model', parts }, ...extra }] });
+
+  it('records what the model sent even if the caller later mutates the chunk', async () => {
+    const call = { functionCall: { name: 'lookup', args: { city: 'Paris' } } };
+    const ratings = [{ category: 'X', probability: 'LOW' }];
+    const chunks = [mid([call]), fin([{ text: 'Done.' }], { safetyRatings: ratings, citationMetadata: { citations: [{ uri: 'https://a' }] } })];
+    const client = wrap(streamingClient(chunks) as any) as any;
+    for await (const c of await client.models.generateContentStream(structuredClone(request))) {
+      for (const part of c.candidates[0].content.parts) if (part.functionCall) part.functionCall.args.city = 'MUTATED';
+      if (c.candidates[0].safetyRatings) c.candidates[0].safetyRatings[0].probability = 'MUTATED';
+      if (c.candidates[0].citationMetadata) c.candidates[0].citationMetadata.citations[0].uri = 'MUTATED';
+    }
+    const { output } = readProviderCapture(only().attributes[MODEL_CAPTURE_ATTRIBUTE]) as { output: any };
+    expect(output.candidates[0].content.parts[0].functionCall.args.city).toBe('Paris');
+    expect(output.candidates[0].safetyRatings[0].probability).toBe('LOW');
+    expect(output.candidates[0].citationMetadata.citations[0].uri).toBe('https://a');
+  });
+
+  it('records nothing when content arrives after a candidate finished', async () => {
+    expect(await drain(wrap, [fin([{ text: 'A' }]), mid([{ text: 'B' }])])).toBeUndefined();
+  });
+
+  it('treats FINISH_REASON_UNSPECIFIED as not finished', async () => {
+    expect(await drain(wrap, [mid([{ text: 'A' }], { finishReason: 'FINISH_REASON_UNSPECIFIED' })])).toBeUndefined();
+  });
+
+  it('records nothing for an unknown top-level response field, and keeps the known ones', async () => {
+    expect(await drain(wrap, [fin([{ text: 'A' }]), { candidates: [], someNewTopLevel: { x: 1 } }])).toBeUndefined();
+  });
+
+  it('keeps known top-level fields', async () => {
+    const { output } = readProviderCapture(await drain(wrap, [{ ...fin([{ text: 'A' }]), usageMetadata: usage, modelVersion: 'v', responseId: 'r', createTime: '2026-11-24T00:00:00Z' }])) as { output: any };
+    expect(Object.keys(output).sort()).toEqual(['candidates', 'createTime', 'modelVersion', 'responseId', 'usageMetadata']);
   });
 });

@@ -282,6 +282,18 @@ describe('openai chat streamed capture: review round 2 (F-040)', () => {
   });
 });
 
+describe('openai chat streamed capture: review round 3 (F-040)', () => {
+  it('records nothing when a choice has no index', async () => {
+    const events = [chunk({ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }), { id: 'c1', object: 'chat.completion.chunk', created: 1, model: 'gpt-test', choices: [{ delta: { content: ' there' } }] }, answer[2]];
+    expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true }))).toBeUndefined();
+  });
+
+  it('records nothing when content arrives after a choice finished', async () => {
+    const events = [chunk({ index: 0, delta: { role: 'assistant', content: 'A' }, finish_reason: 'stop' }), chunk({ index: 0, delta: { content: 'B' }, finish_reason: null }), answer[2]];
+    expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true }))).toBeUndefined();
+  });
+});
+
 describe('openai responses streams (F-040 scope)', () => {
   // Not captured in this PR: nothing reads a streamed Responses capture (server grading ignores
   // Responses captures and streamed spans are never replayed), so it would only add span weight.

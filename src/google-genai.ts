@@ -483,8 +483,8 @@ function wrapStream(stream: any, span: Span, captureResponse?: (response: unknow
         try {
           const result = await iterator.next();
           if (result.done) {
-            // A stream the caller already returned or that failed is finalized: never a complete answer.
-            if (assembled && !accumulated.finalized) {
+            // Return and failure already released `assembled`, so only a natural end reaches capture.
+            if (assembled) {
               const kept = assembled;
               guardStreamResponse(kept, () => {
                 const response = finishStreamResponse(kept, expectedCandidates);
@@ -499,12 +499,14 @@ function wrapStream(stream: any, span: Span, captureResponse?: (response: unknow
           if (assembled) { const kept = assembled; guardStreamResponse(kept, () => addStreamResponseChunk(kept, result.value)); }
           return result;
         } catch (err) {
+          assembled = undefined; // a failed stream is never captured; release the kept content
           failStreamChunks(span, accumulated, err);
           throw err;
         }
       },
       async return(value?: any): Promise<IteratorResult<any>> {
         cancellationRequested = true;
+        assembled = undefined; // a stream the caller left is never captured; release the kept content
         markStreamIncomplete(accumulated, 'consumer_cancelled');
         span.setAttribute('neatlogs.stream.cancelled', true);
         try {
@@ -535,6 +537,13 @@ function wrapStream(stream: any, span: Span, captureResponse?: (response: unknow
 const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
 /** Candidate fields whose last streamed value is the complete value; any other field is uncapturable. */
 const LAST_VALUE_CANDIDATE_FIELDS = new Set(['finishReason', 'finishMessage', 'safetyRatings', 'groundingMetadata', 'urlContextMetadata', 'tokenCount']);
+/** Top-level response fields whose last streamed value is the complete value; others are uncapturable. */
+const LAST_VALUE_RESPONSE_FIELDS = new Set(['usageMetadata', 'modelVersion', 'responseId', 'createTime', 'promptFeedback']);
+/** Copy what the capture keeps, so a caller mutating its chunk later cannot change the recorded output. */
+function copyKept<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 /** Keys a text part may carry and still be joined with the next text delta. */
 const MERGEABLE_TEXT_PART_KEYS = new Set(['text', 'thought', 'thoughtSignature']);
 
@@ -594,23 +603,30 @@ function addStreamResponseChunk(response: StreamResponse, chunk: any): void {
     }
     if (typeof index === 'number') saved.index = index;
     if (typeof content?.role === 'string') saved.role = content.role;
+    const finished = typeof saved.fields.finishReason === 'string' && saved.fields.finishReason !== 'FINISH_REASON_UNSPECIFIED';
+    if (finished && (Array.isArray(content?.parts) && content.parts.length > 0))
+      throw new Error('Content arrived after the candidate finished.');
     for (const [name, value] of Object.entries(candidateFields)) {
       if (value === null || value === undefined) continue;
       // Only fields whose streamed value is the whole value may take the last one (per-chunk
       // logprobs, for example, would silently keep only the final chunk's tokens).
       if (!LAST_VALUE_CANDIDATE_FIELDS.has(name)) throw new Error(`Cannot rebuild candidate field ${name}.`);
-      saved.fields[name] = value;
+      saved.fields[name] = copyKept(value);
     }
     if (Array.isArray(citationMetadata?.citations)) {
       keepStreamBytes(response, citationMetadata.citations);
-      saved.citations.push(...citationMetadata.citations);
+      saved.citations.push(...copyKept(citationMetadata.citations));
     }
     for (const part of Array.isArray(content?.parts) ? content.parts : []) {
       keepStreamBytes(response, typeof part?.text === 'string' ? part.text : part);
       addStreamResponsePart(saved.parts, part);
     }
   }
-  for (const [name, value] of Object.entries(responseFields)) if (value !== null && value !== undefined) response.fields[name] = value;
+  for (const [name, value] of Object.entries(responseFields)) {
+    if (value === null || value === undefined) continue;
+    if (!LAST_VALUE_RESPONSE_FIELDS.has(name)) throw new Error(`Cannot rebuild response field ${name}.`);
+    response.fields[name] = copyKept(value);
+  }
 }
 
 function addStreamResponsePart(parts: Array<Record<string, unknown>>, part: any): void {
@@ -631,7 +647,7 @@ function addStreamResponsePart(parts: Array<Record<string, unknown>>, part: any)
     if (part.thoughtSignature !== undefined) last.thoughtSignature = part.thoughtSignature;
     return;
   }
-  parts.push({ ...part });
+  parts.push(copyKept(part));
 }
 
 /** The assembled response, or undefined when it cannot be a complete answer. */
@@ -642,7 +658,7 @@ function finishStreamResponse(response: StreamResponse, expectedCandidates = 1):
   // A stream that stops without a finish reason was cut short; it is not a complete answer.
   for (const candidate of response.candidates.values()) {
     const reason = candidate.fields.finishReason;
-    if (typeof reason !== 'string' || reason.length === 0) return undefined;
+    if (typeof reason !== 'string' || reason.length === 0 || reason === 'FINISH_REASON_UNSPECIFIED') return undefined;
   }
   const candidates = [...response.candidates.entries()]
     .sort(([a], [b]) => a - b)

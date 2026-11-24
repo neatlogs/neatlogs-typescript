@@ -419,7 +419,8 @@ function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (res
                   const aborted = stream.controller?.signal?.aborted === true;
                   const interrupted = cancellationRequested || (aborted && !accumulator.hasFinishReason());
                   // An aborted stream is never captured: its trailing chunks (usage) never arrived.
-                  if (assembled && !cancellationRequested && !aborted) assembled.capture(captureResponse!);
+                  // Return and failure already released `assembled`; an aborted stream is never captured.
+                  if (assembled && !aborted) assembled.capture(captureResponse!);
                   assembled = undefined; // release the kept content
                   accumulator.finish(safeSpan, interrupted);
                   return result;
@@ -428,12 +429,14 @@ function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (res
                 assembled?.add(result.value);
                 return result;
               } catch (err) {
+                assembled = undefined; // a failed stream is never captured; release the kept content
                 accumulator.fail(safeSpan, err);
                 throw err;
               }
             },
             async return(value?: any): Promise<IteratorResult<any>> {
               cancellationRequested = true;
+              assembled = undefined; // a stream the caller left is never captured; release the kept content
               try {
                 const result = await (iterator.return?.(value) ?? {
                   done: true,
@@ -521,6 +524,8 @@ class ChatStreamResponse {
         if (value !== null && value !== undefined && !REBUILT_DELTA_FIELDS.has(key)) throw new Error(`Cannot rebuild delta field ${key}.`);
       let state = this.choices.get(index);
       if (!state) { state = { toolCalls: new Map(), fields: {} }; this.choices.set(index, state); }
+      const hasContent = Object.values(delta ?? {}).some((value) => value !== null && value !== undefined && value !== '');
+      if (typeof state.fields.finish_reason === 'string' && hasContent) throw new Error('Content arrived after the choice finished.');
       for (const [key, value] of Object.entries(choiceFields)) if (value !== null && value !== undefined) state.fields[key] = value;
       if (logprobs && typeof logprobs === 'object') {
         // Each chunk carries the logprobs of its own tokens; the full response lists them all.
