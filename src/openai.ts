@@ -230,7 +230,9 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
       }
     }
 
-    const captureResponse = prepareProviderCapture(span, 'openai.chat.completions.create', opts, !isStream && rest.length === 0);
+    // Streams are captured too (F-040), assembled into one chat.completion when the stream completes.
+    // The captured request keeps stream: true, so server replay refuses it; replay below stays non-streaming.
+    const captureResponse = prepareProviderCapture(span, 'openai.chat.completions.create', opts, rest.length === 0);
     let result: any;
     let replayed = false;
     let resolveReplay: ((raw: boolean) => any) | undefined;
@@ -251,7 +253,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
     return preserveResponseHelpers(result, span,
       (response: any) => {
         if (isStream) {
-          return wrapAsyncIterableStream(response, span);
+          return wrapAsyncIterableStream(response, span, replayed ? undefined : captureResponse);
         }
         if (!replayed) captureResponse(response);
         finalizeChatResponse(replayed ? cachedModelSpan(span) : span, response);
@@ -352,7 +354,8 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
     span.setAttribute("input.value", safeStringify(capturedInput ?? ""));
     setInvocationParams(span, opts);
 
-    const captureResponse = prepareProviderCapture(span, 'openai.responses.create', opts, !isStream && rest.length === 0);
+    // Streams are captured from their response.completed event (F-040); replay stays non-streaming.
+    const captureResponse = prepareProviderCapture(span, 'openai.responses.create', opts, rest.length === 0);
     let result: any;
     let replayed = false;
     let resolveReplay: ((raw: boolean) => any) | undefined;
@@ -373,7 +376,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
     return preserveResponseHelpers(result, span,
       (response: any) => {
         if (isStream) {
-          return wrapResponsesAsyncIterableStream(response, span);
+          return wrapResponsesAsyncIterableStream(response, span, replayed ? undefined : captureResponse);
         }
         if (!replayed) captureResponse(response);
         finalizeResponsesResponse(replayed ? cachedModelSpan(span) : span, response);
@@ -389,7 +392,8 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
 // Streaming support
 // ---------------------------------------------------------------------------
 
-function wrapAsyncIterableStream(stream: any, span: Span): any {
+function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (response: unknown) => void): any {
+  const assembled = captureResponse ? new ChatStreamResponse() : undefined;
   const accumulator = new ChoiceAccumulator();
   const safeSpan = mediaSafeAccumulatorSpan(span);
   let cancellationRequested = false;
@@ -413,15 +417,18 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
                 if (result.done) {
                   // The SDK ends the iterator quietly on an abort; a chunk with
                   // a finish_reason means the reply did complete first.
-                  accumulator.finish(
-                    safeSpan,
-                    cancellationRequested ||
-                      (stream.controller?.signal?.aborted === true &&
-                        !accumulator.hasFinishReason()),
-                  );
+                  const interrupted = cancellationRequested ||
+                    (stream.controller?.signal?.aborted === true &&
+                      !accumulator.hasFinishReason());
+                  if (assembled && !interrupted) {
+                    const response = assembled.finish();
+                    if (response) captureResponse!(response);
+                  }
+                  accumulator.finish(safeSpan, interrupted);
                   return result;
                 }
                 accumulator.addChunk(span, result.value);
+                assembled?.add(result.value);
                 return result;
               } catch (err) {
                 accumulator.fail(safeSpan, err);
@@ -455,6 +462,84 @@ function wrapAsyncIterableStream(stream: any, span: Span): any {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+/** Raw capture is dropped above this size; the provider capture rejects larger evidence anyway. */
+const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
+
+/**
+ * Rebuild the chat.completion a non-streamed call returns from its chunks (F-040): content and refusal
+ * deltas are joined, tool-call deltas are merged by index, and response metadata takes its last value.
+ * Nothing is returned unless every choice finished and the content stayed under the capture limit.
+ */
+class ChatStreamResponse {
+  private readonly choices = new Map<number, {
+    role?: string; content?: string; refusal?: string; toolCalls: Map<number, any>; fields: Record<string, unknown>;
+    logprobs?: { content: unknown[] | null; refusal: unknown[] | null };
+  }>();
+  private readonly fields: Record<string, unknown> = {};
+  private bytes = 0;
+  private capturable = true;
+
+  add(chunk: any): void {
+    if (!this.capturable) return;
+    // `obfuscation` is per-chunk stream padding; a non-streamed response has no such field.
+    const { choices, object: _object, obfuscation: _obfuscation, ...fields } = chunk ?? {};
+    try {
+      this.bytes += JSON.stringify(choices ?? null).length + JSON.stringify(fields).length;
+    } catch {
+      this.capturable = false;
+      return;
+    }
+    if (this.bytes > MAX_STREAM_RESPONSE_BYTES) {
+      this.capturable = false;
+      this.choices.clear();
+      return;
+    }
+    for (const [key, value] of Object.entries(fields)) if (value !== null && value !== undefined) this.fields[key] = value;
+    for (const choice of Array.isArray(choices) ? choices : []) {
+      const { index, delta, logprobs, ...choiceFields } = choice ?? {};
+      if (typeof index !== 'number') { this.capturable = false; return; }
+      let state = this.choices.get(index);
+      if (!state) { state = { toolCalls: new Map(), fields: {} }; this.choices.set(index, state); }
+      for (const [key, value] of Object.entries(choiceFields)) if (value !== null && value !== undefined) state.fields[key] = value;
+      if (logprobs && typeof logprobs === 'object') {
+        // Each chunk carries the logprobs of its own tokens; the full response lists them all.
+        const saved = (state.logprobs ??= { content: null, refusal: null });
+        for (const key of ['content', 'refusal'] as const)
+          if (Array.isArray(logprobs[key])) saved[key] = [...(saved[key] ?? []), ...logprobs[key]];
+      }
+      if (typeof delta?.role === 'string') state.role = delta.role;
+      if (typeof delta?.content === 'string') state.content = (state.content ?? '') + delta.content;
+      if (typeof delta?.refusal === 'string') state.refusal = (state.refusal ?? '') + delta.refusal;
+      for (const call of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {
+        // Only function calls are rebuilt; any other tool-call shape is left uncaptured rather than guessed.
+        if (typeof call?.index !== 'number' || (call.type !== undefined && call.type !== 'function')
+          || (call.function === undefined && !state.toolCalls.has(call.index))) { this.capturable = false; return; }
+        const saved = state.toolCalls.get(call.index) ?? { function: { name: '', arguments: '' } };
+        if (typeof call.id === 'string') saved.id = call.id;
+        if (typeof call.type === 'string') saved.type = call.type;
+        if (typeof call.function?.name === 'string') saved.function.name += call.function.name;
+        if (typeof call.function?.arguments === 'string') saved.function.arguments += call.function.arguments;
+        state.toolCalls.set(call.index, saved);
+      }
+    }
+  }
+
+  finish(): Record<string, unknown> | undefined {
+    if (!this.capturable || this.choices.size === 0) return undefined;
+    const choices = [];
+    for (const [index, state] of [...this.choices.entries()].sort(([a], [b]) => a - b)) {
+      if (typeof state.fields.finish_reason !== 'string' || !state.fields.finish_reason) return undefined;
+      const toolCalls = [...state.toolCalls.entries()].sort(([a], [b]) => a - b)
+        .map(([, call]) => ({ ...(call.id === undefined ? {} : { id: call.id }), type: call.type ?? 'function', function: call.function }));
+      const message: Record<string, unknown> = { role: state.role ?? 'assistant', content: state.content ?? null };
+      if (state.refusal !== undefined) message.refusal = state.refusal;
+      if (toolCalls.length) message.tool_calls = toolCalls;
+      choices.push({ index, message, ...state.fields, ...(state.logprobs ? { logprobs: state.logprobs } : {}) });
+    }
+    return { ...this.fields, object: 'chat.completion', choices };
+  }
 }
 
 // ---------------------------------------------------------------------------

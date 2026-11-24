@@ -22,7 +22,11 @@ import {
  * `responses.create({ stream: true })` resolves to an async iterable immediately;
  * the assistant text and usage arrive later in `response.*` events.
  */
-export function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
+export function wrapResponsesAsyncIterableStream(
+  stream: any,
+  span: Span,
+  captureResponse?: (response: unknown) => void,
+): any {
   const originalAsyncIterator = stream?.[Symbol.asyncIterator]?.bind(stream);
 
   if (!originalAsyncIterator) {
@@ -141,7 +145,13 @@ export function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
               try {
                 const result = await iterator.next();
                 if (result.done) {
-                  finalize(cancellationRequested || abortedBySdk());
+                  const interrupted = cancellationRequested || abortedBySdk();
+                  // F-040: a stream that reached response.completed is captured like a non-streamed response.
+                  if (captureResponse && !interrupted && !finalized && !errorEvent) {
+                    const response = completedStreamResponse(terminalResponse);
+                    if (response) captureResponse(response);
+                  }
+                  finalize(interrupted);
                   return result;
                 }
                 addEvent(result.value);
@@ -179,6 +189,23 @@ export function wrapResponsesAsyncIterableStream(stream: any, span: Span): any {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+/**
+ * The terminal response of a stream that completed, with the `output_text` the SDK adds to
+ * non-streamed responses (the concatenated `output_text` parts of message items).
+ */
+function completedStreamResponse(response: any): Record<string, unknown> | undefined {
+  if (!response || typeof response !== "object" || response.status !== "completed") return undefined;
+  if (typeof response.output_text === "string") return response;
+  if (!Array.isArray(response.output)) return undefined;
+  const text = response.output
+    .filter((item: any) => item?.type === "message" && Array.isArray(item.content))
+    .flatMap((item: any) => item.content)
+    .filter((part: any) => part?.type === "output_text" && typeof part.text === "string")
+    .map((part: any) => part.text)
+    .join("");
+  return { ...response, output_text: text };
 }
 
 /**
