@@ -11,7 +11,7 @@ const output = { id: 'saved', object: 'chat.completion', created: 1, model: 'loc
   choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'Answer' } }] };
 function capture(request: unknown = input, response: unknown = output, supported = true) {
   const span = getProviderTracer('capture-test').startSpan('provider');
-  prepareProviderCapture(span, 'openai.chat.completions.create', request, supported)(response);
+  prepareProviderCapture(span, 'openai.chat.completions.create', request, supported)?.(response);
   span.end();
   return only().attributes[MODEL_CAPTURE_ATTRIBUTE];
 }
@@ -25,7 +25,7 @@ describe('raw provider capture eligibility', () => {
   it('freezes actual request data before the provider can mutate it', () => {
     const mutable = structuredClone(input);
     const span = getProviderTracer('capture-test').startSpan('provider');
-    const finish = prepareProviderCapture(span, 'openai.chat.completions.create', mutable, true);
+    const finish = prepareProviderCapture(span, 'openai.chat.completions.create', mutable, true)!;
     mutable.messages[0].content = 'Changed';
     finish(output); span.end();
     expect(readProviderCapture(only().attributes[MODEL_CAPTURE_ATTRIBUTE]).input).toEqual(input);

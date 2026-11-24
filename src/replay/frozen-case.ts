@@ -52,7 +52,9 @@ export function replayRecordingFromCase(value: unknown): { recording: ReplayReco
         // call (a Google request carries no stream flag), so it must never be served as a replay (F-040).
         if (isStreamingFlag(attributes['neatlogs.llm.is_streaming']) || isStreamingFlag(span.is_streaming)) continue;
         const spanId = z.string().min(1).max(200).parse(span.span_id);
-        entries.push({ spanId, kind: 'model', ...readProviderCapture(attributes[MODEL_CAPTURE_ATTRIBUTE]) });
+        const { stream, ...capture } = readProviderCapture(attributes[MODEL_CAPTURE_ATTRIBUTE]);
+        if (stream) continue;
+        entries.push({ spanId, kind: 'model', ...capture });
       } catch { /* Unsupported model evidence stays live. */ }
       continue;
     }

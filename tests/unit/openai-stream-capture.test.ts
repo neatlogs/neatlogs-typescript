@@ -254,6 +254,34 @@ describe('openai chat streamed capture: review fixes (F-040)', () => {
   });
 });
 
+describe('openai chat streamed capture: review round 2 (F-040)', () => {
+  it('joins a streamed refusal', async () => {
+    const events = [chunk({ index: 0, delta: { role: 'assistant', content: null, refusal: "I can't" }, finish_reason: null }), chunk({ index: 0, delta: { refusal: ' help.' }, finish_reason: 'stop' }), answer[2]];
+    const { output } = readProviderCapture(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true }))) as { output: any };
+    expect(output.choices[0].message).toEqual({ role: 'assistant', content: null, refusal: "I can't help." });
+  });
+
+  it('records nothing when a tool-call delta carries an unknown key', async () => {
+    const events = [chunk({ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'f', arguments: '{}' }, extra_content: { google: {} } }] }, finish_reason: 'tool_calls' }), answer[2]];
+    expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true }))).toBeUndefined();
+  });
+
+  it('records nothing when fewer choices streamed than n requested', async () => {
+    const events = [chunk({ index: 0, delta: { role: 'assistant', content: 'A' }, finish_reason: 'stop' }), answer[2]];
+    expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true, n: 2 }))).toBeUndefined();
+  });
+
+  it('stops reading chunks for capture once the size bound trips', async () => {
+    let reads = 0;
+    const big = chunk({ index: 0, delta: { role: 'assistant', content: 'y'.repeat(1024 * 1024 + 10) }, finish_reason: null });
+    const counted: any = chunk({ index: 0, delta: { content: 'x' }, finish_reason: 'stop' });
+    Object.defineProperty(counted, 'probeField', { enumerable: true, get() { reads++; return 1; } });
+    const fake = { chat: { completions: { create: async () => (async function* () { yield big; yield counted; })() } } };
+    for await (const _c of await (wrapOpenAI(fake as any) as any).chat.completions.create({ model: 'gpt-test', messages, stream: true })) { /* drain */ }
+    expect(reads).toBe(0);
+  });
+});
+
 describe('openai responses streams (F-040 scope)', () => {
   // Not captured in this PR: nothing reads a streamed Responses capture (server grading ignores
   // Responses captures and streamed spans are never replayed), so it would only add span weight.

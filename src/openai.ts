@@ -232,7 +232,7 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
 
     // Streams are captured too (F-040), assembled into one chat.completion when the stream completes.
     // The captured request keeps stream: true, so server replay refuses it; replay below stays non-streaming.
-    const captureResponse = prepareProviderCapture(span, 'openai.chat.completions.create', opts, rest.length === 0);
+    const captureResponse = prepareProviderCapture(span, 'openai.chat.completions.create', opts, rest.length === 0, { stream: isStream });
     let result: any;
     let replayed = false;
     let resolveReplay: ((raw: boolean) => any) | undefined;
@@ -253,9 +253,9 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
     return preserveResponseHelpers(result, span,
       (response: any) => {
         if (isStream) {
-          return wrapAsyncIterableStream(response, span, replayed ? undefined : captureResponse);
+          return wrapAsyncIterableStream(response, span, replayed ? undefined : captureResponse, Math.max(1, Number(opts?.n) || 1));
         }
-        if (!replayed) captureResponse(response);
+        if (!replayed) captureResponse?.(response);
         finalizeChatResponse(replayed ? cachedModelSpan(span) : span, response);
         return response;
       },
@@ -377,7 +377,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
         if (isStream) {
           return wrapResponsesAsyncIterableStream(response, span);
         }
-        if (!replayed) captureResponse(response);
+        if (!replayed) captureResponse?.(response);
         finalizeResponsesResponse(replayed ? cachedModelSpan(span) : span, response);
         return response;
       },
@@ -391,9 +391,8 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
 // Streaming support
 // ---------------------------------------------------------------------------
 
-function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (response: unknown) => void): any {
-  const assembled = captureResponse ? new ChatStreamResponse() : undefined;
-  let ended = false;
+function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (response: unknown) => void, expectedChoices = 1): any {
+  let assembled = captureResponse ? new ChatStreamResponse(expectedChoices) : undefined;
   const accumulator = new ChoiceAccumulator();
   const safeSpan = mediaSafeAccumulatorSpan(span);
   let cancellationRequested = false;
@@ -415,14 +414,13 @@ function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (res
               try {
                 const result = await iterator.next();
                 if (result.done) {
-                  if (ended) return result;
-                  ended = true;
                   // The SDK ends the iterator quietly on an abort; a chunk with
                   // a finish_reason means the reply did complete first.
                   const aborted = stream.controller?.signal?.aborted === true;
                   const interrupted = cancellationRequested || (aborted && !accumulator.hasFinishReason());
                   // An aborted stream is never captured: its trailing chunks (usage) never arrived.
                   if (assembled && !cancellationRequested && !aborted) assembled.capture(captureResponse!);
+                  assembled = undefined; // release the kept content
                   accumulator.finish(safeSpan, interrupted);
                   return result;
                 }
@@ -483,6 +481,8 @@ class ChatStreamResponse {
   private readonly fields: Record<string, unknown> = {};
   private bytes = 0;
   private capturable = true;
+
+  constructor(private readonly expectedChoices = 1) {}
 
   add(chunk: any): void {
     this.guard(() => this.addChunk(chunk));
@@ -548,6 +548,8 @@ class ChatStreamResponse {
 
   private finish(): Record<string, unknown> | undefined {
     if (!this.capturable || this.choices.size === 0) return undefined;
+    // Fewer choices than n requested means some never streamed: not a complete response.
+    if (this.choices.size < this.expectedChoices) return undefined;
     const choices = [];
     for (const [index, state] of [...this.choices.entries()].sort(([a], [b]) => a - b)) {
       if (typeof state.fields.finish_reason !== 'string' || !state.fields.finish_reason) return undefined;

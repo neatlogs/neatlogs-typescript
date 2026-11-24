@@ -120,7 +120,15 @@ describe('google-genai streamed capture: review fixes (F-040)', () => {
       { span_id: span.spanContext().spanId, span_type: 'LLM', semantic: {}, status: 'OK', attributes: span.attributes },
     ] } });
     expect(recording.entries).toHaveLength(0);
-    const session = new ReplaySession(recording, { mode: 'tools_only' });
+    // until_span replays model calls (tools_only never does), so this exercises the real path.
+    await client.models.generateContent(structuredClone({ ...request, contents: 'checkpoint' }));
+    const checkpoint = spans().at(-1)!;
+    const full = replayRecordingFromCase({ source: { traceId: 't' }, context: { spans: [
+      { span_id: span.spanContext().spanId, span_type: 'LLM', semantic: {}, status: 'OK', attributes: span.attributes },
+      { span_id: checkpoint.spanContext().spanId, span_type: 'LLM', semantic: {}, status: 'OK', attributes: checkpoint.attributes },
+    ] } }).recording;
+    expect(full.entries).toHaveLength(1);
+    const session = new ReplaySession(full, { mode: 'until_span', untilSpan: checkpoint.spanContext().spanId });
     const answer = await session.run(async () => (await client.models.generateContent(structuredClone(request))).candidates[0].content.parts[0].text);
     expect(answer).toBe('live');
   });
@@ -128,6 +136,7 @@ describe('google-genai streamed capture: review fixes (F-040)', () => {
   it.each([
     ['attribute as string', { 'neatlogs.llm.is_streaming': 'true' }, {}],
     ['stored column as 1', {}, { is_streaming: 1 }],
+    ['attribute as "1"', { 'neatlogs.llm.is_streaming': '1' }, {}],
   ])('skips a streamed span whose marker is stored as %s', async (_label, extraAttributes, extraSpan) => {
     for await (const _chunk of await (wrap(streamingClient(answerChunks) as any) as any).models.generateContentStream(structuredClone(request))) { /* drain */ }
     const span = only();
@@ -197,5 +206,75 @@ describe('google-genai streamed capture: review fixes (F-040)', () => {
   it('records nothing when two candidates in one chunk claim the same index', async () => {
     const chunks = [{ candidates: [{ content: { parts: [{ text: 'A' }] }, finishReason: 'STOP' }, { content: { parts: [{ text: 'B' }] }, finishReason: 'STOP' }] }];
     expect(await drain(wrapGoogleGenAI, chunks)).toBeUndefined();
+  });
+});
+
+describe('google-genai streamed capture: review round 2 (F-040)', () => {
+  const wrap = wrapGoogleGenAI;
+  const fin = (parts: unknown[], extra: object = {}) => ({ candidates: [{ index: 0, content: { role: 'model', parts }, finishReason: 'STOP', ...extra }] });
+  const mid = (parts: unknown[], extra: object = {}) => ({ candidates: [{ index: 0, content: { role: 'model', parts }, ...extra }] });
+
+  it.each([
+    ['per-chunk logprobs', [mid([{ text: 'A' }], { logprobsResult: { chosenCandidates: [{ token: 'A' }] }, avgLogprobs: -0.1 }), fin([{ text: 'B' }], { logprobsResult: { chosenCandidates: [{ token: 'B' }] }, avgLogprobs: -0.2 })]],
+    ['an unknown candidate field', [fin([{ text: 'A' }], { someNewField: { x: 1 } })]],
+    ['streamed function-call arguments', [mid([{ functionCall: { name: 'f', partialArgs: [{ jsonPath: '$.a', stringValue: 'x' }], willContinue: true } }]), fin([{ functionCall: { partialArgs: [{ jsonPath: '$.a', stringValue: 'y' }], willContinue: false } }])]],
+    ['a merged text part with extra keys', [mid([{ text: 'A' }]), fin([{ text: 'B', partMetadata: { k: 1 } }])]],
+  ])('records nothing for %s', async (_label, chunks) => {
+    expect(await drain(wrap, chunks as any[])).toBeUndefined();
+  });
+
+  it('keeps last-value-safe candidate fields', async () => {
+    const chunks = [mid([{ text: 'A' }], { safetyRatings: [{ category: 'X', probability: 'LOW' }] }), fin([{ text: 'B' }], { safetyRatings: [{ category: 'X', probability: 'NEGLIGIBLE' }], groundingMetadata: { webSearchQueries: ['q'] } })];
+    const { output } = readProviderCapture(await drain(wrap, chunks)) as { output: any };
+    expect(output.candidates[0].safetyRatings[0].probability).toBe('NEGLIGIBLE');
+    expect(output.candidates[0].groundingMetadata).toEqual({ webSearchQueries: ['q'] });
+  });
+
+  it('starts a new part after a thought signature', async () => {
+    const chunks = [mid([{ text: 'Ans', thoughtSignature: 'c2ln' }]), mid([{ text: 'wer' }]), fin([{ text: '' }])];
+    const { output } = readProviderCapture(await drain(wrap, chunks)) as { output: any };
+    expect(output.candidates[0].content.parts).toEqual([{ text: 'Ans', thoughtSignature: 'c2ln' }, { text: 'wer' }]);
+  });
+
+  it('drops an empty trailing text part that follows a signed part', async () => {
+    const chunks = [mid([{ text: 'Answer', thoughtSignature: 'c2ln' }]), fin([{ text: '' }])];
+    const { output } = readProviderCapture(await drain(wrap, chunks)) as { output: any };
+    expect(output.candidates[0].content.parts).toEqual([{ text: 'Answer', thoughtSignature: 'c2ln' }]);
+  });
+
+  it('records nothing when fewer candidates streamed than were requested', async () => {
+    const client = wrap(streamingClient([fin([{ text: 'A' }])]) as any) as any;
+    for await (const _c of await client.models.generateContentStream({ ...structuredClone(request), config: { candidateCount: 2 } })) { /* drain */ }
+    expect(only().attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
+  });
+
+  it('never serves a non-streamed recording to a streamed call', async () => {
+    let liveStreams = 0;
+    const client = wrap({ models: {
+      generateContentStream: async () => { liveStreams++; return (async function* () { yield* answerChunks; })(); },
+      generateContent: async () => ({ candidates: [{ index: 0, content: { role: 'model', parts: [{ text: 'RECORDED' }] }, finishReason: 'STOP' }] }),
+    } } as any) as any;
+    await client.models.generateContent(structuredClone(request));
+    const recorded = spans().at(-1)!;
+    await client.models.generateContent(structuredClone({ ...request, contents: 'checkpoint' }));
+    const checkpoint = spans().at(-1)!;
+    const { recording } = replayRecordingFromCase({ source: { traceId: 't' }, context: { spans: [recorded, checkpoint].map((s) => (
+      { span_id: s.spanContext().spanId, span_type: 'LLM', semantic: {}, status: 'OK', attributes: s.attributes })) } });
+    const session = new ReplaySession(recording, { mode: 'until_span', untilSpan: checkpoint.spanContext().spanId });
+    const text = await session.run(async () => {
+      let t = '';
+      for await (const c of await client.models.generateContentStream(structuredClone(request))) t += c.candidates[0].content.parts[0].text;
+      return t;
+    });
+    expect(text).toBe('The capital of France is Paris.');
+    expect(liveStreams).toBe(1);
+  });
+
+  it('stops reading chunks for capture once the size bound trips', async () => {
+    let reads = 0;
+    const counted: any = mid([{ text: 'x' }]);
+    Object.defineProperty(counted, 'probeField', { enumerable: true, get() { reads++; return 1; } });
+    await drain(wrap, [mid([{ text: 'y'.repeat(1024 * 1024 + 10) }]), counted, fin([{ text: '.' }])]);
+    expect(reads).toBe(0);
   });
 });
