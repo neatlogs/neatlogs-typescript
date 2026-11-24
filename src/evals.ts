@@ -207,7 +207,7 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
       let slot = state.slots[key];
       if (slot?.accepted) continue;
       if (slot?.executing) throw new Error('Task execution may have started without a saved output. Inspect it before starting a new run.');
-      if (slot && !slot.body && !slot.start) throw new Error('Saved output is missing. Inspect the private state file before resuming.');
+      if (slot && !slot.body && !slot.start && !slot.rerun) throw new Error('Saved output is missing. Inspect the private state file before resuming.');
       // A trace that never reaches ingest cannot be uploaded; the case is re-run once under the same server attempt.
       for (;;) {
         if (!slot?.body) {
@@ -270,6 +270,12 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
             if (traced.rerun) throw new Error(`Trace ${traceId} did not reach Neatlogs after the case was re-run. Check the SDK ingest connection; resuming checks this trace again without re-running the task.`);
             // The saved trace was lost. The one re-run is saved before the task runs again, and a fresh start
             // operation makes the server confirm the attempt is still writable instead of replaying the first start.
+            // Without a start operation, the run status confirms it is still open; a closed run keeps the saved trace.
+            if (!traced.start) {
+              const current = (await recoverRunRequest(requestTimeout => runApi.status(runId, false, requestTimeout), runDeadline)).data;
+              if (!current) throw new Error('The run status could not be confirmed before re-running the case.');
+              if (isRunTerminal(current)) { status = current; break casesLoop; }
+            }
             traced.rerun = true;
             delete traced.body;
             traced.key = randomUUID();

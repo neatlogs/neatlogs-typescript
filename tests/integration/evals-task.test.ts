@@ -452,7 +452,8 @@ describe('task evaluation over the public HTTP contract', () => {
     expect(Date.now()).toBeLessThan(Date.parse(deadlineAt));
   });
   // F-043: the first attempt saves a trace id whose spans never reach ingest.
-  async function runWithLostTrace() {
+  // Without Local A/B identity the App is not asked for case-output details, so no start operation is saved.
+  async function runWithLostTrace({ startProtocol = true } = {}) {
     const traces = ingested = new Set<string>();
     let ingestDown = true;
     const client = new Client({ apiKey: 'test-ingest', workflowName: 'eval-test', captureLogs: false,
@@ -468,7 +469,7 @@ describe('task evaluation over the public HTTP contract', () => {
     clients.push(client);
     const task = vi.fn(() => 'answer');
     const local = { experimentId: randomUUID(), roundId: randomUUID(), variant: 'A' as const, attempt: 1 };
-    const options = { grading, dataset: datasetId!, label: 'lost trace', local, traceEvidence: true, statePath: join(directory, 'lost-trace.json'),
+    const options = { grading, dataset: datasetId!, label: 'lost trace', ...(startProtocol ? { local } : {}), traceEvidence: true, statePath: join(directory, 'lost-trace.json'),
       api: { projectId: projectId!, token: 'task-token', baseUrl }, task };
     await expect(client.activate(() => runEval(options))).rejects.toThrow(/Could not export the task trace/);
     const saved = JSON.parse(readFileSync(options.statePath, 'utf8'));
@@ -476,8 +477,9 @@ describe('task evaluation over the public HTTP contract', () => {
     expect(lostTraceId).toMatch(/^[a-f0-9]{32}$/);
     expect(traces.has(lostTraceId)).toBe(false);
     expect(task).toHaveBeenCalledOnce();
-    expect(saved.slots[`${caseId}:1`]).toMatchObject({ executing: false, start: { startedAt: expect.any(String) } });
-    expect(startedCases).toHaveLength(1);
+    if (startProtocol) expect(saved.slots[`${caseId}:1`]).toMatchObject({ executing: false, start: { startedAt: expect.any(String) } });
+    else expect(saved.slots[`${caseId}:1`]).not.toHaveProperty('start');
+    expect(startedCases).toHaveLength(startProtocol ? 1 : 0);
     ingestDown = false;
     // Keep the bounded trace check short in tests while recording the wait the SDK asked for.
     const waits: number[] = [];
@@ -572,6 +574,46 @@ describe('task evaluation over the public HTTP contract', () => {
       const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
       expect(saved.slots[`${caseId}:1`]).toMatchObject({ rerun: true, executing: false });
       expect(saved.slots[`${caseId}:1`]).not.toHaveProperty('body');
+    } finally { lost.restore(); }
+  }, 15_000);
+  it('re-runs a lost trace once without a start operation after confirming the run is open', async () => {
+    const lost = await runWithLostTrace({ startProtocol: false });
+    try {
+      const result = await lost.resume();
+      expect(result.exitCode).toBe(0);
+      expect(lost.task).toHaveBeenCalledTimes(2);
+      expect(startedCases).toEqual([]);
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0]!.traceId).not.toBe(lost.lostTraceId);
+      const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
+      expect(saved.slots[`${caseId}:1`]).toMatchObject({ accepted: true, rerun: true, body: { traceId: uploads[0]!.traceId } });
+    } finally { lost.restore(); }
+  }, 15_000);
+  it('keeps the saved trace and does not re-run without a start operation when the run is cancelled during polling', async () => {
+    const lost = await runWithLostTrace({ startProtocol: false });
+    lost.hooks.onTraceNotReady = () => { runState = 'cancelled'; };
+    try {
+      const result = await lost.resume();
+      expect(result.runState).toBe('cancelled');
+      expect(lost.task).toHaveBeenCalledOnce();
+      expect(uploads).toEqual([]);
+      expect(completionKeys).toEqual([]);
+      const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
+      expect(saved.slots[`${caseId}:1`]).toEqual(lost.saved.slots[`${caseId}:1`]);
+    } finally { lost.restore(); }
+  }, 15_000);
+  it('resumes a saved replacement that stopped before the task ran again', async () => {
+    const lost = await runWithLostTrace({ startProtocol: false });
+    try {
+      // The state a re-run saves before executing: the budget is spent and the lost trace is cleared.
+      const { body: _body, ...pending } = lost.saved.slots[`${caseId}:1`];
+      lost.saved.slots[`${caseId}:1`] = { ...pending, key: randomUUID(), rerun: true };
+      writeFileSync(lost.options.statePath, JSON.stringify(lost.saved));
+      const result = await lost.resume();
+      expect(result.exitCode).toBe(0);
+      expect(lost.task).toHaveBeenCalledTimes(2);
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0]!.traceId).not.toBe(lost.lostTraceId);
     } finally { lost.restore(); }
   }, 15_000);
   it.each([3000, 7000])('never starts a trace retry that cannot finish within a %i ms wait', async waitMillis => {
