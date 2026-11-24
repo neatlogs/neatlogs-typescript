@@ -312,7 +312,9 @@ function tracedGenerateContent(original: (...args: any[]) => any, isStream: bool
 
     setInputAttributes(span, opts);
 
-    const captureResponse = prepareProviderCapture(span, 'google_genai.models.generate_content', opts, !isStream && rest.length === 0);
+    // Streams are captured too (F-040): the chunks are assembled into one response when the stream
+    // completes. Replay below stays non-streaming only, because a saved response cannot be re-streamed.
+    const captureResponse = prepareProviderCapture(span, 'google_genai.models.generate_content', opts, rest.length === 0);
     let replayed = false;
     let result: unknown;
     try {
@@ -329,7 +331,7 @@ function tracedGenerateContent(original: (...args: any[]) => any, isStream: bool
     return Promise.resolve(result).then(
       (response: any) => {
         if (isStream) {
-          return wrapStream(response, span);
+          return wrapStream(response, span, captureResponse);
         }
         if (!replayed) captureResponse(response);
         finalizeResponse(replayed ? cachedModelSpan(span) : span, response);
@@ -447,7 +449,8 @@ function setInputAttributes(span: Span, opts: any): void {
 // Streaming support — @google/genai stream is an async iterable of chunks
 // ---------------------------------------------------------------------------
 
-function wrapStream(stream: any, span: Span): any {
+function wrapStream(stream: any, span: Span, captureResponse?: (response: unknown) => void): any {
+  const assembled = captureResponse ? newStreamResponse() : undefined;
   const accumulated: StreamAccumulator = {
     candidates: new Map(),
     usage: null,
@@ -478,10 +481,16 @@ function wrapStream(stream: any, span: Span): any {
         try {
           const result = await iterator.next();
           if (result.done) {
+            // Only a stream read to its natural end is a complete response; the span must still be open.
+            if (assembled && !cancellationRequested && !accumulated.finalized) {
+              const response = finishStreamResponse(assembled);
+              if (response) captureResponse!(response);
+            }
             finalizeStreamChunks(span, accumulated, cancellationRequested);
             return result;
           }
           addStreamChunk(span, accumulated, result.value);
+          if (assembled) addStreamResponseChunk(assembled, result.value);
           return result;
         } catch (err) {
           failStreamChunks(span, accumulated, err);
@@ -510,6 +519,100 @@ function wrapStream(stream: any, span: Span): any {
   };
 
   return wrapped;
+}
+
+// ---------------------------------------------------------------------------
+// Raw response assembly for provider capture (F-040)
+// ---------------------------------------------------------------------------
+
+/** Raw capture is dropped above this size; the provider capture rejects larger evidence anyway. */
+const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
+
+interface StreamResponseCandidate {
+  index?: number;
+  role?: string;
+  parts: Array<Record<string, unknown>>;
+  fields: Record<string, unknown>;
+}
+
+interface StreamResponse {
+  candidates: Map<number, StreamResponseCandidate>;
+  fields: Record<string, unknown>;
+  bytes: number;
+  capturable: boolean;
+}
+
+function newStreamResponse(): StreamResponse {
+  return { candidates: new Map(), fields: {}, bytes: 0, capturable: true };
+}
+
+/**
+ * Rebuild the response a non-streamed call would have returned: text deltas are joined into one part
+ * per run of answer or thought text, other parts (function calls, inline data) are kept as sent, and
+ * candidate and response metadata take their last streamed value.
+ */
+function addStreamResponseChunk(response: StreamResponse, chunk: any): void {
+  if (!response.capturable) return;
+  const { candidates: _candidates, sdkHttpResponse: _http, ...responseFields } = chunk ?? {};
+  try {
+    // Count only what the capture keeps; transport fields such as sdkHttpResponse are dropped by it.
+    response.bytes += JSON.stringify(_candidates ?? null).length + JSON.stringify(responseFields).length;
+  } catch {
+    response.capturable = false;
+    return;
+  }
+  if (response.bytes > MAX_STREAM_RESPONSE_BYTES) {
+    response.capturable = false;
+    response.candidates.clear();
+    return;
+  }
+  const chunkCandidates = Array.isArray(chunk?.candidates) ? chunk.candidates : [];
+  for (let position = 0; position < chunkCandidates.length; position++) {
+    const { content, index, ...candidateFields } = chunkCandidates[position] ?? {};
+    const key = typeof index === 'number' ? index : position;
+    let candidate = response.candidates.get(key);
+    if (!candidate) {
+      candidate = { parts: [], fields: {} };
+      response.candidates.set(key, candidate);
+    }
+    if (typeof index === 'number') candidate.index = index;
+    if (typeof content?.role === 'string') candidate.role = content.role;
+    Object.assign(candidate.fields, candidateFields);
+    for (const part of Array.isArray(content?.parts) ? content.parts : []) addStreamResponsePart(candidate.parts, part);
+  }
+  Object.assign(response.fields, responseFields);
+}
+
+function addStreamResponsePart(parts: Array<Record<string, unknown>>, part: any): void {
+  if (!part || typeof part !== 'object') return;
+  const last = parts.at(-1);
+  const isText = typeof part.text === 'string';
+  const sameRun = isText && last && typeof last.text === 'string'
+    && Boolean(last.thought) === Boolean(part.thought) && last.thoughtSignature === undefined;
+  if (sameRun) {
+    last.text = `${last.text}${part.text}`;
+    if (part.thoughtSignature !== undefined) last.thoughtSignature = part.thoughtSignature;
+    return;
+  }
+  parts.push({ ...part });
+}
+
+/** The assembled response, or undefined when it cannot be a complete answer. */
+function finishStreamResponse(response: StreamResponse): Record<string, unknown> | undefined {
+  if (!response.capturable || response.candidates.size === 0) return undefined;
+  // A stream that stops without a finish reason was cut short; it is not a complete answer.
+  for (const candidate of response.candidates.values()) {
+    const reason = candidate.fields.finishReason;
+    if (typeof reason !== 'string' || reason.length === 0) return undefined;
+  }
+  const candidates = [...response.candidates.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, candidate]) => ({
+      ...(candidate.index === undefined ? {} : { index: candidate.index }),
+      content: { ...(candidate.role === undefined ? {} : { role: candidate.role }), parts: candidate.parts },
+      ...candidate.fields,
+    }));
+  return { candidates, ...response.fields };
 }
 
 interface CandidateAccumulator {
