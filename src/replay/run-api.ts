@@ -41,6 +41,8 @@ async function responseJson(response: Response, limit = 64 * 1024): Promise<unkn
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } finally { await reader.cancel(); }
 }
+/** Time reserved for each TRACE_NOT_READY retry request. */
+const TRACE_RETRY_REQUEST_MILLIS = 5_000;
 export class LocalRunApi {
   private readonly origin: string;
   private readonly projectId: string;
@@ -154,13 +156,13 @@ export class LocalRunApi {
     const deadline = Date.now() + waitMillis;
     for (let attempt = 0; ; attempt++) {
       try {
-        // A retry is never starved into a client timeout, which would read as an uncertain write.
-        const receipt = outputReceiptSchema.parse(await this.request(`/${id}/outputs`, input, key, Math.min(30_000, Math.max(5_000, deadline - Date.now()))));
+        const receipt = outputReceiptSchema.parse(await this.request(`/${id}/outputs`, input, key, Math.max(1, Math.min(30_000, deadline - Date.now()))));
         if (receipt.runId !== id || receipt.traceId !== input.traceId) throw new LocalRunApiError('The upload receipt belongs to a different run or trace.');
         return receipt;
       } catch (error) {
         const backoff = 1000 * 2 ** Math.min(attempt, 2);
-        if (!(error instanceof LocalRunApiError) || error.status !== 409 || error.code !== 'TRACE_NOT_READY' || deadline - Date.now() < backoff) throw error;
+        // A retry must fit its backoff and a full request before the deadline; a starved request would read as an uncertain write.
+        if (!(error instanceof LocalRunApiError) || error.status !== 409 || error.code !== 'TRACE_NOT_READY' || deadline - Date.now() < backoff + TRACE_RETRY_REQUEST_MILLIS) throw error;
         await new Promise(resolve => setTimeout(resolve, backoff));
       }
     }

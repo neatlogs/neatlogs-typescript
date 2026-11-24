@@ -47,7 +47,7 @@ export interface RunEvalOptions {
   caseIds?: string[];
 }
 export interface EvalResult { runId: string; runState: string; comparison: Awaited<ReturnType<LocalRunApi['comparison']>>; gate: Awaited<ReturnType<LocalRunApi['gate']>> | null; errors: number; exitCode: 0 | 1 | 4 }
-const slotSchema = z.object({ key: z.string().uuid(), executing: z.boolean(), accepted: z.boolean().optional(), start: z.object({ key: z.string().uuid(), startedAt: z.string().datetime() }).strict().optional(), body: z.object({ caseId: z.string().uuid(), trial: z.number().int(), traceId: z.string().regex(/^[a-f0-9]{32}$/).optional(), startedAt: z.string().datetime().optional(), endedAt: z.string().datetime().optional(), output: z.json().optional(), metrics: z.record(z.string(), z.number()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() }).strict().optional(),
+const slotSchema = z.object({ key: z.string().uuid(), executing: z.boolean(), accepted: z.boolean().optional(), rerun: z.boolean().optional(), start: z.object({ key: z.string().uuid(), startedAt: z.string().datetime() }).strict().optional(), body: z.object({ caseId: z.string().uuid(), trial: z.number().int(), traceId: z.string().regex(/^[a-f0-9]{32}$/).optional(), startedAt: z.string().datetime().optional(), endedAt: z.string().datetime().optional(), output: z.json().optional(), metrics: z.record(z.string(), z.number()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() }).strict().optional(),
   rejection: z.object({ key: z.string().uuid(), error: z.object({ code: z.literal('GRADING_EVIDENCE_LIMIT'), message: z.string().max(1000) }).strict() }).strict().optional() }).strict();
 const dispatchSlotSchema = z.object({ batchId: z.string().uuid(), key: z.string().uuid(), accepted: z.boolean() }).strict();
 const stateSchema = z.object({ projectId: z.string().uuid(), request: z.record(z.string(), z.json()), taskDigest: z.string().regex(/^[a-f0-9]{64}$/), registrationKey: z.string().uuid(), runId: z.string().uuid().nullable(), deadlineAt: z.string().datetime().optional(), traceEvidence: z.boolean().optional(), slots: z.record(z.string(), slotSchema),
@@ -209,7 +209,7 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
       if (slot?.executing) throw new Error('Task execution may have started without a saved output. Inspect it before starting a new run.');
       if (slot && !slot.body && !slot.start) throw new Error('Saved output is missing. Inspect the private state file before resuming.');
       // A trace that never reaches ingest cannot be uploaded; the case is re-run once under the same server attempt.
-      for (let rerun = false; ;) {
+      for (;;) {
         if (!slot?.body) {
           if (Date.now() >= runDeadline) {
             status = await runApi.status(runId);
@@ -257,7 +257,7 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
         if (body.traceId && options.traceEvidence && !('output' in body || 'error' in body)) {
           const traceId = body.traceId;
           if (!flushTrace || !await flushTrace()) throw new Error('Could not export the task trace. Resume after checking the SDK connection.');
-          const traced = slot;
+          const traced = slot, runRemaining = runDeadline - Date.now();
           try {
             const uploaded = await recoverRunRequest(() => runApi.upload(runId, { ...body, traceId }, {
               key: traced.key, waitMillis: Math.max(1, Math.min(TRACE_EVIDENCE_WAIT_MILLIS, runDeadline - Date.now())),
@@ -265,11 +265,16 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
             if (uploaded.terminal) { status = uploaded.terminal; break casesLoop; }
           } catch (error) {
             if (!(error instanceof LocalRunApiError) || error.code !== 'TRACE_NOT_READY') throw error;
-            if (rerun) throw new Error(`Trace ${traceId} did not reach Neatlogs after the case was re-run. Check the SDK ingest connection, then resume.`);
-            // The saved trace was lost; restarting the case resumes its server attempt and uploads a new trace.
-            rerun = true;
+            // The run deadline, not the trace check, ended polling: keep the saved upload for reconciliation.
+            if (runRemaining <= TRACE_EVIDENCE_WAIT_MILLIS) { status = await runApi.status(runId); break casesLoop; }
+            if (traced.rerun) throw new Error(`Trace ${traceId} did not reach Neatlogs after the case was re-run. Check the SDK ingest connection; resuming checks this trace again without re-running the task.`);
+            // The saved trace was lost. The one re-run is saved before the task runs again, and a fresh start
+            // operation makes the server confirm the attempt is still writable instead of replaying the first start.
+            traced.rerun = true;
             delete traced.body;
             traced.key = randomUUID();
+            if (traced.start) traced.start = { key: randomUUID(), startedAt: new Date().toISOString() };
+            save(options.statePath, state);
             continue;
           }
         } else {
