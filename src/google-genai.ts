@@ -538,7 +538,7 @@ const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
 /** Candidate fields whose last streamed value is the complete value; any other field is uncapturable. */
 const LAST_VALUE_CANDIDATE_FIELDS = new Set(['finishReason', 'finishMessage', 'safetyRatings', 'groundingMetadata', 'urlContextMetadata', 'tokenCount']);
 /** Top-level response fields whose last streamed value is the complete value; others are uncapturable. */
-const LAST_VALUE_RESPONSE_FIELDS = new Set(['usageMetadata', 'modelVersion', 'responseId', 'createTime', 'promptFeedback']);
+const LAST_VALUE_RESPONSE_FIELDS = new Set(['usageMetadata', 'modelVersion', 'responseId', 'createTime', 'promptFeedback', 'modelStatus']);
 /** Copy what the capture keeps, so a caller mutating its chunk later cannot change the recorded output. */
 function copyKept<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;

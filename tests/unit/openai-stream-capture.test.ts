@@ -284,7 +284,8 @@ describe('openai chat streamed capture: review round 2 (F-040)', () => {
 
 describe('openai chat streamed capture: review round 3 (F-040)', () => {
   it('records nothing when a choice has no index', async () => {
-    const events = [chunk({ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }), { id: 'c1', object: 'chat.completion.chunk', created: 1, model: 'gpt-test', choices: [{ delta: { content: ' there' } }] }, answer[2]];
+    // The index-less chunk arrives before the finish, so only the missing-index guard can reject it.
+    const events = [chunk({ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: null }), { id: 'c1', object: 'chat.completion.chunk', created: 1, model: 'gpt-test', choices: [{ delta: { content: ' there' } }] }, chunk({ index: 0, delta: {}, finish_reason: 'stop' }), answer[2]];
     expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true }))).toBeUndefined();
   });
 

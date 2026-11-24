@@ -319,4 +319,9 @@ describe('google-genai streamed capture: review round 3 (F-040)', () => {
     const { output } = readProviderCapture(await drain(wrap, [{ ...fin([{ text: 'A' }]), usageMetadata: usage, modelVersion: 'v', responseId: 'r', createTime: '2026-11-24T00:00:00Z' }])) as { output: any };
     expect(Object.keys(output).sort()).toEqual(['candidates', 'createTime', 'modelVersion', 'responseId', 'usageMetadata']);
   });
+
+  it('keeps modelStatus (sent by @google/genai 1.52+)', async () => {
+    const { output } = readProviderCapture(await drain(wrap, [{ ...fin([{ text: 'A' }]), modelStatus: { modelStage: 'STABLE' } }])) as { output: any };
+    expect(output.modelStatus).toEqual({ modelStage: 'STABLE' });
+  });
 });
