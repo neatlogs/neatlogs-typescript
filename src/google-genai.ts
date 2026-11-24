@@ -313,7 +313,9 @@ function tracedGenerateContent(original: (...args: any[]) => any, isStream: bool
     setInputAttributes(span, opts);
 
     // Streams are captured too (F-040): the chunks are assembled into one response when the stream
-    // completes. Replay below stays non-streaming only, because a saved response cannot be re-streamed.
+    // completes, as grading evidence. A Google request has no stream marker, so a streamed capture could
+    // match a later non-streamed call: replay/frozen-case.ts skips streamed spans, and replay below stays
+    // non-streaming only.
     const captureResponse = prepareProviderCapture(span, 'google_genai.models.generate_content', opts, rest.length === 0);
     let replayed = false;
     let result: unknown;
@@ -481,16 +483,18 @@ function wrapStream(stream: any, span: Span, captureResponse?: (response: unknow
         try {
           const result = await iterator.next();
           if (result.done) {
-            // Only a stream read to its natural end is a complete response; the span must still be open.
-            if (assembled && !cancellationRequested && !accumulated.finalized) {
-              const response = finishStreamResponse(assembled);
-              if (response) captureResponse!(response);
+            // A stream the caller already returned or that failed is finalized: never a complete answer.
+            if (assembled && !accumulated.finalized) {
+              guardStreamResponse(assembled, () => {
+                const response = finishStreamResponse(assembled);
+                if (response) captureResponse!(response);
+              });
             }
             finalizeStreamChunks(span, accumulated, cancellationRequested);
             return result;
           }
           addStreamChunk(span, accumulated, result.value);
-          if (assembled) addStreamResponseChunk(assembled, result.value);
+          if (assembled) guardStreamResponse(assembled, () => addStreamResponseChunk(assembled, result.value));
           return result;
         } catch (err) {
           failStreamChunks(span, accumulated, err);
@@ -525,7 +529,7 @@ function wrapStream(stream: any, span: Span, captureResponse?: (response: unknow
 // Raw response assembly for provider capture (F-040)
 // ---------------------------------------------------------------------------
 
-/** Raw capture is dropped above this size; the provider capture rejects larger evidence anyway. */
+/** Memory bound for the kept content; the provider capture applies the real 1 MB limit to the result. */
 const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
 
 interface StreamResponseCandidate {
@@ -533,6 +537,7 @@ interface StreamResponseCandidate {
   role?: string;
   parts: Array<Record<string, unknown>>;
   fields: Record<string, unknown>;
+  citations: unknown[];
 }
 
 interface StreamResponse {
@@ -546,41 +551,54 @@ function newStreamResponse(): StreamResponse {
   return { candidates: new Map(), fields: {}, bytes: 0, capturable: true };
 }
 
-/**
- * Rebuild the response a non-streamed call would have returned: text deltas are joined into one part
- * per run of answer or thought text, other parts (function calls, inline data) are kept as sent, and
- * candidate and response metadata take their last streamed value.
- */
-function addStreamResponseChunk(response: StreamResponse, chunk: any): void {
+/** Capture is best effort: any failure drops the capture and never reaches the caller's stream. */
+function guardStreamResponse(response: StreamResponse, step: () => void): void {
   if (!response.capturable) return;
-  const { candidates: _candidates, sdkHttpResponse: _http, ...responseFields } = chunk ?? {};
   try {
-    // Count only what the capture keeps; transport fields such as sdkHttpResponse are dropped by it.
-    response.bytes += JSON.stringify(_candidates ?? null).length + JSON.stringify(responseFields).length;
+    step();
   } catch {
     response.capturable = false;
-    return;
-  }
-  if (response.bytes > MAX_STREAM_RESPONSE_BYTES) {
-    response.capturable = false;
     response.candidates.clear();
-    return;
   }
-  const chunkCandidates = Array.isArray(chunk?.candidates) ? chunk.candidates : [];
-  for (let position = 0; position < chunkCandidates.length; position++) {
-    const { content, index, ...candidateFields } = chunkCandidates[position] ?? {};
-    const key = typeof index === 'number' ? index : position;
-    let candidate = response.candidates.get(key);
-    if (!candidate) {
-      candidate = { parts: [], fields: {} };
-      response.candidates.set(key, candidate);
+}
+
+function keepStreamBytes(response: StreamResponse, value: unknown): void {
+  response.bytes += typeof value === 'string' ? value.length : JSON.stringify(value ?? null).length;
+  if (response.bytes > MAX_STREAM_RESPONSE_BYTES) throw new Error('Streamed response exceeds the capture limit.');
+}
+
+/**
+ * Rebuild the response a non-streamed call would have returned: text deltas are joined into one part
+ * per run of answer or thought text, other parts (function calls, inline data) are kept as sent,
+ * citations from every chunk are kept, and other candidate and response metadata take their last value.
+ * A candidate without an index is candidate 0 (proto3 JSON omits zero values).
+ */
+function addStreamResponseChunk(response: StreamResponse, chunk: any): void {
+  const { candidates: chunkCandidates, sdkHttpResponse: _http, ...responseFields } = chunk ?? {};
+  const seen = new Set<number>();
+  for (const candidate of Array.isArray(chunkCandidates) ? chunkCandidates : []) {
+    const { content, index, citationMetadata, ...candidateFields } = candidate ?? {};
+    const key = typeof index === 'number' ? index : 0;
+    if (seen.has(key)) throw new Error('Two candidates in one chunk share an index.');
+    seen.add(key);
+    let saved = response.candidates.get(key);
+    if (!saved) {
+      saved = { parts: [], fields: {}, citations: [] };
+      response.candidates.set(key, saved);
     }
-    if (typeof index === 'number') candidate.index = index;
-    if (typeof content?.role === 'string') candidate.role = content.role;
-    Object.assign(candidate.fields, candidateFields);
-    for (const part of Array.isArray(content?.parts) ? content.parts : []) addStreamResponsePart(candidate.parts, part);
+    if (typeof index === 'number') saved.index = index;
+    if (typeof content?.role === 'string') saved.role = content.role;
+    for (const [name, value] of Object.entries(candidateFields)) if (value !== null && value !== undefined) saved.fields[name] = value;
+    if (Array.isArray(citationMetadata?.citations)) {
+      keepStreamBytes(response, citationMetadata.citations);
+      saved.citations.push(...citationMetadata.citations);
+    }
+    for (const part of Array.isArray(content?.parts) ? content.parts : []) {
+      keepStreamBytes(response, typeof part?.text === 'string' ? part.text : part);
+      addStreamResponsePart(saved.parts, part);
+    }
   }
-  Object.assign(response.fields, responseFields);
+  for (const [name, value] of Object.entries(responseFields)) if (value !== null && value !== undefined) response.fields[name] = value;
 }
 
 function addStreamResponsePart(parts: Array<Record<string, unknown>>, part: any): void {
@@ -611,6 +629,7 @@ function finishStreamResponse(response: StreamResponse): Record<string, unknown>
       ...(candidate.index === undefined ? {} : { index: candidate.index }),
       content: { ...(candidate.role === undefined ? {} : { role: candidate.role }), parts: candidate.parts },
       ...candidate.fields,
+      ...(candidate.citations.length ? { citationMetadata: { citations: candidate.citations } } : {}),
     }));
   return { candidates, ...response.fields };
 }

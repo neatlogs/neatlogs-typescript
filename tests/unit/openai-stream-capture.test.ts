@@ -5,6 +5,7 @@ import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-tr
 import { wrapOpenAI } from '../../src/openai.js';
 import { _setNeatlogsProvider } from '../../src/core/provider.js';
 import { MODEL_CAPTURE_ATTRIBUTE, readProviderCapture } from '../../src/replay/provider-capture.js';
+import { diag, DiagLogLevel } from '@opentelemetry/api';
 
 // F-040: streamed OpenAI calls (chat completions and Responses with stream: true) must leave the same raw
 // model capture as non-streamed ones, assembled from the stream, so A/B grading with trace evidence can read it.
@@ -121,33 +122,145 @@ const completedResponse = {
   usage: { input_tokens: 7, output_tokens: 2, total_tokens: 9 },
 };
 
-describe('openai responses streamed capture (F-040)', () => {
-  it('records the completed response with its output text', async () => {
-    const events = [
-      { type: 'response.created', sequence_number: 0, response: { ...completedResponse, status: 'in_progress', output: [] } },
-      { type: 'response.output_text.delta', sequence_number: 1, item_id: 'msg_1', output_index: 0, content_index: 0, delta: 'Paris.' },
-      { type: 'response.completed', sequence_number: 2, response: completedResponse },
-    ];
-    const stream = await client(events).responses.create({ model: 'gpt-test', input: 'Capital of France?', stream: true });
-    const capture = readProviderCapture(await captured(stream as any));
-    expect(capture.name).toBe('openai.responses.create');
-    expect(capture.input).toEqual({ model: 'gpt-test', input: 'Capital of France?', stream: true });
-    expect(capture.output).toEqual({ ...completedResponse, output_text: 'Paris.' });
-  });
+const enc = new TextEncoder();
+function slowClient(first: unknown[], rest: unknown[] | 'error') {
+  return wrapOpenAI(new OpenAI({ apiKey: 'fake-local-only', maxRetries: 0, fetch: async (_url: any, init: any) => {
+    const body = new ReadableStream({ async start(c) {
+      for (const e of first) c.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+      await new Promise((r) => setTimeout(r, 50));
+      if (init?.signal?.aborted) { c.error(new DOMException('aborted', 'AbortError')); return; }
+      if (rest === 'error') { c.error(new Error('connection reset')); return; }
+      for (const e of rest) c.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+      c.enqueue(enc.encode('data: [DONE]\n\n')); c.close();
+    } });
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  } }));
+}
 
+describe('openai chat streamed capture: review fixes (F-040)', () => {
   it.each([
-    ['failed', [{ type: 'response.failed', sequence_number: 0, response: { ...completedResponse, status: 'failed' } }]],
-    ['error event', [{ type: 'response.completed', sequence_number: 0, response: completedResponse }, { type: 'error', sequence_number: 1, code: 'server_error', message: 'boom', param: null }]],
-  ])('records nothing when the stream ends %s', async (_label, events) => {
-    const stream = await client(events as unknown[]).responses.create({ model: 'gpt-test', input: 'Capital of France?', stream: true });
-    try { expect(await captured(stream as any)).toBeUndefined(); }
-    catch (error) { if (!String(error).includes('boom')) throw error; expect(exporter.getFinishedSpans()[0]?.attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined(); }
+    ['legacy function_call', { role: 'assistant', content: null, function_call: { name: 'lookup', arguments: '{}' } }, 'function_call'],
+    ['audio', { role: 'assistant', audio: { id: 'a1', transcript: 'Hello', data: 'AAAA' } }, 'stop'],
+    ['annotations', { role: 'assistant', content: 'See [1]', annotations: [{ type: 'url_citation', url_citation: { url: 'https://x', title: 't', start_index: 4, end_index: 7 } }] }, 'stop'],
+  ])('records nothing when a delta carries %s (a field it cannot rebuild)', async (_label, delta, finish) => {
+    const stream = await client([chunk({ index: 0, delta, finish_reason: finish })]).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    expect(await captured(stream)).toBeUndefined();
   });
 
-  it('records nothing when the response ends incomplete', async () => {
+  it('records nothing for a non-function tool call even in a function-shaped delta', async () => {
+    const events = [chunk({ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'c', type: 'custom', function: { name: 'grep', arguments: 'x' } }] }, finish_reason: 'tool_calls' })];
+    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    expect(await captured(stream)).toBeUndefined();
+  });
+
+  it('records nothing when the caller returns early and then calls next() again', async () => {
+    const warnings: string[] = [];
+    diag.setLogger({ error: (m: string) => warnings.push(m), warn: (m: string) => warnings.push(m), info() {}, debug() {}, verbose() {} }, DiagLogLevel.WARN);
+    try {
+      // A compatible client whose stream has no abort controller, so only the cancellation guard applies.
+      const fake = { chat: { completions: { create: async () => (async function* () { yield answer[1]; yield answer[2]; })() } } };
+      const stream: any = await (wrapOpenAI(fake as any) as any).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+      const it = stream[Symbol.asyncIterator]();
+      await it.next();
+      await it.return();
+      while (!(await it.next()).done) { /* drain the rest */ }
+      await new Promise((r) => setTimeout(r, 20));
+      expect(exporter.getFinishedSpans().at(-1)?.attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
+      expect(warnings.filter((m) => m.includes('ended Span'))).toEqual([]);
+    } finally { diag.disable(); }
+  });
+
+  it('records nothing when a streamed tool call never gets a name', async () => {
+    const events = [chunk({ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'a', type: 'function', function: { arguments: '{}' } }] }, finish_reason: 'tool_calls' })];
+    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    expect(await captured(stream)).toBeUndefined();
+  });
+
+  it('keeps a tool name that a compatible server repeats on every delta', async () => {
     const events = [
-      { type: 'response.output_text.delta', sequence_number: 0, item_id: 'msg_1', output_index: 0, content_index: 0, delta: 'Par' },
-      { type: 'response.incomplete', sequence_number: 1, response: { ...completedResponse, status: 'incomplete' } },
+      chunk({ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'lookup', arguments: '{"city":' } }] }, finish_reason: null }),
+      chunk({ index: 0, delta: { tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'lookup', arguments: '"Paris"}' } }] }, finish_reason: 'tool_calls' }),
+    ];
+    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    const { output } = readProviderCapture(await captured(stream)) as { output: any };
+    expect(output.choices[0].message.tool_calls[0].function).toEqual({ name: 'lookup', arguments: '{"city":"Paris"}' });
+  });
+
+  it('records nothing when the caller aborts, even after the finish reason', async () => {
+    const stream: any = await slowClient([answer[1]], [answer[2]]).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    try { for await (const c of stream) if (c.choices?.[0]?.finish_reason) stream.controller.abort(); } catch { /* abort */ }
+    await new Promise((r) => setTimeout(r, 80));
+    expect(exporter.getFinishedSpans().at(-1)?.attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
+  });
+
+  it('records nothing when the stream fails after its last chunk', async () => {
+    const stream: any = await slowClient(answer, 'error').chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    await expect((async () => { for await (const _c of stream) { /* drain */ } })()).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(exporter.getFinishedSpans().at(-1)?.attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
+  });
+
+  it('rebuilds interleaved choices (n=2) and parallel tool calls', async () => {
+    const events = [
+      chunk({ index: 1, delta: { role: 'assistant', content: 'B1' }, finish_reason: null }),
+      chunk({ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'f', arguments: '' } }] }, finish_reason: null }),
+      chunk({ index: 0, delta: { tool_calls: [{ index: 1, id: 'b', type: 'function', function: { name: 'g', arguments: '{"y"' } }] }, finish_reason: null }),
+      chunk({ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"x":1}' } }] }, finish_reason: null }),
+      chunk({ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: ':2}' } }] }, finish_reason: 'tool_calls' }),
+      chunk({ index: 1, delta: { content: 'B2' }, finish_reason: 'stop' }),
+    ];
+    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true, n: 2 });
+    const { output } = readProviderCapture(await captured(stream)) as { output: any };
+    expect(output.choices.map((c: any) => [c.index, c.finish_reason, c.message.content, (c.message.tool_calls ?? []).map((t: any) => `${t.id}:${t.function.name}:${t.function.arguments}`)])).toEqual([
+      [0, 'tool_calls', null, ['a:f:{"x":1}', 'b:g:{"y":2}']],
+      [1, 'stop', 'B1B2', []],
+    ]);
+  });
+
+  it('captures a long answer made of many one-token chunks', async () => {
+    const events: any[] = [chunk({ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }, { obfuscation: 'Ab3', usage: null })];
+    for (let i = 0; i < 8000; i++) events.push(chunk({ index: 0, delta: { content: ' word' }, logprobs: null, finish_reason: null }, { obfuscation: 'xY9z', usage: null, system_fingerprint: 'fp_7f6be3efb0', service_tier: 'default' }));
+    events.push(chunk({ index: 0, delta: {}, finish_reason: 'stop' }));
+    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    const { output } = readProviderCapture(await captured(stream)) as { output: any };
+    expect(output.choices[0].message.content).toHaveLength(8000 * 5);
+  });
+
+  it('never lets a capture failure reach the caller, and passes chunks through unchanged', async () => {
+    const evil: any = chunk({ index: 0, delta: { content: 'Paris.' }, finish_reason: 'stop' });
+    Object.defineProperty(evil, 'lazyField', { enumerable: true, get() { throw new Error('getter boom'); } });
+    const first = chunk({ index: 0, delta: { role: 'assistant', content: 'The capital is ' }, finish_reason: null });
+    const fake = { chat: { completions: { create: async () => (async function* () { yield first; yield evil; })() } } };
+    const stream = await (wrapOpenAI(fake as any) as any).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    const seen: unknown[] = [];
+    for await (const c of stream) seen.push(c);
+    expect(seen).toEqual([first, evil].map((c) => expect.objectContaining({ id: c.id })));
+    expect(seen[0]).toBe(first);
+    expect(seen[1]).toBe(evil);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(exporter.getFinishedSpans().at(-1)?.attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
+  });
+
+  it('does not touch the ended span when next() is called again after the end', async () => {
+    const warnings: string[] = [];
+    diag.setLogger({ error: (m: string) => warnings.push(m), warn: (m: string) => warnings.push(m), info() {}, debug() {}, verbose() {} }, DiagLogLevel.WARN);
+    try {
+      const stream: any = await client(answer).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+      const it = stream[Symbol.asyncIterator]();
+      while (!(await it.next()).done) { /* drain */ }
+      expect(await it.next()).toEqual({ done: true, value: undefined });
+      expect(warnings.filter((m) => m.includes('ended Span'))).toEqual([]);
+    } finally { diag.disable(); }
+  });
+});
+
+describe('openai responses streams (F-040 scope)', () => {
+  // Not captured in this PR: nothing reads a streamed Responses capture (server grading ignores
+  // Responses captures and streamed spans are never replayed), so it would only add span weight.
+  it('records no capture for a streamed response', async () => {
+    const events = [
+      { type: 'response.output_text.delta', sequence_number: 0, item_id: 'msg_1', output_index: 0, content_index: 0, delta: 'Paris.' },
+      { type: 'response.completed', sequence_number: 1, response: completedResponse },
     ];
     const stream = await client(events).responses.create({ model: 'gpt-test', input: 'Capital of France?', stream: true });
     expect(await captured(stream as any)).toBeUndefined();

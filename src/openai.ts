@@ -354,8 +354,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
     span.setAttribute("input.value", safeStringify(capturedInput ?? ""));
     setInvocationParams(span, opts);
 
-    // Streams are captured from their response.completed event (F-040); replay stays non-streaming.
-    const captureResponse = prepareProviderCapture(span, 'openai.responses.create', opts, rest.length === 0);
+    const captureResponse = prepareProviderCapture(span, 'openai.responses.create', opts, !isStream && rest.length === 0);
     let result: any;
     let replayed = false;
     let resolveReplay: ((raw: boolean) => any) | undefined;
@@ -376,7 +375,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
     return preserveResponseHelpers(result, span,
       (response: any) => {
         if (isStream) {
-          return wrapResponsesAsyncIterableStream(response, span, replayed ? undefined : captureResponse);
+          return wrapResponsesAsyncIterableStream(response, span);
         }
         if (!replayed) captureResponse(response);
         finalizeResponsesResponse(replayed ? cachedModelSpan(span) : span, response);
@@ -394,6 +393,7 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
 
 function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (response: unknown) => void): any {
   const assembled = captureResponse ? new ChatStreamResponse() : undefined;
+  let ended = false;
   const accumulator = new ChoiceAccumulator();
   const safeSpan = mediaSafeAccumulatorSpan(span);
   let cancellationRequested = false;
@@ -415,15 +415,14 @@ function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (res
               try {
                 const result = await iterator.next();
                 if (result.done) {
+                  if (ended) return result;
+                  ended = true;
                   // The SDK ends the iterator quietly on an abort; a chunk with
                   // a finish_reason means the reply did complete first.
-                  const interrupted = cancellationRequested ||
-                    (stream.controller?.signal?.aborted === true &&
-                      !accumulator.hasFinishReason());
-                  if (assembled && !interrupted) {
-                    const response = assembled.finish();
-                    if (response) captureResponse!(response);
-                  }
+                  const aborted = stream.controller?.signal?.aborted === true;
+                  const interrupted = cancellationRequested || (aborted && !accumulator.hasFinishReason());
+                  // An aborted stream is never captured: its trailing chunks (usage) never arrived.
+                  if (assembled && !cancellationRequested && !aborted) assembled.capture(captureResponse!);
                   accumulator.finish(safeSpan, interrupted);
                   return result;
                 }
@@ -464,13 +463,17 @@ function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (res
   });
 }
 
-/** Raw capture is dropped above this size; the provider capture rejects larger evidence anyway. */
+/** Memory bound for the kept content; the provider capture applies the real 1 MB limit to the result. */
 const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
+/** Delta fields the chat rebuild understands; any other non-null field makes the stream uncapturable. */
+const REBUILT_DELTA_FIELDS = new Set(['role', 'content', 'refusal', 'tool_calls']);
 
 /**
  * Rebuild the chat.completion a non-streamed call returns from its chunks (F-040): content and refusal
- * deltas are joined, tool-call deltas are merged by index, and response metadata takes its last value.
- * Nothing is returned unless every choice finished and the content stayed under the capture limit.
+ * deltas are joined, logprobs appended, function tool-call deltas merged by index, and response metadata
+ * takes its last non-null value; per-chunk stream padding is dropped. A delta this cannot rebuild exactly
+ * (legacy function_call, audio, annotations, non-function tool calls…) leaves the stream uncaptured.
+ * Capture is best effort: any failure drops it and never reaches the caller's stream.
  */
 class ChatStreamResponse {
   private readonly choices = new Map<number, {
@@ -482,24 +485,40 @@ class ChatStreamResponse {
   private capturable = true;
 
   add(chunk: any): void {
+    this.guard(() => this.addChunk(chunk));
+  }
+
+  /** Capture the rebuilt response unless it is incomplete or capture failed. */
+  capture(captureResponse: (response: unknown) => void): void {
+    this.guard(() => {
+      const response = this.finish();
+      if (response) captureResponse(response);
+    });
+  }
+
+  private guard(step: () => void): void {
     if (!this.capturable) return;
-    // `obfuscation` is per-chunk stream padding; a non-streamed response has no such field.
-    const { choices, object: _object, obfuscation: _obfuscation, ...fields } = chunk ?? {};
     try {
-      this.bytes += JSON.stringify(choices ?? null).length + JSON.stringify(fields).length;
+      step();
     } catch {
       this.capturable = false;
-      return;
-    }
-    if (this.bytes > MAX_STREAM_RESPONSE_BYTES) {
-      this.capturable = false;
       this.choices.clear();
-      return;
     }
+  }
+
+  private keep(value: string): void {
+    this.bytes += value.length;
+    if (this.bytes > MAX_STREAM_RESPONSE_BYTES) throw new Error('Streamed response exceeds the capture limit.');
+  }
+
+  private addChunk(chunk: any): void {
+    const { choices, object: _object, obfuscation: _obfuscation, ...fields } = chunk ?? {};
     for (const [key, value] of Object.entries(fields)) if (value !== null && value !== undefined) this.fields[key] = value;
     for (const choice of Array.isArray(choices) ? choices : []) {
       const { index, delta, logprobs, ...choiceFields } = choice ?? {};
-      if (typeof index !== 'number') { this.capturable = false; return; }
+      if (typeof index !== 'number') throw new Error('Streamed choice has no index.');
+      for (const [key, value] of Object.entries(delta ?? {}))
+        if (value !== null && value !== undefined && !REBUILT_DELTA_FIELDS.has(key)) throw new Error(`Cannot rebuild delta field ${key}.`);
       let state = this.choices.get(index);
       if (!state) { state = { toolCalls: new Map(), fields: {} }; this.choices.set(index, state); }
       for (const [key, value] of Object.entries(choiceFields)) if (value !== null && value !== undefined) state.fields[key] = value;
@@ -507,30 +526,33 @@ class ChatStreamResponse {
         // Each chunk carries the logprobs of its own tokens; the full response lists them all.
         const saved = (state.logprobs ??= { content: null, refusal: null });
         for (const key of ['content', 'refusal'] as const)
-          if (Array.isArray(logprobs[key])) saved[key] = [...(saved[key] ?? []), ...logprobs[key]];
+          if (Array.isArray(logprobs[key])) { this.keep(JSON.stringify(logprobs[key])); (saved[key] ??= []).push(...logprobs[key]); }
       }
       if (typeof delta?.role === 'string') state.role = delta.role;
-      if (typeof delta?.content === 'string') state.content = (state.content ?? '') + delta.content;
-      if (typeof delta?.refusal === 'string') state.refusal = (state.refusal ?? '') + delta.refusal;
+      if (typeof delta?.content === 'string') { this.keep(delta.content); state.content = (state.content ?? '') + delta.content; }
+      if (typeof delta?.refusal === 'string') { this.keep(delta.refusal); state.refusal = (state.refusal ?? '') + delta.refusal; }
       for (const call of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {
-        // Only function calls are rebuilt; any other tool-call shape is left uncaptured rather than guessed.
-        if (typeof call?.index !== 'number' || (call.type !== undefined && call.type !== 'function')
-          || (call.function === undefined && !state.toolCalls.has(call.index))) { this.capturable = false; return; }
+        if (typeof call?.index !== 'number' || (call.type !== undefined && call.type !== 'function'))
+          throw new Error('Only function tool calls can be rebuilt.');
+        for (const key of Object.keys(call)) if (!['index', 'id', 'type', 'function'].includes(key) && call[key] != null) throw new Error(`Cannot rebuild tool-call field ${key}.`);
         const saved = state.toolCalls.get(call.index) ?? { function: { name: '', arguments: '' } };
         if (typeof call.id === 'string') saved.id = call.id;
         if (typeof call.type === 'string') saved.type = call.type;
-        if (typeof call.function?.name === 'string') saved.function.name += call.function.name;
-        if (typeof call.function?.arguments === 'string') saved.function.arguments += call.function.arguments;
+        // The name is sent whole (some compatible servers repeat it on every delta); arguments stream in pieces.
+        if (typeof call.function?.name === 'string' && call.function.name) saved.function.name = call.function.name;
+        if (typeof call.function?.arguments === 'string') { this.keep(call.function.arguments); saved.function.arguments += call.function.arguments; }
         state.toolCalls.set(call.index, saved);
       }
     }
   }
 
-  finish(): Record<string, unknown> | undefined {
+  private finish(): Record<string, unknown> | undefined {
     if (!this.capturable || this.choices.size === 0) return undefined;
     const choices = [];
     for (const [index, state] of [...this.choices.entries()].sort(([a], [b]) => a - b)) {
       if (typeof state.fields.finish_reason !== 'string' || !state.fields.finish_reason) return undefined;
+      // A tool call whose name never arrived is not a complete call.
+      if ([...state.toolCalls.values()].some((call) => !call.function.name)) return undefined;
       const toolCalls = [...state.toolCalls.entries()].sort(([a], [b]) => a - b)
         .map(([, call]) => ({ ...(call.id === undefined ? {} : { id: call.id }), type: call.type ?? 'function', function: call.function }));
       const message: Record<string, unknown> = { role: state.role ?? 'assistant', content: state.content ?? null };
