@@ -154,13 +154,14 @@ export class LocalRunApi {
     const deadline = Date.now() + waitMillis;
     for (let attempt = 0; ; attempt++) {
       try {
-        const receipt = outputReceiptSchema.parse(await this.request(`/${id}/outputs`, input, key, Math.max(1, Math.min(30_000, deadline - Date.now()))));
+        // A retry is never starved into a client timeout, which would read as an uncertain write.
+        const receipt = outputReceiptSchema.parse(await this.request(`/${id}/outputs`, input, key, Math.min(30_000, Math.max(5_000, deadline - Date.now()))));
         if (receipt.runId !== id || receipt.traceId !== input.traceId) throw new LocalRunApiError('The upload receipt belongs to a different run or trace.');
         return receipt;
       } catch (error) {
-        const remaining = deadline - Date.now();
-        if (!(error instanceof LocalRunApiError) || error.status !== 409 || error.code !== 'TRACE_NOT_READY' || remaining <= 0) throw error;
-        await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 1000 * 2 ** Math.min(attempt, 2))));
+        const backoff = 1000 * 2 ** Math.min(attempt, 2);
+        if (!(error instanceof LocalRunApiError) || error.status !== 409 || error.code !== 'TRACE_NOT_READY' || deadline - Date.now() < backoff) throw error;
+        await new Promise(resolve => setTimeout(resolve, backoff));
       }
     }
   }
