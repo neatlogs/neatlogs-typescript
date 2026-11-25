@@ -253,7 +253,8 @@ function tracedChatCompletionsCreate(original: (...args: any[]) => any) {
     return preserveResponseHelpers(result, span,
       (response: any) => {
         if (isStream) {
-          return wrapAsyncIterableStream(response, span, replayed ? undefined : captureResponse, Math.max(1, Number(opts?.n) || 1));
+          // The server reads exactly one choice, so an n > 1 stream is never captured.
+          return wrapAsyncIterableStream(response, span, replayed || (Number(opts?.n) || 1) > 1 ? undefined : captureResponse);
         }
         if (!replayed) captureResponse?.(response);
         finalizeChatResponse(replayed ? cachedModelSpan(span) : span, response);
@@ -391,8 +392,8 @@ function tracedResponsesCreate(original: (...args: any[]) => any) {
 // Streaming support
 // ---------------------------------------------------------------------------
 
-function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (response: unknown) => void, expectedChoices = 1): any {
-  let assembled = captureResponse ? new ChatStreamResponse(expectedChoices) : undefined;
+function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (response: unknown) => void): any {
+  let assembled = captureResponse ? new ChatStreamResponse() : undefined;
   const accumulator = new ChoiceAccumulator();
   const safeSpan = mediaSafeAccumulatorSpan(span);
   let cancellationRequested = false;
@@ -464,6 +465,11 @@ function wrapAsyncIterableStream(stream: any, span: Span, captureResponse?: (res
   });
 }
 
+/** Kept stream data is copied so later changes to a chunk (by the caller) never reach the capture. */
+function copyKept<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 /** Memory bound for the kept content; the provider capture applies the real 1 MB limit to the result. */
 const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
 /** Delta fields the chat rebuild understands; any other non-null field makes the stream uncapturable. */
@@ -484,8 +490,6 @@ class ChatStreamResponse {
   private readonly fields: Record<string, unknown> = {};
   private bytes = 0;
   private capturable = true;
-
-  constructor(private readonly expectedChoices = 1) {}
 
   add(chunk: any): void {
     this.guard(() => this.addChunk(chunk));
@@ -516,7 +520,7 @@ class ChatStreamResponse {
 
   private addChunk(chunk: any): void {
     const { choices, object: _object, obfuscation: _obfuscation, ...fields } = chunk ?? {};
-    for (const [key, value] of Object.entries(fields)) if (value !== null && value !== undefined) this.fields[key] = value;
+    for (const [key, value] of Object.entries(fields)) if (value !== null && value !== undefined) this.fields[key] = copyKept(value);
     for (const choice of Array.isArray(choices) ? choices : []) {
       const { index, delta, logprobs, ...choiceFields } = choice ?? {};
       if (typeof index !== 'number') throw new Error('Streamed choice has no index.');
@@ -526,12 +530,12 @@ class ChatStreamResponse {
       if (!state) { state = { toolCalls: new Map(), fields: {} }; this.choices.set(index, state); }
       const hasContent = Object.values(delta ?? {}).some((value) => value !== null && value !== undefined && value !== '');
       if (typeof state.fields.finish_reason === 'string' && hasContent) throw new Error('Content arrived after the choice finished.');
-      for (const [key, value] of Object.entries(choiceFields)) if (value !== null && value !== undefined) state.fields[key] = value;
+      for (const [key, value] of Object.entries(choiceFields)) if (value !== null && value !== undefined) state.fields[key] = copyKept(value);
       if (logprobs && typeof logprobs === 'object') {
         // Each chunk carries the logprobs of its own tokens; the full response lists them all.
         const saved = (state.logprobs ??= { content: null, refusal: null });
         for (const key of ['content', 'refusal'] as const)
-          if (Array.isArray(logprobs[key])) { this.keep(JSON.stringify(logprobs[key])); (saved[key] ??= []).push(...logprobs[key]); }
+          if (Array.isArray(logprobs[key])) { const kept = JSON.stringify(logprobs[key]); this.keep(kept); (saved[key] ??= []).push(...JSON.parse(kept)); }
       }
       if (typeof delta?.role === 'string') state.role = delta.role;
       if (typeof delta?.content === 'string') { this.keep(delta.content); state.content = (state.content ?? '') + delta.content; }
@@ -552,9 +556,8 @@ class ChatStreamResponse {
   }
 
   private finish(): Record<string, unknown> | undefined {
-    if (!this.capturable || this.choices.size === 0) return undefined;
-    // Fewer choices than n requested means some never streamed: not a complete response.
-    if (this.choices.size < this.expectedChoices) return undefined;
+    // The server reads exactly one choice; any other count is not a readable response.
+    if (!this.capturable || this.choices.size !== 1) return undefined;
     const choices = [];
     for (const [index, state] of [...this.choices.entries()].sort(([a], [b]) => a - b)) {
       if (typeof state.fields.finish_reason !== 'string' || !state.fields.finish_reason) return undefined;

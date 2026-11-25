@@ -149,11 +149,12 @@ describe('google-genai streamed capture: review fixes (F-040)', () => {
 
   it('treats a candidate without an index as candidate 0 (proto3 omits zero)', async () => {
     const chunks = [
-      { candidates: [{ index: 1, content: { parts: [{ text: 'B-' }] } }, { content: { parts: [{ text: 'A-' }] } }] },
-      { candidates: [{ content: { parts: [{ text: 'A.' }] }, finishReason: 'STOP' }, { index: 1, content: { parts: [{ text: 'B.' }] }, finishReason: 'STOP' }] },
+      { candidates: [{ index: 0, content: { parts: [{ text: 'A-' }] } }] },
+      { candidates: [{ content: { parts: [{ text: 'A.' }] }, finishReason: 'STOP' }] },
     ];
+    // Were the index-less candidate kept apart, there would be two candidates and nothing would be recorded.
     const { output } = readProviderCapture(await drain(wrap, chunks)) as { output: any };
-    expect(output.candidates.map((c: any) => c.content.parts[0].text)).toEqual(['A-A.', 'B-B.']);
+    expect(output.candidates.map((c: any) => c.content.parts[0].text)).toEqual(['A-A.']);
   });
 
   it('keeps citations from every chunk', async () => {
@@ -245,10 +246,20 @@ describe('google-genai streamed capture: review round 2 (F-040)', () => {
     expect(output.candidates[0].content.parts).toEqual([{ text: 'Answer', thoughtSignature: 'c2ln' }]);
   });
 
-  it('records nothing when fewer candidates streamed than were requested', async () => {
-    const client = wrap(streamingClient([fin([{ text: 'A' }])]) as any) as any;
+  it('records nothing for candidateCount > 1: the server reads exactly one candidate', async () => {
+    const both = { candidates: [
+      { index: 0, content: { role: 'model', parts: [{ text: 'A' }] }, finishReason: 'STOP' },
+      { index: 1, content: { role: 'model', parts: [{ text: 'B' }] }, finishReason: 'STOP' },
+    ] };
+    const client = wrap(streamingClient([both]) as any) as any;
     for await (const _c of await client.models.generateContentStream({ ...structuredClone(request), config: { candidateCount: 2 } })) { /* drain */ }
     expect(only().attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
+  });
+
+  it('records candidateCount: 1 like an unset count', async () => {
+    const client = wrap(streamingClient([fin([{ text: 'A' }])]) as any) as any;
+    for await (const _c of await client.models.generateContentStream({ ...structuredClone(request), config: { candidateCount: 1 } })) { /* drain */ }
+    expect(only().attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeDefined();
   });
 
   it('never serves a non-streamed recording to a streamed call', async () => {

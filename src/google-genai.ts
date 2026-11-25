@@ -333,7 +333,8 @@ function tracedGenerateContent(original: (...args: any[]) => any, isStream: bool
     return Promise.resolve(result).then(
       (response: any) => {
         if (isStream) {
-          return wrapStream(response, span, captureResponse, Math.max(1, Number(opts?.config?.candidateCount) || 1));
+          // The server reads exactly one candidate, so a multi-candidate stream is never captured.
+          return wrapStream(response, span, (Number(opts?.config?.candidateCount) || 1) > 1 ? undefined : captureResponse);
         }
         if (!replayed) captureResponse?.(response);
         finalizeResponse(replayed ? cachedModelSpan(span) : span, response);
@@ -451,7 +452,7 @@ function setInputAttributes(span: Span, opts: any): void {
 // Streaming support — @google/genai stream is an async iterable of chunks
 // ---------------------------------------------------------------------------
 
-function wrapStream(stream: any, span: Span, captureResponse?: (response: unknown) => void, expectedCandidates = 1): any {
+function wrapStream(stream: any, span: Span, captureResponse?: (response: unknown) => void): any {
   let assembled = captureResponse ? newStreamResponse() : undefined;
   const accumulated: StreamAccumulator = {
     candidates: new Map(),
@@ -487,7 +488,7 @@ function wrapStream(stream: any, span: Span, captureResponse?: (response: unknow
             if (assembled) {
               const kept = assembled;
               guardStreamResponse(kept, () => {
-                const response = finishStreamResponse(kept, expectedCandidates);
+                const response = finishStreamResponse(kept);
                 if (response) captureResponse!(response);
               });
               assembled = undefined; // release the kept content
@@ -651,10 +652,9 @@ function addStreamResponsePart(parts: Array<Record<string, unknown>>, part: any)
 }
 
 /** The assembled response, or undefined when it cannot be a complete answer. */
-function finishStreamResponse(response: StreamResponse, expectedCandidates = 1): Record<string, unknown> | undefined {
-  if (!response.capturable || response.candidates.size === 0) return undefined;
-  // Fewer candidates than requested means some never streamed: not a complete response.
-  if (response.candidates.size < expectedCandidates) return undefined;
+function finishStreamResponse(response: StreamResponse): Record<string, unknown> | undefined {
+  // The server reads exactly one candidate; any other count is not a readable response.
+  if (!response.capturable || response.candidates.size !== 1) return undefined;
   // A stream that stops without a finish reason was cut short; it is not a complete answer.
   for (const candidate of response.candidates.values()) {
     const reason = candidate.fields.finishReason;

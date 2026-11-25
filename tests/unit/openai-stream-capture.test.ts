@@ -200,28 +200,65 @@ describe('openai chat streamed capture: review fixes (F-040)', () => {
     expect(exporter.getFinishedSpans().at(-1)?.attributes[MODEL_CAPTURE_ATTRIBUTE]).toBeUndefined();
   });
 
-  it('rebuilds interleaved choices (n=2) and parallel tool calls', async () => {
+  it('records nothing for n > 1: the server reads exactly one choice', async () => {
     const events = [
-      chunk({ index: 1, delta: { role: 'assistant', content: 'B1' }, finish_reason: null }),
+      chunk({ index: 1, delta: { role: 'assistant', content: 'B' }, finish_reason: 'stop' }),
+      chunk({ index: 0, delta: { role: 'assistant', content: 'A' }, finish_reason: 'stop' }),
+      answer[2],
+    ];
+    expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true, n: 2 }))).toBeUndefined();
+  });
+
+  it('records n: 1 like an unset n', async () => {
+    const { output } = readProviderCapture(await captured(await client(answer).chat.completions.create({ model: 'gpt-test', messages, stream: true, n: 1 }))) as { output: any };
+    expect(output.choices[0].message.content).toBe('The capital is Paris.');
+  });
+
+  it('rebuilds parallel tool calls', async () => {
+    const events = [
       chunk({ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'f', arguments: '' } }] }, finish_reason: null }),
       chunk({ index: 0, delta: { tool_calls: [{ index: 1, id: 'b', type: 'function', function: { name: 'g', arguments: '{"y"' } }] }, finish_reason: null }),
       chunk({ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"x":1}' } }] }, finish_reason: null }),
       chunk({ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: ':2}' } }] }, finish_reason: 'tool_calls' }),
-      chunk({ index: 1, delta: { content: 'B2' }, finish_reason: 'stop' }),
     ];
-    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true, n: 2 });
-    const { output } = readProviderCapture(await captured(stream)) as { output: any };
+    const { output } = readProviderCapture(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true }))) as { output: any };
     expect(output.choices.map((c: any) => [c.index, c.finish_reason, c.message.content, (c.message.tool_calls ?? []).map((t: any) => `${t.id}:${t.function.name}:${t.function.arguments}`)])).toEqual([
       [0, 'tool_calls', null, ['a:f:{"x":1}', 'b:g:{"y":2}']],
-      [1, 'stop', 'B1B2', []],
     ]);
   });
 
+  it('keeps its own copy of chunk data: the caller changing a chunk does not change the capture', async () => {
+    const lp = (token: string) => ({ token, logprob: -0.1, bytes: null, top_logprobs: [] });
+    const filter = () => ({ hate: { filtered: false, severity: 'safe' } });
+    const events = [
+      chunk({ index: 0, delta: { role: 'assistant', content: 'Par' }, logprobs: { content: [lp('Par')], refusal: null }, finish_reason: null, content_filter_results: filter() }),
+      chunk({ index: 0, delta: { content: 'is.' }, logprobs: { content: [lp('is.')], refusal: null }, finish_reason: 'stop', content_filter_results: filter() }),
+      { ...answer[2], usage: { ...usage, prompt_tokens_details: { cached_tokens: 0 } } },
+    ];
+    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true, logprobs: true });
+    for await (const event of stream as AsyncIterable<any>) {
+      for (const choice of event.choices) {
+        for (const entry of choice.logprobs?.content ?? []) entry.token = 'CHANGED';
+        if (choice.content_filter_results) choice.content_filter_results.hate.filtered = true;
+      }
+      if (event.usage) event.usage.prompt_tokens_details.cached_tokens = 999;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    const { output } = readProviderCapture(exporter.getFinishedSpans()[0].attributes[MODEL_CAPTURE_ATTRIBUTE] as string) as { output: any };
+    expect(output.choices[0].logprobs.content.map((e: any) => e.token)).toEqual(['Par', 'is.']);
+    expect(output.choices[0].content_filter_results.hate.filtered).toBe(false);
+    expect(output.usage.prompt_tokens_details.cached_tokens).toBe(0);
+  });
+
   it('captures a long answer made of many one-token chunks', async () => {
+    // Proves per-chunk padding (obfuscation, fingerprint, tier) is not counted toward the 1 MB memory bound:
+    // 8000 chunks are ~2 MB of chunk JSON but only 40 KB of content. Chunks are fed straight to the wrapper,
+    // so the test measures the assembler, not the OpenAI SDK's SSE parsing (covered by the tests above).
     const events: any[] = [chunk({ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }, { obfuscation: 'Ab3', usage: null })];
     for (let i = 0; i < 8000; i++) events.push(chunk({ index: 0, delta: { content: ' word' }, logprobs: null, finish_reason: null }, { obfuscation: 'xY9z', usage: null, system_fingerprint: 'fp_7f6be3efb0', service_tier: 'default' }));
     events.push(chunk({ index: 0, delta: {}, finish_reason: 'stop' }));
-    const stream = await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true });
+    const fake = { chat: { completions: { create: async () => (async function* () { yield* events; })() } } };
+    const stream = await (wrapOpenAI(fake as any) as any).chat.completions.create({ model: 'gpt-test', messages, stream: true });
     const { output } = readProviderCapture(await captured(stream)) as { output: any };
     expect(output.choices[0].message.content).toHaveLength(8000 * 5);
   });
@@ -264,11 +301,6 @@ describe('openai chat streamed capture: review round 2 (F-040)', () => {
   it('records nothing when a tool-call delta carries an unknown key', async () => {
     const events = [chunk({ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'f', arguments: '{}' }, extra_content: { google: {} } }] }, finish_reason: 'tool_calls' }), answer[2]];
     expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true }))).toBeUndefined();
-  });
-
-  it('records nothing when fewer choices streamed than n requested', async () => {
-    const events = [chunk({ index: 0, delta: { role: 'assistant', content: 'A' }, finish_reason: 'stop' }), answer[2]];
-    expect(await captured(await client(events).chat.completions.create({ model: 'gpt-test', messages, stream: true, n: 2 }))).toBeUndefined();
   });
 
   it('stops reading chunks for capture once the size bound trips', async () => {
