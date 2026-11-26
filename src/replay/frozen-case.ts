@@ -27,6 +27,11 @@ function complete(span: Record<string, unknown>, attributes: Record<string, unkn
     (span.error == null || span.error === '') && (span.error_message == null || span.error_message === '');
 }
 
+/** Stored spans carry the streaming marker as a boolean attribute, a stringified attribute, or a 0/1 column. */
+function isStreamingFlag(value: unknown): boolean {
+  return value === true || value === 1 || value === 'true' || value === '1';
+}
+
 /** Only verified raw provider captures can restore model SDK responses; normalized text cannot. */
 export function replayRecordingFromCase(value: unknown): { recording: ReplayRecording; skippedTools: number } {
   const item = object.parse(value);
@@ -43,8 +48,13 @@ export function replayRecordingFromCase(value: unknown): { recording: ReplayReco
       try {
         const attributes = record(span.attributes);
         if (!complete(span, attributes)) continue;
+        // A streamed call's capture is grading evidence only. Its request can match a later non-streamed
+        // call (a Google request carries no stream flag), so it must never be served as a replay (F-040).
+        if (isStreamingFlag(attributes['neatlogs.llm.is_streaming']) || isStreamingFlag(span.is_streaming)) continue;
         const spanId = z.string().min(1).max(200).parse(span.span_id);
-        entries.push({ spanId, kind: 'model', ...readProviderCapture(attributes[MODEL_CAPTURE_ATTRIBUTE]) });
+        const { stream, ...capture } = readProviderCapture(attributes[MODEL_CAPTURE_ATTRIBUTE]);
+        if (stream) continue;
+        entries.push({ spanId, kind: 'model', ...capture });
       } catch { /* Unsupported model evidence stays live. */ }
       continue;
     }

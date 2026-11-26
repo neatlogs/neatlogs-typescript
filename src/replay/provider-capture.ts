@@ -13,6 +13,9 @@ const recording = z.object({
   input: z.json(),
   output: z.json(),
   digest: z.string().regex(/^[a-f0-9]{64}$/),
+  // F-040: present only on captures assembled from a stream. It is inside the digest, and readers that
+  // predate it use a strict schema, so they reject a streamed capture instead of replaying it.
+  stream: z.literal(true).optional(),
 }).strict();
 
 function safeBody(value: unknown, response = false): DatasetJson {
@@ -23,8 +26,9 @@ function safeBody(value: unknown, response = false): DatasetJson {
   return body;
 }
 
-function digest(operation: ReplayProviderOperation, input: DatasetJson, output: DatasetJson) {
-  return createHash('sha256').update(JSON.stringify({ version: 1, operation, input, output })).digest('hex');
+function digest(operation: ReplayProviderOperation, input: DatasetJson, output: DatasetJson, stream = false) {
+  const signed = stream ? { version: 1, operation, input, output, stream: true } : { version: 1, operation, input, output };
+  return createHash('sha256').update(JSON.stringify(signed)).digest('hex');
 }
 
 /** Snapshot the request before caller/provider mutation; absence is an honest cache miss. */
@@ -33,19 +37,25 @@ export function prepareProviderCapture(
   operation: ReplayProviderOperation,
   request: unknown,
   supported: boolean,
-): (response: unknown) => void {
-  if (!supported || !span.isRecording()) return () => undefined;
+  options: { stream?: boolean } = {},
+): ((response: unknown) => void) | undefined {
+  // Undefined means capture cannot happen, so callers can skip any work done only for it.
+  if (!supported || !span.isRecording()) return undefined;
   let input: DatasetJson;
   try {
     input = safeBody(request);
   } catch {
-    return () => undefined;
+    return undefined;
   }
+  const stream = options.stream === true;
   return response => {
     try {
       const output = safeBody(response, true);
       if (!isCompleteProviderResponse(operation, output)) return;
-      const encoded = JSON.stringify({ version: 1, operation, input, output, digest: digest(operation, input, output) });
+      const signed = digest(operation, input, output, stream);
+      const encoded = JSON.stringify(stream
+        ? { version: 1, operation, input, output, digest: signed, stream: true }
+        : { version: 1, operation, input, output, digest: signed });
       if (Buffer.byteLength(encoded) <= MAX_BYTES) span.setAttribute(MODEL_CAPTURE_ATTRIBUTE, encoded);
     } catch {
       // Telemetry must not alter the provider result or failure.
@@ -58,6 +68,7 @@ export function readProviderCapture(value: unknown) {
   const saved = recording.parse(JSON.parse(value));
   const input = safeBody(saved.input);
   const output = safeBody(saved.output);
-  if (digest(saved.operation, input, output) !== saved.digest || !isCompleteProviderResponse(saved.operation, output)) throw new Error('Provider capture changed or is incomplete.');
-  return { name: saved.operation, input, output };
+  const stream = saved.stream === true;
+  if (digest(saved.operation, input, output, stream) !== saved.digest || !isCompleteProviderResponse(saved.operation, output)) throw new Error('Provider capture changed or is incomplete.');
+  return { name: saved.operation, input, output, stream };
 }
