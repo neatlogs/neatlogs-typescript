@@ -98,6 +98,32 @@ describe('trace()', () => {
     expect(testSpan).toBeDefined();
   });
 
+  it('captures the source location of the inline trace caller', async () => {
+    async function runWorkflow() {
+      const line = Number(new Error().stack?.match(/trace\.test\.ts:(\d+):/)?.[1]);
+      await trace({ name: 'with-location' }, async () => {});
+      return line + 1;
+    }
+    const line = await runWorkflow();
+    const { attributes } = exporter.getFinishedSpans().find((s) => s.name === 'with-location')!;
+    expect(attributes['neatlogs.code.file.path']).toMatch(/tests\/unit\/trace\.test\.ts$/);
+    expect(attributes['neatlogs.code.line.number']).toBe(line);
+    expect(attributes['neatlogs.code.function.name']).toBe('runWorkflow');
+    expect(attributes['neatlogs.code.namespace']).toMatch(/tests\/unit\/trace\.test$/);
+  });
+
+  it('preserves explicit source and custom attributes', async () => {
+    const explicit = {
+      'neatlogs.code.file.path': 'mapped/workflow.ts',
+      'neatlogs.code.line.number': 42,
+      'test.custom': 'kept',
+    };
+    await trace({ name: 'explicit-location', attributes: explicit }, async () => {});
+    const { attributes } = exporter.getFinishedSpans().find((s) => s.name === 'explicit-location')!;
+    expect(attributes).toMatchObject(explicit);
+    expect(attributes['neatlogs.code.namespace']).toBeDefined();
+  });
+
   it('should mark only LLM trace wrappers internal by default', async () => {
     await trace({ name: 'chain-test', kind: 'CHAIN' }, async () => {});
     await trace({ name: 'embedding-test', kind: 'EMBEDDING' }, async () => {});

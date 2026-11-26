@@ -21,6 +21,9 @@ import {
   SpanStatusCode,
   type Span,
 } from '@opentelemetry/api';
+import { homedir } from 'node:os';
+import { isAbsolute, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PromptContext, UserPromptContext, PromptTemplate, UserPromptTemplate } from '../prompt/template.js';
 import { registerMask } from './mask.js';
 import { applyEndUserAttributes } from './end-user.js';
@@ -119,6 +122,33 @@ function assertNoHttpSpanKind(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function captureTraceCodeLocation(): Record<string, string | number> {
+  // Limit the stack to frames above the public API. A host can customize
+  // Error.prepareStackTrace, so source capture must remain best-effort.
+  try {
+    const holder: { stack?: string } = {};
+    Error.captureStackTrace(holder, trace);
+    const frame = typeof holder.stack === 'string' ? holder.stack.split('\n')[1] : undefined;
+    const source = frame?.match(/^\s*at (?:(.*?) \()?((?:file:\/\/|\/|[A-Za-z]:[\\/]).*):(\d+):\d+\)?$/);
+    if (!source) return {};
+
+    const [, functionName, location, line] = source;
+    const filename = location.startsWith('file:') ? fileURLToPath(location) : location;
+    const fromHome = relative(homedir(), filename);
+    const file = fromHome && fromHome !== '..' && !fromHome.startsWith('..' + sep) && !isAbsolute(fromHome)
+      ? fromHome : filename;
+    const path = file.split(sep).join('/');
+    return {
+      'neatlogs.code.file.path': path,
+      'neatlogs.code.line.number': Number(line),
+      'neatlogs.code.namespace': path.replace(/\.[^./]+$/, ''),
+      ...(functionName ? { 'neatlogs.code.function.name': functionName } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
 
 /**
  * Set standard and extra attributes on a span.
@@ -233,6 +263,7 @@ export function setTraceOutput(value: unknown): void {
  *
  * Creates an OTel span, optionally sets prompt template/variable context,
  * and executes the provided callback within the span.
+ * Records the call site's source location when the runtime supplies it.
  *
  * **Session-Aware Trace Creation:**
  * - If a session id is resolved (per-call `sessionId` or the request-scoped
@@ -388,7 +419,10 @@ export async function trace<T>(
   // Collect extra attributes (non-standard option keys)
   // ---------------------------------------------------------------------------
 
-  const extraAttributes: Record<string, any> = { ...(explicitAttributes ?? {}) };
+  const extraAttributes: Record<string, any> = {
+    ...captureTraceCodeLocation(),
+    ...explicitAttributes,
+  };
   for (const [key, value] of Object.entries(extraOptions)) {
     if (!KNOWN_OPTION_KEYS.has(key)) {
       extraAttributes[key] = value;
