@@ -142,7 +142,6 @@ function captureTraceCodeLocation(): Record<string, string | number> {
     return {
       'neatlogs.code.file.path': path,
       'neatlogs.code.line.number': Number(line),
-      'neatlogs.code.namespace': path.replace(/\.[^./]+$/, ''),
       ...(functionName ? { 'neatlogs.code.function.name': functionName } : {}),
     };
   } catch {
@@ -427,6 +426,10 @@ export async function trace<T>(
     if (!KNOWN_OPTION_KEYS.has(key)) {
       extraAttributes[key] = value;
     }
+  }
+  const sourceFile = extraAttributes['neatlogs.code.file.path'];
+  if (!('neatlogs.code.namespace' in extraAttributes) && typeof sourceFile === 'string' && sourceFile) {
+    extraAttributes['neatlogs.code.namespace'] = sourceFile.replace(/\.[^./\\]+$/, '');
   }
 
   // End-user belongs to the trace root only. This trace() call is a root when it

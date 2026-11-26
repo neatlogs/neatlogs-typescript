@@ -121,7 +121,17 @@ describe('trace()', () => {
     await trace({ name: 'explicit-location', attributes: explicit }, async () => {});
     const { attributes } = exporter.getFinishedSpans().find((s) => s.name === 'explicit-location')!;
     expect(attributes).toMatchObject(explicit);
-    expect(attributes['neatlogs.code.namespace']).toBeDefined();
+    expect(attributes['neatlogs.code.namespace']).toBe('mapped/workflow');
+  });
+
+  it('preserves an explicit namespace with a file override', async () => {
+    const explicit = {
+      'neatlogs.code.file.path': 'mapped/workflow.ts',
+      'neatlogs.code.namespace': 'published.workflow',
+    };
+    await trace({ name: 'explicit-namespace', attributes: explicit }, async () => {});
+    const { attributes } = exporter.getFinishedSpans().find((s) => s.name === 'explicit-namespace')!;
+    expect(attributes).toMatchObject(explicit);
   });
 
   it('should mark only LLM trace wrappers internal by default', async () => {
