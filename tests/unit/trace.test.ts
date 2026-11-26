@@ -134,6 +134,21 @@ describe('trace()', () => {
     expect(attributes).toMatchObject(explicit);
   });
 
+  it('preserves caller attributes under the OpenTelemetry span limit', async () => {
+    const limitedExporter = new InMemorySpanExporter();
+    const limitedProvider = new NodeTracerProvider({ spanLimits: { attributeCountLimit: 2 } });
+    limitedProvider.addSpanProcessor(new SimpleSpanProcessor(limitedExporter));
+    _setNeatlogsProvider(limitedProvider);
+    try {
+      await trace({ name: 'limited', kind: 'WORKFLOW', attributes: { 'test.custom': 'kept' } }, () => {});
+      const { attributes } = limitedExporter.getFinishedSpans().find((s) => s.name === 'limited')!;
+      expect(attributes).toEqual({ 'openinference.span.kind': 'WORKFLOW', 'test.custom': 'kept' });
+    } finally {
+      _setNeatlogsProvider(provider);
+      await limitedProvider.shutdown();
+    }
+  });
+
   it('should mark only LLM trace wrappers internal by default', async () => {
     await trace({ name: 'chain-test', kind: 'CHAIN' }, async () => {});
     await trace({ name: 'embedding-test', kind: 'EMBEDDING' }, async () => {});

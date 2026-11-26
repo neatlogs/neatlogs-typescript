@@ -418,12 +418,15 @@ export async function trace<T>(
   // Collect extra attributes (non-standard option keys)
   // ---------------------------------------------------------------------------
 
-  const extraAttributes: Record<string, any> = {
-    ...captureTraceCodeLocation(),
-    ...explicitAttributes,
-  };
+  const extraAttributes: Record<string, any> = { ...explicitAttributes };
   for (const [key, value] of Object.entries(extraOptions)) {
     if (!KNOWN_OPTION_KEYS.has(key)) {
+      extraAttributes[key] = value;
+    }
+  }
+  // Caller attributes take priority when the span's attribute budget is limited.
+  for (const [key, value] of Object.entries(captureTraceCodeLocation())) {
+    if (!(key in extraAttributes)) {
       extraAttributes[key] = value;
     }
   }
