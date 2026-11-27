@@ -42,10 +42,14 @@ let startedCases: Record<string, unknown>[] = [];
 let runState: string;
 let legacyApp: boolean;
 let deadlineAt: string, comparisonLatency: number, traceNotReady: boolean, firstTraceLatency: number;
+// When set, trace uploads are accepted only for ingested traces; a missing one becomes ingested after lateTraceRetries rejections.
+let ingested: Set<string> | null, lateTraceRetries: number;
+let uploadTimes: number[] = [];
+const startedReplies = new Map<string, unknown>();
 const clients: Client[] = [];
 beforeEach(async () => {
   gateLatency = 0; disconnectGate = 0;
-  deadlineAt = '2030-01-01T00:00:00Z'; comparisonLatency = 0; traceNotReady = false; firstTraceLatency = 0;
+  deadlineAt = '2030-01-01T00:00:00Z'; comparisonLatency = 0; traceNotReady = false; firstTraceLatency = 0; ingested = null; lateTraceRetries = Infinity; uploadTimes = []; startedReplies.clear();
   caseInput = 'hello'; rejectEvidence = false; evidenceRejectionCode = 'GRADING_EVIDENCE_LIMIT'; failRejectedFailure = false; disconnectUpload = 0; disconnectAfterAcceptance = false; uploadKeys = []; startedCases = []; runState = 'running'; legacyApp = false;
   comparisonRows = []; exported = []; evidenceAtUpload = [];
   registrations = []; uploads = []; paths = []; catalogHeaders = []; manyCases = []; datasetPages = []; completionKeys = []; gateKeys = []; comparisonsUntilReady = 0; handoffReady = false; failUpload = false; failCompletionCount = 0; failGateCount = 0; verdict = 'pass'; directory = mkdtempSync(join(tmpdir(), 'neatlogs-eval-'));
@@ -84,11 +88,23 @@ beforeEach(async () => {
       expect(request.headers.authorization).toBe('Bearer task-token'); expect(request.headers['x-project-id']).toBe(projectId); expect(request.headers['idempotency-key']).toBeTruthy();
       if (path.endsWith('/complete')) { completionKeys.push(String(request.headers['idempotency-key'])); if (failCompletionCount > 0) { status = 503; failCompletionCount--; } else runState = 'completed'; data = { runId, state: 'completed', deadlineAt, itemCount: 2, completedCount: 2, failedCount: 0, pendingCount: 0, gradingHandoffState: handoffReady ? 'ready' : 'dispatched' }; }
       else if (path.endsWith('/outputs/started')) {
+        // Like the App, a repeated idempotency key replays the stored reply without rechecking the run.
+        const startKey = String(request.headers['idempotency-key']);
         startedCases.push(body);
-        data = { itemId: randomUUID(), startedAt: body.startedAt };
+        if (startedReplies.has(startKey)) data = startedReplies.get(startKey);
+        else if (['completed', 'partial', 'failed', 'cancelled', 'timed_out'].includes(runState)) { status = 409; code = 'RUN_CLOSED'; }
+        else { data = { itemId: randomUUID(), startedAt: body.startedAt }; startedReplies.set(startKey, data); }
       }
       else if (path.endsWith('/outputs')) {
-        uploadKeys.push(String(request.headers['idempotency-key']));
+        uploadKeys.push(String(request.headers['idempotency-key'])); uploadTimes.push(Date.now());
+        if (ingested && body.traceId && !ingested.has(body.traceId)) {
+          if (lateTraceRetries-- <= 0) ingested.add(body.traceId);
+          else {
+            response.writeHead(409, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify({ success: false, code: 'TRACE_NOT_READY' }));
+            return;
+          }
+        }
         if (traceNotReady && body.traceId) {
           if (firstTraceLatency) {
             const latency = firstTraceLatency; firstTraceLatency = 0;
@@ -435,6 +451,182 @@ describe('task evaluation over the public HTTP contract', () => {
     expect(uploadKeys[2]).not.toBe(uploadKeys[0]);
     expect(Date.now()).toBeLessThan(Date.parse(deadlineAt));
   });
+  // F-043: the first attempt saves a trace id whose spans never reach ingest.
+  // Without Local A/B identity the App is not asked for case-output details, so no start operation is saved.
+  async function runWithLostTrace({ startProtocol = true } = {}) {
+    const traces = ingested = new Set<string>();
+    let ingestDown = true;
+    const client = new Client({ apiKey: 'test-ingest', workflowName: 'eval-test', captureLogs: false,
+      spanExporter: {
+        export(spans, callback) {
+          if (ingestDown) { callback({ code: 1 }); return; }
+          for (const item of spans) traces.add(item.spanContext().traceId);
+          callback({ code: 0 });
+        },
+        async shutdown() {}, async forceFlush() {},
+      },
+    });
+    clients.push(client);
+    const task = vi.fn(() => 'answer');
+    const local = { experimentId: randomUUID(), roundId: randomUUID(), variant: 'A' as const, attempt: 1 };
+    const options = { grading, dataset: datasetId!, label: 'lost trace', ...(startProtocol ? { local } : {}), traceEvidence: true, statePath: join(directory, 'lost-trace.json'),
+      api: { projectId: projectId!, token: 'task-token', baseUrl }, task };
+    await expect(client.activate(() => runEval(options))).rejects.toThrow(/Could not export the task trace/);
+    const saved = JSON.parse(readFileSync(options.statePath, 'utf8'));
+    const lostTraceId: string = saved.slots[`${caseId}:1`].body.traceId;
+    expect(lostTraceId).toMatch(/^[a-f0-9]{32}$/);
+    expect(traces.has(lostTraceId)).toBe(false);
+    expect(task).toHaveBeenCalledOnce();
+    if (startProtocol) expect(saved.slots[`${caseId}:1`]).toMatchObject({ executing: false, start: { startedAt: expect.any(String) } });
+    else expect(saved.slots[`${caseId}:1`]).not.toHaveProperty('start');
+    expect(startedCases).toHaveLength(startProtocol ? 1 : 0);
+    ingestDown = false;
+    // Keep the bounded trace check short in tests while recording the wait the SDK asked for.
+    const waits: number[] = [];
+    const hooks: { onTraceNotReady?: () => void } = {};
+    const upload = LocalRunApi.prototype.upload;
+    const spy = vi.spyOn(LocalRunApi.prototype, 'upload').mockImplementation(async function (this: LocalRunApi, id, input, uploadOptions = {}) {
+      waits.push(uploadOptions.waitMillis ?? 0);
+      // Long enough for one retry with its reserved request time.
+      try { return await upload.call(this, id, input, { ...uploadOptions, waitMillis: Math.min(uploadOptions.waitMillis ?? 1, 6500) }); }
+      catch (error) { hooks.onTraceNotReady?.(); throw error; }
+    });
+    const resume = () => client.activate(() => runEval({ ...options, resume: true }));
+    return { options, saved, task, lostTraceId, traces, waits, hooks, resume, restore: () => spy.mockRestore() };
+  }
+  it('re-runs a resumed case whose saved trace never reached ingest and uploads the new trace', async () => {
+    const lost = await runWithLostTrace();
+    try {
+      const result = await lost.resume();
+      expect(result.exitCode).toBe(0);
+      expect(lost.task).toHaveBeenCalledTimes(2);
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0]).toMatchObject({ caseId, trial: 1, traceId: expect.stringMatching(/^[a-f0-9]{32}$/) });
+      expect(uploads[0]!.traceId).not.toBe(lost.lostTraceId);
+      expect(lost.traces.has(String(uploads[0]!.traceId))).toBe(true);
+      // The restarted case resumes the same server attempt, and the new trace uses a new upload key.
+      expect(startedCases).toHaveLength(2);
+      expect(startedReplies.size).toBe(2);
+      expect(new Set(uploadKeys).size).toBe(2);
+      expect(lost.waits.length).toBeGreaterThan(0);
+      for (const wait of lost.waits) expect(wait).toBeLessThanOrEqual(60_000);
+      expect(completionKeys).toHaveLength(1);
+      const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
+      expect(saved.slots[`${caseId}:1`]).toMatchObject({ accepted: true, executing: false, rerun: true, body: { traceId: uploads[0]!.traceId } });
+    } finally { lost.restore(); }
+  }, 15_000);
+  it('does not re-run a resumed case whose output was already accepted', async () => {
+    const lost = await runWithLostTrace();
+    try {
+      lost.saved.slots[`${caseId}:1`].accepted = true;
+      writeFileSync(lost.options.statePath, JSON.stringify(lost.saved));
+      const result = await lost.resume();
+      expect(result.exitCode).toBe(0);
+      expect(lost.task).toHaveBeenCalledOnce();
+      expect(uploadKeys).toEqual([]);
+      expect(lost.waits).toEqual([]);
+      expect(startedCases).toHaveLength(1);
+      expect(completionKeys).toHaveLength(1);
+    } finally { lost.restore(); }
+  });
+  it('uploads a saved trace that arrives late within the bounded check without re-running the case', async () => {
+    const lost = await runWithLostTrace();
+    lateTraceRetries = 1;
+    try {
+      const result = await lost.resume();
+      expect(result.exitCode).toBe(0);
+      expect(lost.task).toHaveBeenCalledOnce();
+      expect(uploads).toEqual([expect.objectContaining({ caseId, trial: 1, traceId: lost.lostTraceId })]);
+      expect(uploadKeys).toHaveLength(2);
+      expect(uploadKeys[1]).toBe(uploadKeys[0]);
+      expect(startedCases).toHaveLength(1);
+    } finally { lost.restore(); }
+  });
+  it('says the trace is missing when the re-run trace also never reaches ingest, including after a fresh resume', async () => {
+    const lost = await runWithLostTrace();
+    try {
+      lost.traces.add = () => lost.traces;
+      await expect(lost.resume()).rejects.toThrow(/did not reach Neatlogs after the case was re-run/);
+      expect(lost.task).toHaveBeenCalledTimes(2);
+      const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
+      expect(saved.slots[`${caseId}:1`]).toMatchObject({ rerun: true, executing: false, body: { traceId: expect.any(String) } });
+      const replacementKey = saved.slots[`${caseId}:1`].key;
+      // A new invocation reads the saved re-run budget and only checks the replacement trace again.
+      await expect(lost.resume()).rejects.toThrow(/did not reach Neatlogs after the case was re-run/);
+      expect(lost.task).toHaveBeenCalledTimes(2);
+      expect(uploadKeys.at(-1)).toBe(replacementKey);
+      expect(uploads).toEqual([]);
+      expect(completionKeys).toEqual([]);
+    } finally { lost.restore(); }
+  }, 20_000);
+  it('does not re-run the case when the run is cancelled while waiting for the original trace', async () => {
+    const lost = await runWithLostTrace();
+    lost.hooks.onTraceNotReady = () => { runState = 'cancelled'; };
+    try {
+      const result = await lost.resume();
+      expect(result.runState).toBe('cancelled');
+      expect(lost.task).toHaveBeenCalledOnce();
+      expect(uploads).toEqual([]);
+      expect(completionKeys).toEqual([]);
+      // The replacement start used a fresh key, so the App rechecked the run instead of replaying the first start.
+      expect(startedCases).toHaveLength(2);
+      expect(startedReplies.size).toBe(1);
+      const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
+      expect(saved.slots[`${caseId}:1`]).toMatchObject({ rerun: true, executing: false });
+      expect(saved.slots[`${caseId}:1`]).not.toHaveProperty('body');
+    } finally { lost.restore(); }
+  }, 15_000);
+  it('re-runs a lost trace once without a start operation after confirming the run is open', async () => {
+    const lost = await runWithLostTrace({ startProtocol: false });
+    try {
+      const result = await lost.resume();
+      expect(result.exitCode).toBe(0);
+      expect(lost.task).toHaveBeenCalledTimes(2);
+      expect(startedCases).toEqual([]);
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0]!.traceId).not.toBe(lost.lostTraceId);
+      const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
+      expect(saved.slots[`${caseId}:1`]).toMatchObject({ accepted: true, rerun: true, body: { traceId: uploads[0]!.traceId } });
+    } finally { lost.restore(); }
+  }, 15_000);
+  it('keeps the saved trace and does not re-run without a start operation when the run is cancelled during polling', async () => {
+    const lost = await runWithLostTrace({ startProtocol: false });
+    lost.hooks.onTraceNotReady = () => { runState = 'cancelled'; };
+    try {
+      const result = await lost.resume();
+      expect(result.runState).toBe('cancelled');
+      expect(lost.task).toHaveBeenCalledOnce();
+      expect(uploads).toEqual([]);
+      expect(completionKeys).toEqual([]);
+      const saved = JSON.parse(readFileSync(lost.options.statePath, 'utf8'));
+      expect(saved.slots[`${caseId}:1`]).toEqual(lost.saved.slots[`${caseId}:1`]);
+    } finally { lost.restore(); }
+  }, 15_000);
+  it('resumes a saved replacement that stopped before the task ran again', async () => {
+    const lost = await runWithLostTrace({ startProtocol: false });
+    try {
+      // The state a re-run saves before executing: the budget is spent and the lost trace is cleared.
+      const { body: _body, ...pending } = lost.saved.slots[`${caseId}:1`];
+      lost.saved.slots[`${caseId}:1`] = { ...pending, key: randomUUID(), rerun: true };
+      writeFileSync(lost.options.statePath, JSON.stringify(lost.saved));
+      const result = await lost.resume();
+      expect(result.exitCode).toBe(0);
+      expect(lost.task).toHaveBeenCalledTimes(2);
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0]!.traceId).not.toBe(lost.lostTraceId);
+    } finally { lost.restore(); }
+  }, 15_000);
+  it.each([3000, 7000])('never starts a trace retry that cannot finish within a %i ms wait', async waitMillis => {
+    ingested = new Set();
+    const api = new LocalRunApi({ projectId: projectId!, token: 'task-token', baseUrl });
+    const deadline = Date.now() + waitMillis;
+    await expect(api.upload(runId!, { caseId: caseId!, trial: 1, traceId: 'a'.repeat(32) }, { key: randomUUID(), waitMillis }))
+      .rejects.toMatchObject({ code: 'TRACE_NOT_READY' });
+    expect(Date.now()).toBeLessThan(deadline);
+    expect(uploadTimes).toHaveLength(waitMillis < 6000 ? 1 : 2);
+    for (const time of uploadTimes.slice(1)) expect(deadline - time).toBeGreaterThanOrEqual(5000);
+    expect(new Set(uploadKeys).size).toBe(1);
+  }, 15_000);
   it.each([false, true])('returns incomplete after pending grading expires with ordinary network latency, handoff=%s', async waitingHandoff => {
     handoffReady = waitingHandoff;
     comparisonsUntilReady = 100;

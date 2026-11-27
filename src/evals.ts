@@ -47,12 +47,14 @@ export interface RunEvalOptions {
   caseIds?: string[];
 }
 export interface EvalResult { runId: string; runState: string; comparison: Awaited<ReturnType<LocalRunApi['comparison']>>; gate: Awaited<ReturnType<LocalRunApi['gate']>> | null; errors: number; exitCode: 0 | 1 | 4 }
-const slotSchema = z.object({ key: z.string().uuid(), executing: z.boolean(), accepted: z.boolean().optional(), start: z.object({ key: z.string().uuid(), startedAt: z.string().datetime() }).strict().optional(), body: z.object({ caseId: z.string().uuid(), trial: z.number().int(), traceId: z.string().regex(/^[a-f0-9]{32}$/).optional(), startedAt: z.string().datetime().optional(), endedAt: z.string().datetime().optional(), output: z.json().optional(), metrics: z.record(z.string(), z.number()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() }).strict().optional(),
+const slotSchema = z.object({ key: z.string().uuid(), executing: z.boolean(), accepted: z.boolean().optional(), rerun: z.boolean().optional(), start: z.object({ key: z.string().uuid(), startedAt: z.string().datetime() }).strict().optional(), body: z.object({ caseId: z.string().uuid(), trial: z.number().int(), traceId: z.string().regex(/^[a-f0-9]{32}$/).optional(), startedAt: z.string().datetime().optional(), endedAt: z.string().datetime().optional(), output: z.json().optional(), metrics: z.record(z.string(), z.number()).optional(), error: z.object({ code: z.string(), message: z.string() }).optional() }).strict().optional(),
   rejection: z.object({ key: z.string().uuid(), error: z.object({ code: z.literal('GRADING_EVIDENCE_LIMIT'), message: z.string().max(1000) }).strict() }).strict().optional() }).strict();
 const dispatchSlotSchema = z.object({ batchId: z.string().uuid(), key: z.string().uuid(), accepted: z.boolean() }).strict();
 const stateSchema = z.object({ projectId: z.string().uuid(), request: z.record(z.string(), z.json()), taskDigest: z.string().regex(/^[a-f0-9]{64}$/), registrationKey: z.string().uuid(), runId: z.string().uuid().nullable(), deadlineAt: z.string().datetime().optional(), traceEvidence: z.boolean().optional(), slots: z.record(z.string(), slotSchema),
   completionKey: z.string().uuid().optional(), gateKey: z.string().uuid().optional(), gradingDispatch: z.object({ evaluationId: z.string().uuid(), recorded: dispatchSlotSchema, candidate: dispatchSlotSchema }).strict().optional() }).strict();
 type State = z.infer<typeof stateSchema>;
+/** How long a required trace may stay unavailable before it is treated as lost. */
+const TRACE_EVIDENCE_WAIT_MILLIS = 60_000;
 async function flushOptionalTrace(flush: () => Promise<boolean>, deadline: number): Promise<boolean> {
   const remaining = Math.min(10_000, deadline - Date.now());
   if (remaining <= 0) return false;
@@ -205,103 +207,129 @@ async function runEvalLocked(options: RunEvalOptions): Promise<EvalResult> {
       let slot = state.slots[key];
       if (slot?.accepted) continue;
       if (slot?.executing) throw new Error('Task execution may have started without a saved output. Inspect it before starting a new run.');
-      if (!slot?.body) {
-        if (slot && !slot.start) throw new Error('Saved output is missing. Inspect the private state file before resuming.');
-        if (Date.now() >= runDeadline) {
-          status = await runApi.status(runId);
-          break casesLoop;
-        }
-        slot ??= { key: randomUUID(), executing: false };
-        state.slots[key] = slot;
-        if (caseOutputDetails) {
-          const start = slot.start ??= { key: randomUUID(), startedAt: new Date().toISOString() };
-          save(options.statePath, state);
-          const accepted = await recoverRunRequest(requestTimeout => runApi.startOutput(
-            runId, { caseId: item.caseId, trial, startedAt: start.startedAt }, start.key, requestTimeout,
-          ), runDeadline, recovery);
-          if (accepted.terminal) { status = accepted.terminal; break casesLoop; }
-        }
-        slot.executing = true;
-        save(options.statePath, state);
-        const caseStartedAt = new Date().toISOString();
-        const params = options.params ?? {}, started = performance.now();
-        const context: EvalContext = { expected: item.expected, metadata: item.metadata, trial, params, metrics: {}, param: (name, fallback) => Object.hasOwn(params, name) ? params[name] : fallback };
-        let traceId: string | undefined;
-        try {
-          const output = json(await runWithFreshNeatlogsContext(() => trace({ name: options.label, kind: 'WORKFLOW', input: item.input, attributes: { 'neatlogs.origin': 'simulation', 'neatlogs.replay.run_id': runId, 'neatlogs.replay.case_id': item.caseId, 'neatlogs.replay.trial': trial } }, (span) => {
-            const spanContext = span.spanContext();
-            if ((spanContext.traceFlags & TraceFlags.SAMPLED) && /^[a-f0-9]{32}$/.test(spanContext.traceId) && !/^0+$/.test(spanContext.traceId)) {
-              traceId = spanContext.traceId;
-            }
-            return options.task(item.input, context);
-          })));
-          if (options.traceEvidence) {
-            if (!traceId) throw new Error('Initialize the Neatlogs SDK before running with trace evidence.');
-            slot.body = { caseId: item.caseId, trial, traceId };
-          } else slot.body = { caseId: item.caseId, trial, output, metrics: { ...context.metrics, latencyMs: performance.now() - started } };
-        } catch (error) { slot.body = { caseId: item.caseId, trial, error: { code: error instanceof Error ? error.name.slice(0, 100) : 'TASK_ERROR', message: (error instanceof Error ? error.message : String(error)).slice(0, 1000) } }; }
-        if (caseOutputDetails) {
-          const endedAt = new Date().toISOString();
-          slot.body = { ...slot.body, startedAt: caseStartedAt, endedAt: endedAt < caseStartedAt ? caseStartedAt : endedAt,
-            ...(traceId && flushTrace ? { traceId } : {}) };
-        }
-        slot.body = boundedOutput(slot.body);
-        slot.executing = false; save(options.statePath, state);
-      }
-      const body = boundedOutput(slot.body);
-      if (body !== slot.body) { slot.body = body; save(options.statePath, state); }
-      if (body.traceId && options.traceEvidence && !('output' in body || 'error' in body)) {
-        const traceId = body.traceId;
-        if (!flushTrace || !await flushTrace()) throw new Error('Could not export the task trace. Resume after checking the SDK connection.');
-        const uploaded = await recoverRunRequest(() => runApi.upload(runId, { ...body, traceId }, {
-          key: slot.key, waitMillis: Math.max(1, Math.min(300_000, runDeadline - Date.now())),
-        }), runDeadline, recovery);
-        if (uploaded.terminal) { status = uploaded.terminal; break casesLoop; }
-      } else {
-        const output = slot;
-        // Ambiguous writes keep their original body/key while reconciling.
-        const traceDeadline = Math.min(runDeadline - 5000, Date.now() + 60_000);
-        const upload = () => {
-          const value = output.body!;
-          if (!output.rejection) return value;
-          const { output: _output, metrics: _metrics, ...execution } = value;
-          return { ...execution, error: output.rejection.error };
-        };
-        const deliver = () => recoverRunRequest(requestTimeout => {
-          const value = upload();
-          const evidenceRemaining = traceDeadline - Date.now();
-          const timeout = value.traceId && evidenceRemaining > 0 ? Math.min(requestTimeout, evidenceRemaining) : requestTimeout;
-          return runApi.taskOutput(runId, value, output.rejection?.key ?? output.key, timeout);
-        }, runDeadline, recovery);
-        const withoutTrace = () => {
-          const { traceId: _traceId, ...unlinked } = output.body!;
-          output.body = unlinked;
-          if (output.rejection) output.rejection.key = randomUUID(); else output.key = randomUUID();
-          save(options.statePath, state);
-        };
-        // Optional evidence must leave time to deliver the computed value.
-        if (body.traceId && flushTrace && !await flushOptionalTrace(flushTrace, traceDeadline)) withoutTrace();
-        for (;;) {
-          if (output.body?.traceId && Date.now() >= traceDeadline) withoutTrace();
-          try {
-            const uploaded = await deliver();
-            if (uploaded.terminal) { status = uploaded.terminal; break casesLoop; }
-            break;
-          } catch (error) {
-            if (!(error instanceof LocalRunApiError)) throw error;
-            if (output.body?.traceId && error.code === 'TRACE_NOT_READY' && Date.now() < traceDeadline) {
-              await delay(Math.min(1000, traceDeadline - Date.now()));
-              continue;
-            }
-            if (output.body?.traceId && (error.code === 'TRACE_NOT_READY' || error.code === 'INVALID_TRACE_IDENTITY')) {
-              withoutTrace();
-              continue;
-            }
-            if (output.rejection || !('output' in body) || error.status !== 413 || error.code !== 'GRADING_EVIDENCE_LIMIT') throw error;
-            output.rejection = { key: randomUUID(), error: { code: 'GRADING_EVIDENCE_LIMIT', message: 'The answer exceeds the combined grading evidence limit. No output was truncated or task rerun. Use a smaller case for a new run.' } };
+      if (slot && !slot.body && !slot.start && !slot.rerun) throw new Error('Saved output is missing. Inspect the private state file before resuming.');
+      // A trace that never reaches ingest cannot be uploaded; the case is re-run once under the same server attempt.
+      for (;;) {
+        if (!slot?.body) {
+          if (Date.now() >= runDeadline) {
+            status = await runApi.status(runId);
+            break casesLoop;
+          }
+          slot ??= { key: randomUUID(), executing: false };
+          state.slots[key] = slot;
+          if (caseOutputDetails) {
+            const start = slot.start ??= { key: randomUUID(), startedAt: new Date().toISOString() };
             save(options.statePath, state);
+            const accepted = await recoverRunRequest(requestTimeout => runApi.startOutput(
+              runId, { caseId: item.caseId, trial, startedAt: start.startedAt }, start.key, requestTimeout,
+            ), runDeadline, recovery);
+            if (accepted.terminal) { status = accepted.terminal; break casesLoop; }
+          }
+          slot.executing = true;
+          save(options.statePath, state);
+          const caseStartedAt = new Date().toISOString();
+          const params = options.params ?? {}, started = performance.now();
+          const context: EvalContext = { expected: item.expected, metadata: item.metadata, trial, params, metrics: {}, param: (name, fallback) => Object.hasOwn(params, name) ? params[name] : fallback };
+          let traceId: string | undefined;
+          try {
+            const output = json(await runWithFreshNeatlogsContext(() => trace({ name: options.label, kind: 'WORKFLOW', input: item.input, attributes: { 'neatlogs.origin': 'simulation', 'neatlogs.replay.run_id': runId, 'neatlogs.replay.case_id': item.caseId, 'neatlogs.replay.trial': trial } }, (span) => {
+              const spanContext = span.spanContext();
+              if ((spanContext.traceFlags & TraceFlags.SAMPLED) && /^[a-f0-9]{32}$/.test(spanContext.traceId) && !/^0+$/.test(spanContext.traceId)) {
+                traceId = spanContext.traceId;
+              }
+              return options.task(item.input, context);
+            })));
+            if (options.traceEvidence) {
+              if (!traceId) throw new Error('Initialize the Neatlogs SDK before running with trace evidence.');
+              slot.body = { caseId: item.caseId, trial, traceId };
+            } else slot.body = { caseId: item.caseId, trial, output, metrics: { ...context.metrics, latencyMs: performance.now() - started } };
+          } catch (error) { slot.body = { caseId: item.caseId, trial, error: { code: error instanceof Error ? error.name.slice(0, 100) : 'TASK_ERROR', message: (error instanceof Error ? error.message : String(error)).slice(0, 1000) } }; }
+          if (caseOutputDetails) {
+            const endedAt = new Date().toISOString();
+            slot.body = { ...slot.body, startedAt: caseStartedAt, endedAt: endedAt < caseStartedAt ? caseStartedAt : endedAt,
+              ...(traceId && flushTrace ? { traceId } : {}) };
+          }
+          slot.body = boundedOutput(slot.body);
+          slot.executing = false; save(options.statePath, state);
+        }
+        const body = boundedOutput(slot.body);
+        if (body !== slot.body) { slot.body = body; save(options.statePath, state); }
+        if (body.traceId && options.traceEvidence && !('output' in body || 'error' in body)) {
+          const traceId = body.traceId;
+          if (!flushTrace || !await flushTrace()) throw new Error('Could not export the task trace. Resume after checking the SDK connection.');
+          const traced = slot, runRemaining = runDeadline - Date.now();
+          try {
+            const uploaded = await recoverRunRequest(() => runApi.upload(runId, { ...body, traceId }, {
+              key: traced.key, waitMillis: Math.max(1, Math.min(TRACE_EVIDENCE_WAIT_MILLIS, runDeadline - Date.now())),
+            }), runDeadline, recovery);
+            if (uploaded.terminal) { status = uploaded.terminal; break casesLoop; }
+          } catch (error) {
+            if (!(error instanceof LocalRunApiError) || error.code !== 'TRACE_NOT_READY') throw error;
+            // The run deadline, not the trace check, ended polling: keep the saved upload for reconciliation.
+            if (runRemaining <= TRACE_EVIDENCE_WAIT_MILLIS) { status = await runApi.status(runId); break casesLoop; }
+            if (traced.rerun) throw new Error(`Trace ${traceId} did not reach Neatlogs after the case was re-run. Check the SDK ingest connection; resuming checks this trace again without re-running the task.`);
+            // The saved trace was lost. The one re-run is saved before the task runs again, and a fresh start
+            // operation makes the server confirm the attempt is still writable instead of replaying the first start.
+            // Without a start operation, the run status confirms it is still open; a closed run keeps the saved trace.
+            if (!traced.start) {
+              const current = (await recoverRunRequest(requestTimeout => runApi.status(runId, false, requestTimeout), runDeadline)).data;
+              if (!current) throw new Error('The run status could not be confirmed before re-running the case.');
+              if (isRunTerminal(current)) { status = current; break casesLoop; }
+            }
+            traced.rerun = true;
+            delete traced.body;
+            traced.key = randomUUID();
+            if (traced.start) traced.start = { key: randomUUID(), startedAt: new Date().toISOString() };
+            save(options.statePath, state);
+            continue;
+          }
+        } else {
+          const output = slot;
+          // Ambiguous writes keep their original body/key while reconciling.
+          const traceDeadline = Math.min(runDeadline - 5000, Date.now() + 60_000);
+          const upload = () => {
+            const value = output.body!;
+            if (!output.rejection) return value;
+            const { output: _output, metrics: _metrics, ...execution } = value;
+            return { ...execution, error: output.rejection.error };
+          };
+          const deliver = () => recoverRunRequest(requestTimeout => {
+            const value = upload();
+            const evidenceRemaining = traceDeadline - Date.now();
+            const timeout = value.traceId && evidenceRemaining > 0 ? Math.min(requestTimeout, evidenceRemaining) : requestTimeout;
+            return runApi.taskOutput(runId, value, output.rejection?.key ?? output.key, timeout);
+          }, runDeadline, recovery);
+          const withoutTrace = () => {
+            const { traceId: _traceId, ...unlinked } = output.body!;
+            output.body = unlinked;
+            if (output.rejection) output.rejection.key = randomUUID(); else output.key = randomUUID();
+            save(options.statePath, state);
+          };
+          // Optional evidence must leave time to deliver the computed value.
+          if (body.traceId && flushTrace && !await flushOptionalTrace(flushTrace, traceDeadline)) withoutTrace();
+          for (;;) {
+            if (output.body?.traceId && Date.now() >= traceDeadline) withoutTrace();
+            try {
+              const uploaded = await deliver();
+              if (uploaded.terminal) { status = uploaded.terminal; break casesLoop; }
+              break;
+            } catch (error) {
+              if (!(error instanceof LocalRunApiError)) throw error;
+              if (output.body?.traceId && error.code === 'TRACE_NOT_READY' && Date.now() < traceDeadline) {
+                await delay(Math.min(1000, traceDeadline - Date.now()));
+                continue;
+              }
+              if (output.body?.traceId && (error.code === 'TRACE_NOT_READY' || error.code === 'INVALID_TRACE_IDENTITY')) {
+                withoutTrace();
+                continue;
+              }
+              if (output.rejection || !('output' in body) || error.status !== 413 || error.code !== 'GRADING_EVIDENCE_LIMIT') throw error;
+              output.rejection = { key: randomUUID(), error: { code: 'GRADING_EVIDENCE_LIMIT', message: 'The answer exceeds the combined grading evidence limit. No output was truncated or task rerun. Use a smaller case for a new run.' } };
+              save(options.statePath, state);
+            }
           }
         }
+        break;
       }
       slot.accepted = true; save(options.statePath, state);
     }

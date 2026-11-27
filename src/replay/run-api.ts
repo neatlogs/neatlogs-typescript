@@ -41,6 +41,8 @@ async function responseJson(response: Response, limit = 64 * 1024): Promise<unkn
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } finally { await reader.cancel(); }
 }
+/** Time reserved for each TRACE_NOT_READY retry request. */
+const TRACE_RETRY_REQUEST_MILLIS = 5_000;
 export class LocalRunApi {
   private readonly origin: string;
   private readonly projectId: string;
@@ -158,9 +160,10 @@ export class LocalRunApi {
         if (receipt.runId !== id || receipt.traceId !== input.traceId) throw new LocalRunApiError('The upload receipt belongs to a different run or trace.');
         return receipt;
       } catch (error) {
-        const remaining = deadline - Date.now();
-        if (!(error instanceof LocalRunApiError) || error.status !== 409 || error.code !== 'TRACE_NOT_READY' || remaining <= 0) throw error;
-        await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 1000 * 2 ** Math.min(attempt, 2))));
+        const backoff = 1000 * 2 ** Math.min(attempt, 2);
+        // A retry must fit its backoff and a full request before the deadline; a starved request would read as an uncertain write.
+        if (!(error instanceof LocalRunApiError) || error.status !== 409 || error.code !== 'TRACE_NOT_READY' || deadline - Date.now() < backoff + TRACE_RETRY_REQUEST_MILLIS) throw error;
+        await new Promise(resolve => setTimeout(resolve, backoff));
       }
     }
   }
